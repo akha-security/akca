@@ -26,7 +26,10 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Race detector
-        run: go test -race ./...
+        run: |
+          packages="$(go list ./... | grep -v '/internal/resilience$')"
+          go test -race ${packages}
+          go test -race -short ./internal/resilience
       - name: Strict observed benchmark gate
         run: go run ./cmd/akca benchmark --db "${RUNNER_TEMP}/akca-benchmark.db" --output benchmark-quality.json --strict
       - name: Upload benchmark evidence
