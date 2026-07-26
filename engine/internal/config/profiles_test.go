@@ -31,14 +31,29 @@ func TestApplyScanProfileHonorsExplicitDisables(t *testing.T) {
 	cfg.EnableOAST = false
 	cfg.EnableFuzzing = false
 	cfg.EnableJSAnalysis = false
+	cfg.EnableWAFBypassHeaders = false
 	cfg.Explicit.EnableOAST = true
 	cfg.Explicit.EnableFuzzing = true
 	cfg.Explicit.EnableJSAnalysis = true
+	cfg.Explicit.EnableWAFBypassHeaders = true
 
 	cfg = ApplyScanProfile(cfg)
-	if cfg.EnableOAST || cfg.EnableFuzzing || cfg.EnableJSAnalysis {
-		t.Fatalf("profile re-enabled explicit disables: oast=%v fuzzing=%v js=%v",
-			cfg.EnableOAST, cfg.EnableFuzzing, cfg.EnableJSAnalysis)
+	if cfg.EnableOAST || cfg.EnableFuzzing || cfg.EnableJSAnalysis || cfg.EnableWAFBypassHeaders {
+		t.Fatalf("profile re-enabled explicit disables: oast=%v fuzzing=%v js=%v waf=%v",
+			cfg.EnableOAST, cfg.EnableFuzzing, cfg.EnableJSAnalysis, cfg.EnableWAFBypassHeaders)
+	}
+}
+
+func TestFullBugBountyEnablesWAFEvasionByDefault(t *testing.T) {
+	cfg := DefaultScanConfig()
+	if !cfg.EnableWAFBypassHeaders {
+		t.Fatal("default FullBugBounty config should enable WAF evasion")
+	}
+	cfg.EnableWAFBypassHeaders = false
+	cfg.SmartScanProfile = "FullBugBounty"
+	cfg = ApplyScanProfile(cfg)
+	if !cfg.EnableWAFBypassHeaders {
+		t.Fatal("FullBugBounty profile should enable WAF evasion unless explicitly disabled")
 	}
 }
 

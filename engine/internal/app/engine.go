@@ -22,6 +22,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/session"
 	"github.com/akha-security/akca/engine/internal/storage"
 	"github.com/akha-security/akca/engine/internal/verification"
+	"github.com/akha-security/akca/engine/internal/wafintel"
 )
 
 type Engine struct {
@@ -330,11 +331,17 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 		return
 	}
 
-	// ── Phase 2: WAF learning / calibration (skipped on fast intensity) ─────
+	// ── Phase 2: WAF learning / calibration ────────────────────────────────
 	if !done("learning_waf") {
-		if cfg.EnableWAFDetection && cfg.ScanIntensity != "fast" {
-			learnCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-			if err := e.runLearningWAFPhase(learnCtx, targets); err != nil {
+		if cfg.EnableWAFDetection {
+			timeout := 90 * time.Second
+			opts := wafintel.CalibrationOptions{MaxStrategies: 3}
+			if cfg.ScanIntensity == "fast" {
+				timeout = 12 * time.Second
+				opts.MaxStrategies = 1
+			}
+			learnCtx, cancel := context.WithTimeout(ctx, timeout)
+			if err := e.runLearningWAFPhase(learnCtx, targets, opts); err != nil {
 				_ = e.Emit("log", "waf learning skipped: "+err.Error(), map[string]interface{}{"scan_id": cfg.ScanID})
 				markFailed("learning_waf")
 			} else {

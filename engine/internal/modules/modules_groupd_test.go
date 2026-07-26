@@ -244,6 +244,19 @@ func TestGraphQLBatchAbuse(t *testing.T) {
 	}
 }
 
+func TestGraphQLUsesIntrospectionFieldsForAbuseProbes(t *testing.T) {
+	c := &groupDClient{responses: map[string]string{
+		graphQLIntrospectionQuery:                           `{"data":{"__schema":{"types":[{"name":"Query","fields":[{"name":"account"}]}]}}}`,
+		`{"query":"{account { __typename } }"}`:             `{"data":{"account":{"__typename":"Account"}}}`,
+		graphqlattack.BuildSuggestionsProbe("account").Body: `{"errors":[{"message":"Cannot query field account_nonexistent_field_xyz on type Query. Did you mean account?"}]}`,
+	}}
+	target := ScanTarget{EndpointURL: "http://example.com/graphql", Method: "POST", Parameter: "body"}
+	findings := groupDRunner(t, c).runGraphQL(context.Background(), target)
+	if len(findings) == 0 {
+		t.Fatal("expected graphql probes to use introspected field candidates")
+	}
+}
+
 func TestWebSocketDeepTesting(t *testing.T) {
 	c := &groupDClient{responses: map[string]string{}}
 	prober := websocketProberFunc(func(_ context.Context, rawURL, payload string) (httpclient.RequestResponse, error) {
@@ -352,6 +365,25 @@ func TestLDAPXPathHeaderInjection(t *testing.T) {
 	findings := groupDRunner(t, c).runLDAPXPathInjection(context.Background(), target)
 	if len(findings) == 0 {
 		t.Fatal("expected ldap/xpath/header injection finding")
+	}
+}
+
+func TestCRLFInjectionRunsAsFirstClassModule(t *testing.T) {
+	payload := "\r\nX-Akca-CRLF: akca-crlf-q"
+	c := &groupDClient{
+		responses: map[string]string{
+			"__default__": "ok",
+			payload:       "ok",
+		},
+		headers: map[string]map[string]string{
+			payload: {"X-Akca-CRLF": "akca-crlf-q"},
+		},
+	}
+	target := ScanTarget{EndpointURL: "http://example.com/search", Method: "GET", Parameter: "q", Location: "query"}
+	r := groupDRunner(t, c)
+	findings := r.runCRLF(context.Background(), target)
+	if len(findings) == 0 || findings[0].VulnClass != "crlf" {
+		t.Fatalf("expected first-class CRLF finding, got %+v", findings)
 	}
 }
 

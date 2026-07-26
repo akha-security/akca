@@ -29,7 +29,7 @@ func TestAllCatalogModulesAreCoveredByRunner(t *testing.T) {
 		"security_headers", "tls_misconfig", "vulnerable_components", "sensitive_data", "secret_exposure",
 		"cicd_exposure", "git_recovery", "source_code_disclosure", "graphql", "script_source", "websocket",
 		"cloud_storage", "cloud_posture", "client_ssti", "smuggling",
-		"prototype_pollution", "ldap_xpath_injection", "debug_admin", "business_logic", "race_condition",
+		"prototype_pollution", "ldap_xpath_injection", "crlf", "debug_admin", "business_logic", "race_condition",
 		"api_versioning", "known_cve",
 	} {
 		covered[name] = struct{}{}

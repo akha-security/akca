@@ -263,6 +263,8 @@ func printUsage() {
 		fmt.Sprintf("  %s--rate-limit%s <n>         %sRequests per second%s  %s[50]%s", cIce, rst, cSlate, rst, cGhost, rst),
 		fmt.Sprintf("  %s--concurrency%s <n>        %sParallel workers%s  %s[48]%s", cIce, rst, cSlate, rst, cGhost, rst),
 		fmt.Sprintf("  %s--scan-id%s <id>           %sStable scan id for CI/policy%s", cIce, rst, cSlate, rst),
+		fmt.Sprintf("  %s--waf-evasion%s            %sForce WAF-adaptive payloads%s", cIce, rst, cSlate, rst),
+		fmt.Sprintf("  %s--no-waf-evasion%s         %sDisable WAF-adaptive payloads%s", cIce, rst, cSlate, rst),
 		fmt.Sprintf("  %s--no-oast%s                %sDisable blind callback checks%s", cIce, rst, cSlate, rst),
 		fmt.Sprintf("  %s--no-fuzzing%s             %sDisable path fuzzing%s", cIce, rst, cSlate, rst),
 		fmt.Sprintf("  %s--no-js%s                  %sDisable JavaScript analysis%s", cIce, rst, cSlate, rst),
@@ -593,6 +595,16 @@ func miniBar(value, maxVal, width int) string {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 type sliceFlag []string
+
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	wasSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			wasSet = true
+		}
+	})
+	return wasSet
+}
 
 func (s *sliceFlag) String() string { return strings.Join(*s, ", ") }
 func (s *sliceFlag) Set(val string) error {
@@ -1356,6 +1368,8 @@ func main() {
 	var oastWait int
 	var noFuzzing bool
 	var noJS bool
+	var wafEvasion bool
+	var noWAFEvasion bool
 	var rateLimit float64
 	var concurrency int
 	var showVersion bool
@@ -1384,6 +1398,8 @@ func main() {
 	fs.IntVar(&oastWait, "oast-wait", 60, "")
 	fs.BoolVar(&noFuzzing, "no-fuzzing", false, "")
 	fs.BoolVar(&noJS, "no-js", false, "")
+	fs.BoolVar(&wafEvasion, "waf-evasion", false, "")
+	fs.BoolVar(&noWAFEvasion, "no-waf-evasion", false, "")
 	fs.Float64Var(&rateLimit, "rate-limit", 50, "")
 	fs.IntVar(&concurrency, "concurrency", 48, "")
 	fs.StringVar(&scanID, "scan-id", "", "")
@@ -1426,6 +1442,12 @@ func main() {
 	if targetURL == "" {
 		printCLIError(fmt.Errorf("target URL is required"))
 		os.Exit(1)
+	}
+	wafEvasionSet := flagWasSet(fs, "waf-evasion")
+	noWAFEvasionSet := flagWasSet(fs, "no-waf-evasion")
+	if wafEvasionSet && noWAFEvasionSet {
+		printCLIError(fmt.Errorf("--waf-evasion and --no-waf-evasion cannot be used together"))
+		os.Exit(2)
 	}
 	if rateLimit <= 0 || math.IsNaN(rateLimit) || math.IsInf(rateLimit, 0) {
 		printCLIError(fmt.Errorf("--rate-limit must be greater than zero"))
@@ -1506,6 +1528,14 @@ func main() {
 	cfg.OASTDrainTimeout = time.Duration(oastWait) * time.Second
 	cfg.EnableFuzzing = !noFuzzing
 	cfg.EnableJSAnalysis = !noJS
+	if wafEvasionSet {
+		cfg.EnableWAFBypassHeaders = wafEvasion
+		cfg.Explicit.EnableWAFBypassHeaders = true
+	}
+	if noWAFEvasionSet {
+		cfg.EnableWAFBypassHeaders = !noWAFEvasion
+		cfg.Explicit.EnableWAFBypassHeaders = true
+	}
 	if noOAST {
 		cfg.Explicit.EnableOAST = true
 	}

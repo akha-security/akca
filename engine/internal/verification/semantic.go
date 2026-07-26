@@ -17,6 +17,7 @@ type DOMStructure struct {
 type SemanticDelta struct {
 	ChangedSchema      bool     `json:"changed_schema"`
 	ChangedStatus      bool     `json:"changed_status"`
+	ChangedHeaders     bool     `json:"changed_headers,omitempty"`
 	ChangedDOM         bool     `json:"changed_dom"`
 	AddedSensitiveData []string `json:"added_sensitive_data,omitempty"`
 	AddedErrorSignals  []string `json:"added_error_signals,omitempty"`
@@ -158,6 +159,35 @@ func CompareSemantic(base, probe ResponseSnapshot) SemanticDelta {
 		delta.SecurityRelevant = false
 	}
 	return delta
+}
+
+func SignificantHeaderDiff(base, probe ResponseSnapshot) bool {
+	baseHeaders := significantHeaders(base.Headers)
+	probeHeaders := significantHeaders(probe.Headers)
+	if len(baseHeaders) != len(probeHeaders) {
+		return true
+	}
+	for key, probeValue := range probeHeaders {
+		if baseHeaders[key] != probeValue {
+			return true
+		}
+	}
+	return false
+}
+
+func significantHeaders(headers map[string]string) map[string]string {
+	out := map[string]string{}
+	for key, value := range headers {
+		lower := strings.ToLower(strings.TrimSpace(key))
+		switch {
+		case lower == "location",
+			lower == "x-akca-crlf",
+			lower == "x-injected",
+			strings.HasPrefix(lower, "access-control-"):
+			out[lower] = strings.ToLower(strings.TrimSpace(value))
+		}
+	}
+	return out
 }
 
 func addedErrorSignals(base, probe string) []string {

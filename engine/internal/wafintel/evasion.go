@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -43,12 +44,14 @@ var vendorStrategies = map[string][]Strategy{
 type LearningProfile struct {
 	Domain           string         `json:"domain"`
 	StrategyScores   map[string]int `json:"strategy_scores"`
+	TechniqueScores  map[string]int `json:"technique_scores,omitempty"`
 	BlockedEncodings []string       `json:"blocked_encodings"`
 	LastSuccessful   string         `json:"last_successful"`
+	LastTechnique    string         `json:"last_technique,omitempty"`
 }
 
 func NewLearningProfile(domain string) LearningProfile {
-	return LearningProfile{Domain: domain, StrategyScores: map[string]int{}}
+	return LearningProfile{Domain: domain, StrategyScores: map[string]int{}, TechniqueScores: map[string]int{}}
 }
 
 func SelectStrategy(vendor string, learn LearningProfile) Strategy {
@@ -89,6 +92,62 @@ func RecordStrategyResult(learn LearningProfile, strategyID string, success bool
 		learn.StrategyScores[strategyID]--
 	}
 	return learn
+}
+
+func RecordTechniqueResult(learn LearningProfile, technique string, success bool) LearningProfile {
+	technique = strings.ToLower(strings.TrimSpace(technique))
+	if technique == "" {
+		return learn
+	}
+	if learn.TechniqueScores == nil {
+		learn.TechniqueScores = map[string]int{}
+	}
+	if success {
+		learn.TechniqueScores[technique] += 2
+		learn.LastTechnique = technique
+	} else {
+		learn.TechniqueScores[technique]--
+		learn.BlockedEncodings = appendBlockedTechnique(learn.BlockedEncodings, technique)
+	}
+	return learn
+}
+
+func PreferredTechniques(learn LearningProfile) []string {
+	type item struct {
+		name  string
+		score int
+	}
+	var ranked []item
+	for name, score := range learn.TechniqueScores {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" || score <= 0 {
+			continue
+		}
+		if name == learn.LastTechnique {
+			score += 3
+		}
+		ranked = append(ranked, item{name: name, score: score})
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
+		}
+		return ranked[i].name < ranked[j].name
+	})
+	out := make([]string, 0, len(ranked))
+	for _, item := range ranked {
+		out = append(out, item.name)
+	}
+	return out
+}
+
+func appendBlockedTechnique(blocked []string, technique string) []string {
+	for _, item := range blocked {
+		if strings.EqualFold(strings.TrimSpace(item), technique) {
+			return blocked
+		}
+	}
+	return append(blocked, technique)
 }
 
 func ApplyStrategy(payload string, strategy Strategy) (string, map[string]string) {

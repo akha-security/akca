@@ -149,7 +149,7 @@ func (r *Runner) replayControl(ctx context.Context, module string, target ScanTa
 func supportsRecordedNegativeControl(module string) bool {
 	switch module {
 	case "nosql", "ssrf", "open_redirect", "host_header", "cors", "jwt", "oauth",
-		"ldap_xpath_injection", "debug_admin", "prototype_pollution":
+		"ldap_xpath_injection", "crlf", "debug_admin", "prototype_pollution":
 		return true
 	default:
 		return false
@@ -258,7 +258,7 @@ func negativeControlPayload(module string, target ScanTarget, original payloadge
 
 func supportsGenericReplay(module string) bool {
 	switch module {
-	case "xss", "sqli", "ssti", "xxe", "command_injection", "lfi":
+	case "xss", "sqli", "ssti", "xxe", "command_injection", "lfi", "crlf":
 		return true
 	default:
 		return false

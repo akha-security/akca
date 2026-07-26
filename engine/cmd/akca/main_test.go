@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,21 @@ func TestFindingStatusDoesNotCallManualReviewVerified(t *testing.T) {
 	glyph, label, _, confirmed = findingStatus("HighConfidence")
 	if confirmed || label != "HIGH CONFIDENCE" || glyph != "◇" {
 		t.Fatalf("high-confidence status was not represented live: glyph=%q label=%q confirmed=%v", glyph, label, confirmed)
+	}
+}
+
+func TestFlagWasSetDistinguishesDefaultBoolFromExplicitChoice(t *testing.T) {
+	fs := flag.NewFlagSet("akca", flag.ContinueOnError)
+	var wafEvasion bool
+	fs.BoolVar(&wafEvasion, "waf-evasion", false, "")
+	if flagWasSet(fs, "waf-evasion") {
+		t.Fatal("unset bool flag should not be reported as set")
+	}
+	if err := fs.Parse([]string{"--waf-evasion=false"}); err != nil {
+		t.Fatal(err)
+	}
+	if !flagWasSet(fs, "waf-evasion") || wafEvasion {
+		t.Fatalf("explicit false should be tracked without enabling: set=%v value=%v", flagWasSet(fs, "waf-evasion"), wafEvasion)
 	}
 }
 

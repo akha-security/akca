@@ -29,3 +29,21 @@ func TestSSRFAndLFISeverityPreservesImpact(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenRedirectSeverityIsMedium(t *testing.T) {
+	tests := []struct {
+		conf verification.ConfidenceLevel
+		want string
+	}{
+		{verification.Confirmed, "medium"},
+		{verification.HighConfidence, "medium"},
+		{verification.Potential, "medium"},
+		{verification.NeedsManualReview, "low"},
+	}
+
+	for _, tt := range tests {
+		if got := severityFor("open_redirect", tt.conf); got != tt.want {
+			t.Fatalf("severityFor(%q, %q)=%q, want %q", "open_redirect", tt.conf, got, tt.want)
+		}
+	}
+}

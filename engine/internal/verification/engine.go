@@ -63,6 +63,11 @@ func (e *Engine) Verify(candidate Candidate) Result {
 	result.BaselineMatch = CompareParameterBaseline(candidate.Baseline, candidate.Probe)
 	result.SemanticDelta = CompareSemantic(candidate.Baseline, candidate.Probe)
 	result.SemanticDiff = result.SemanticDelta.SecurityRelevant
+	if candidate.RequestedProofType == ProofHeaderEvidence && SignificantHeaderDiff(candidate.Baseline, candidate.Probe) {
+		result.SemanticDelta.ChangedHeaders = true
+		result.SemanticDelta.SecurityRelevant = true
+		result.SemanticDiff = true
+	}
 	if result.BaselineMatch && !result.SemanticDiff && !candidate.ExpectedEquivalent {
 		reasons = append(reasons, ReasonBaselineMatch)
 	}

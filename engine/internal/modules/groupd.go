@@ -91,6 +91,9 @@ func (r *Runner) RunGroupD(ctx context.Context, targets []ScanTarget) ([]ModuleF
 				if r.cfg.AllowsModule("ldap_xpath_injection") {
 					localFindings = append(localFindings, r.runLDAPXPathInjection(ctx, target)...)
 				}
+				if r.cfg.AllowsModule("crlf") {
+					localFindings = append(localFindings, r.runCRLF(ctx, target)...)
+				}
 				if r.cfg.AllowsModule("debug_admin") {
 					localFindings = append(localFindings, r.runDebugAdmin(ctx, target)...)
 				}

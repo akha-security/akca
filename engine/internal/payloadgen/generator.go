@@ -109,6 +109,7 @@ func buildCandidates(in Input) []Payload {
 	for i := range out {
 		out[i] = normalizePayload(out[i], p)
 		out[i] = rankForTech(out[i], in.Tech)
+		out[i] = rankForWAFLearning(out[i], in.WAF)
 	}
 
 	return out
@@ -226,6 +227,42 @@ func rankForTech(pl Payload, tech TechHints) Payload {
 	}
 	pl.Priority = clampPriority(pl.Priority)
 	return pl
+}
+
+func rankForWAFLearning(pl Payload, waf WAFHints) Payload {
+	if !pl.WAFAdapted || len(waf.PreferredTechniques) == 0 {
+		return pl
+	}
+	encoding := strings.ToLower(strings.TrimSpace(pl.Encoding))
+	for i, technique := range waf.PreferredTechniques {
+		technique = strings.ToLower(strings.TrimSpace(technique))
+		if technique == "" || strings.HasPrefix(technique, "protocol:") {
+			continue
+		}
+		if encodingTechniqueMatches(encoding, technique) {
+			boost := 12 - i*2
+			if boost < 2 {
+				boost = 2
+			}
+			pl.Priority += boost
+			pl.SelectionReason += "; boosted by WAF learning for " + technique
+			break
+		}
+	}
+	pl.Priority = clampPriority(pl.Priority)
+	return pl
+}
+
+func encodingTechniqueMatches(encoding, technique string) bool {
+	if encoding == technique {
+		return true
+	}
+	for _, part := range strings.Split(encoding, "_") {
+		if part == technique {
+			return true
+		}
+	}
+	return strings.Contains(encoding, technique)
 }
 
 func normalizeDatabaseFamily(database string) string {
@@ -955,15 +992,31 @@ func applyLearning(payloads []Payload, learn LearningProfile) []Payload {
 
 func semanticDedupe(payloads []Payload) []Payload {
 	seen := map[string]struct{}{}
+	wireSeen := map[string]struct{}{}
 	var out []Payload
 	for _, p := range payloads {
 		if _, ok := seen[p.SemanticKey]; ok {
 			continue
 		}
+		wireKey := requestDedupeKey(p)
+		if _, ok := wireSeen[wireKey]; ok {
+			continue
+		}
 		seen[p.SemanticKey] = struct{}{}
+		wireSeen[wireKey] = struct{}{}
 		out = append(out, p)
 	}
 	return out
+}
+
+func requestDedupeKey(p Payload) string {
+	return strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(p.Family)),
+		strings.ToLower(strings.TrimSpace(p.VulnClass)),
+		strings.ToLower(strings.TrimSpace(p.Value)),
+		strings.ToLower(strings.TrimSpace(p.Encoding)),
+		strings.ToLower(strings.TrimSpace(p.WAFVendor)),
+	}, "|")
 }
 
 func semanticKey(p Payload) string {
@@ -1070,27 +1123,88 @@ func selectPayloads(payloads []Payload, limit int) ([]Payload, int) {
 
 	used := 0
 	chosen := map[string]struct{}{}
+	selectedOriginalByKey := map[string]bool{}
 	for _, choice := range choices {
-		if used+choice.p.BudgetCost > limit {
+		pair, pairCost, ok := wafPairForSelection(choice.p, offensive, selectedOriginalByKey)
+		if !ok || used+pairCost > limit {
 			continue
 		}
-		selected = append(selected, choice.p)
-		used += choice.p.BudgetCost
-		chosen[choice.p.SemanticKey] = struct{}{}
+		for _, p := range pair {
+			if _, ok := chosen[p.SemanticKey]; ok {
+				continue
+			}
+			selected = append(selected, p)
+			used += p.BudgetCost
+			chosen[p.SemanticKey] = struct{}{}
+			if !p.WAFAdapted {
+				selectedOriginalByKey[baseVariantKey(p)] = true
+			}
+		}
 	}
 	for _, p := range offensive {
 		if _, ok := chosen[p.SemanticKey]; ok {
 			continue
 		}
-		if used+p.BudgetCost > limit {
+		pair, pairCost, ok := wafPairForSelection(p, offensive, selectedOriginalByKey)
+		if !ok || used+pairCost > limit {
 			continue
 		}
-		selected = append(selected, p)
-		used += p.BudgetCost
-		chosen[p.SemanticKey] = struct{}{}
+		for _, candidate := range pair {
+			if _, ok := chosen[candidate.SemanticKey]; ok {
+				continue
+			}
+			selected = append(selected, candidate)
+			used += candidate.BudgetCost
+			chosen[candidate.SemanticKey] = struct{}{}
+			if !candidate.WAFAdapted {
+				selectedOriginalByKey[baseVariantKey(candidate)] = true
+			}
+		}
 	}
 	sortPayloads(selected)
 	return selected, used
+}
+
+func wafPairForSelection(p Payload, offensive []Payload, selectedOriginalByKey map[string]bool) ([]Payload, int, bool) {
+	if !p.WAFAdapted {
+		return []Payload{p}, p.BudgetCost, true
+	}
+	key := baseVariantKey(p)
+	if selectedOriginalByKey[key] {
+		return []Payload{p}, p.BudgetCost, true
+	}
+	original, ok := findOriginalForWAFAdapted(p, offensive)
+	if !ok {
+		return nil, 0, false
+	}
+	return []Payload{original, p}, original.BudgetCost + p.BudgetCost, true
+}
+
+func findOriginalForWAFAdapted(adapted Payload, offensive []Payload) (Payload, bool) {
+	key := baseVariantKey(adapted)
+	for _, p := range offensive {
+		if p.WAFAdapted || p.IsControl || p.IsNegativeControl {
+			continue
+		}
+		if baseVariantKey(p) == key {
+			return p, true
+		}
+	}
+	return Payload{}, false
+}
+
+func baseVariantKey(p Payload) string {
+	variant := p.Variant
+	if idx := strings.Index(variant, "_waf_"); idx >= 0 {
+		variant = variant[:idx]
+	}
+	return strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(p.Family)),
+		strings.ToLower(strings.TrimSpace(p.VulnClass)),
+		strings.ToLower(strings.TrimSpace(p.ExpectedSignal)),
+		strings.ToLower(strings.TrimSpace(p.VerificationStrategy)),
+		strings.ToLower(strings.TrimSpace(variant)),
+	}, "|")
 }
 
 func coverageScore(p Payload) int {

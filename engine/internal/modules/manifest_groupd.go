@@ -20,6 +20,7 @@ var GroupDRegistry = []ModuleDescriptor{
 	{Manifest: models.PluginManifest{Name: "smuggling", Description: "HTTP request smuggling signals", Version: "0.1.0"}, Precondition: stateChangingOrBody},
 	{Manifest: models.PluginManifest{Name: "prototype_pollution", Description: "Prototype pollution detection", Version: "0.1.0"}, Precondition: contentTypes("json", "javascript")},
 	{Manifest: models.PluginManifest{Name: "ldap_xpath_injection", Description: "LDAP/XPath/header injection signals", Version: "0.1.0"}, Precondition: alwaysReady},
+	{Manifest: models.PluginManifest{Name: "crlf", Description: "CRLF response splitting / header injection", Version: "0.1.0"}, Precondition: alwaysReady},
 	{Manifest: models.PluginManifest{Name: "debug_admin", Description: "Debug and admin interface exposure", Version: "0.1.0"}, Precondition: pathContains("debug", "admin", "actuator", "console", "trace")},
 	{Manifest: models.PluginManifest{Name: "business_logic", Description: "Business logic testing signals", Version: "0.1.0"}, Precondition: pathContains("cart", "checkout", "order", "payment", "coupon")},
 	{Manifest: models.PluginManifest{Name: "race_condition", Description: "Race condition detection", Version: "0.1.0"}, Precondition: pathContains("redeem", "transfer", "vote", "claim", "coupon")},

@@ -30,6 +30,7 @@ var proofPolicies = map[string]ModuleProofPolicy{
 	"nosql":                  replayPolicy("nosql", ProofDifferentialReplay),
 	"prototype_pollution":    replayPolicy("prototype_pollution", ProofDifferentialReplay),
 	"ldap_xpath_injection":   replayPolicy("ldap_xpath_injection", ProofDifferentialReplay, ProofHeaderEvidence, ProofRuntimeTrace),
+	"crlf":                   headerPolicy("crlf"),
 	"open_redirect":          headerPolicy("open_redirect"),
 	"host_header":            headerPolicy("host_header"),
 	"cors":                   headerPolicy("cors"),

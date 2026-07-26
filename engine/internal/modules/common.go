@@ -99,7 +99,7 @@ func baseSeverity(module string) string {
 		return "info"
 	case "sqli", "command_injection", "ssti", "xxe", "ssrf", "deserialization", "lfi", "rce", "nosql":
 		return "critical"
-	case "xss", "blind_xss", "idor", "auth_bypass", "open_redirect", "file_upload":
+	case "xss", "blind_xss", "idor", "auth_bypass", "file_upload":
 		return "high"
 	default:
 		return "medium"

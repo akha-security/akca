@@ -31,6 +31,9 @@ func ApplyScanProfile(cfg ScanConfig) ScanConfig {
 		}
 		cfg.EnableWAFDetection = true
 		cfg.Enable403BypassChecks = true
+		if !cfg.Explicit.EnableWAFBypassHeaders {
+			cfg.EnableWAFBypassHeaders = true
+		}
 		if cfg.PayloadBudget == "" {
 			cfg.PayloadBudget = PayloadBudgetMedium
 		}

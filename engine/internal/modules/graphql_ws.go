@@ -2,6 +2,7 @@ package modules
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -21,17 +22,26 @@ func (r *Runner) runGraphQL(ctx context.Context, target ScanTarget) []ModuleFind
 	if field == "" || strings.EqualFold(field, "body") {
 		field = "user"
 	}
-	typenameQuery := fmt.Sprintf(`{"query":"{%s { __typename } }"}`, graphqlFieldName(field))
-	baseline, err := r.probeWithBody(ctx, target, typenameQuery, "application/json", nil)
-	if err != nil {
-		return nil
-	}
 	var out []ModuleFinding
 	// Introspection, including sensitive-looking schema field names, is
 	// discovery metadata rather than proof of unauthorized data disclosure.
 	// Keep the request for endpoint characterization but do not report it.
-	_, _ = r.probeWithBody(ctx, target, graphQLIntrospectionQuery, "application/json", nil)
-	out = append(out, r.runGraphQLAbuse(ctx, target, baseline, field)...)
+	introspection, _ := r.probeWithBody(ctx, target, graphQLIntrospectionQuery, "application/json", nil)
+	fields := uniqueGraphQLFields(append([]string{field}, graphqlCandidateFieldsFromIntrospection(introspection.Response.Body)...))
+	if len(fields) > 3 {
+		fields = fields[:3]
+	}
+	for _, candidateField := range fields {
+		typenameQuery := fmt.Sprintf(`{"query":"{%s { __typename } }"}`, graphqlFieldName(candidateField))
+		baseline, err := r.probeWithBody(ctx, target, typenameQuery, "application/json", nil)
+		if err != nil {
+			continue
+		}
+		out = append(out, r.runGraphQLAbuse(ctx, target, baseline, candidateField)...)
+		if len(out) >= 3 {
+			break
+		}
+	}
 	return out
 }
 
@@ -74,6 +84,59 @@ func graphqlIntrospectionSignal(body string) bool {
 func graphqlSensitiveField(body string) bool {
 	lower := strings.ToLower(body)
 	return strings.Contains(lower, "password") || strings.Contains(lower, "secret") || strings.Contains(lower, "token")
+}
+
+func graphqlCandidateFieldsFromIntrospection(body string) []string {
+	var doc struct {
+		Data struct {
+			Schema struct {
+				Types []struct {
+					Name   string `json:"name"`
+					Fields []struct {
+						Name string `json:"name"`
+					} `json:"fields"`
+				} `json:"types"`
+			} `json:"__schema"`
+		} `json:"data"`
+	}
+	if json.Unmarshal([]byte(body), &doc) != nil {
+		return nil
+	}
+	preferredTypes := map[string]bool{"Query": true, "Mutation": true}
+	var out []string
+	for _, typ := range doc.Data.Schema.Types {
+		if !preferredTypes[typ.Name] && strings.HasPrefix(typ.Name, "__") {
+			continue
+		}
+		if !preferredTypes[typ.Name] && len(out) > 0 {
+			continue
+		}
+		for _, field := range typ.Fields {
+			name := graphqlFieldName(field.Name)
+			if name != "" && name != "user" || strings.EqualFold(field.Name, "user") {
+				out = append(out, name)
+			}
+		}
+	}
+	return out
+}
+
+func uniqueGraphQLFields(fields []string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, field := range fields {
+		field = graphqlFieldName(field)
+		if field == "" {
+			continue
+		}
+		key := strings.ToLower(field)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, field)
+	}
+	return out
 }
 
 func graphqlFieldName(field string) string {

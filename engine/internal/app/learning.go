@@ -7,7 +7,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/wafintel"
 )
 
-func (e *Engine) runLearningWAFPhase(ctx context.Context, targets []string) error {
+func (e *Engine) runLearningWAFPhase(ctx context.Context, targets []string, opts wafintel.CalibrationOptions) error {
 	e.session.SetPhase("learning_waf")
 	_ = e.Emit("phase_started", "learning and waf evasion", map[string]interface{}{"phase": "learning_waf"})
 
@@ -25,7 +25,7 @@ func (e *Engine) runLearningWAFPhase(ctx context.Context, targets []string) erro
 
 	runner := wafintel.NewRunner(e.session.ID, e.db, e.Emit)
 	runner.SetClient(wafHTTPAdapter{client: e.client})
-	if err := runner.Calibrate(ctx, targets); err != nil {
+	if err := runner.CalibrateWithOptions(ctx, targets, opts); err != nil {
 		return err
 	}
 

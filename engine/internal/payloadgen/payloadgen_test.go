@@ -542,6 +542,61 @@ func TestWAFGenerationIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestWAFAdaptedPayloadsKeepOriginalPartnerUnderBudget(t *testing.T) {
+	result := Generate(Input{
+		Profile: reflection.ReflectionProfile{
+			ScanID: "scan-a", EndpointURL: "https://example.com/search", Parameter: "q",
+			ParameterLocation: "body", Context: reflection.ContextHTML,
+		},
+		Tech: TechHints{Database: "mysql"},
+		WAF:  WAFHints{Vendor: "Cloudflare", AllowEvasion: true},
+		// Enough for one paired offensive probe, not enough for standalone adapted
+		// coverage across many families.
+		Budget: 4,
+	})
+	originalByBase := map[string]bool{}
+	for _, payload := range result.Payloads {
+		if payload.IsControl || payload.IsNegativeControl || payload.WAFAdapted {
+			continue
+		}
+		originalByBase[baseVariantKey(payload)] = true
+	}
+	for _, payload := range result.Payloads {
+		if payload.WAFAdapted && !originalByBase[baseVariantKey(payload)] {
+			t.Fatalf("WAF-adapted payload selected without original partner: %+v", payload)
+		}
+	}
+}
+
+func TestWAFLearningPrioritizesSuccessfulTechnique(t *testing.T) {
+	result := Generate(Input{
+		Profile: reflection.ReflectionProfile{
+			ScanID: "scan-a", EndpointURL: "https://example.com/search", Parameter: "q",
+			ParameterLocation: "body", Context: reflection.ContextHTML,
+		},
+		Tech: TechHints{Database: "mysql"},
+		WAF: WAFHints{
+			Vendor:              "Cloudflare",
+			AllowEvasion:        true,
+			PreferredTechniques: []string{"double_url", "unicode"},
+		},
+		Budget: -1,
+	})
+	firstAdapted := Payload{}
+	for _, payload := range result.Payloads {
+		if payload.WAFAdapted {
+			firstAdapted = payload
+			break
+		}
+	}
+	if firstAdapted.Encoding != "double_url" && firstAdapted.Encoding != "unicode_url" {
+		t.Fatalf("learned double_url technique was not prioritized, first adapted=%+v", firstAdapted)
+	}
+	if !strings.Contains(firstAdapted.SelectionReason, "WAF learning") {
+		t.Fatalf("learned priority should be visible in selection reason: %q", firstAdapted.SelectionReason)
+	}
+}
+
 func TestQueryWAFEncodingAccountsForTransportLayer(t *testing.T) {
 	original := `' OR 11=11-- -`
 	doubleEncoded := wafintelValueForTest(original, "double_url")

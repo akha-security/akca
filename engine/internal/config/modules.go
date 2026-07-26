@@ -39,6 +39,8 @@ func moduleAlias(module string) string {
 		return "cache_poison"
 	case "vulnerable_components", "known_cve":
 		return "cve"
+	case "crlf":
+		return "response_splitting"
 	default:
 		return module
 	}

@@ -171,7 +171,7 @@ func TestSensitiveHeaderRedaction(t *testing.T) {
 	}
 }
 
-func TestWAFBypassHeadersAreOptIn(t *testing.T) {
+func TestWAFBypassHeadersDefaultOnAndCanBeDisabled(t *testing.T) {
 	var got http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = r.Header.Clone()
@@ -189,19 +189,20 @@ func TestWAFBypassHeadersAreOptIn(t *testing.T) {
 	if _, err := client.Do(context.Background(), "GET", srv.URL, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got.Get("X-Forwarded-For") != "" || got.Get("CF-Connecting-IP") != "" {
-		t.Fatalf("unexpected bypass headers: %v", got)
+	if got.Get("X-Forwarded-For") == "" || got.Get("CF-Connecting-IP") == "" {
+		t.Fatalf("expected default WAF evasion headers: %v", got)
 	}
 
-	cfg.EnableWAFBypassHeaders = true
+	cfg.EnableWAFBypassHeaders = false
 	client, err = New(cfg, scopeEngine, ratelimit.New(1000, 1000))
 	if err != nil {
 		t.Fatal(err)
 	}
+	got = nil
 	if _, err := client.Do(context.Background(), "GET", srv.URL, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got.Get("X-Forwarded-For") == "" || got.Get("CF-Connecting-IP") == "" {
-		t.Fatalf("expected opt-in bypass headers: %v", got)
+	if got.Get("X-Forwarded-For") != "" || got.Get("CF-Connecting-IP") != "" {
+		t.Fatalf("disabled WAF evasion should not add bypass headers: %v", got)
 	}
 }

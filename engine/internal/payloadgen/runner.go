@@ -3,6 +3,7 @@ package payloadgen
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/learning"
 	"github.com/akha-security/akca/engine/internal/reflection"
 	"github.com/akha-security/akca/engine/internal/storage"
+	"github.com/akha-security/akca/engine/internal/wafintel"
 )
 
 type Generator struct {
@@ -42,6 +44,7 @@ func (g *Generator) Run(ctx context.Context, profiles []reflection.ReflectionPro
 		if err != nil && err != sql.ErrNoRows {
 			return nil, fmt.Errorf("database query failure for WAF profile on host %s: %w", host, err)
 		}
+		preferredTechniques := g.wafPreferredTechniques(host)
 		learnData := store.Load(host, profile.EndpointURL)
 		w, b, n, fp := learnData.ToPayloadGen()
 
@@ -65,6 +68,7 @@ func (g *Generator) Run(ctx context.Context, profiles []reflection.ReflectionPro
 				Vendor:                  waf.Vendor,
 				CautiousModeRecommended: waf.CautiousModeRecommended,
 				AllowEvasion:            g.cfg.EnableWAFBypassHeaders,
+				PreferredTechniques:     preferredTechniques,
 			},
 			Budget: targetBudget,
 			Learn: LearningProfile{
@@ -91,6 +95,21 @@ func (g *Generator) Run(ctx context.Context, profiles []reflection.ReflectionPro
 		return nil, fmt.Errorf("failed to emit payload generation finished event: %w", err)
 	}
 	return results, nil
+}
+
+func (g *Generator) wafPreferredTechniques(host string) []string {
+	if g.db == nil || strings.TrimSpace(host) == "" {
+		return nil
+	}
+	raw, err := g.db.LoadWAFLearningProfile(host)
+	if err != nil {
+		return nil
+	}
+	learn := wafintel.NewLearningProfile(host)
+	if json.Unmarshal([]byte(raw), &learn) != nil {
+		return nil
+	}
+	return wafintel.PreferredTechniques(learn)
 }
 
 func lowerPositiveBudget(configured, ceiling int) int {

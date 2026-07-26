@@ -303,6 +303,7 @@ func DefaultScanConfig() ScanConfig {
 		EnableHeadlessCrawler:        true,
 		EnableFuzzing:                true,
 		Enable403BypassChecks:        true,
+		EnableWAFBypassHeaders:       true,
 		EnableOAST:                   true,
 		OASTServerURL:                DefaultOASTServers,
 		OASTPollInterval:             2 * time.Second,

@@ -9,7 +9,7 @@ import (
 )
 
 func (r *Runner) wafHeaders(endpointURL string) map[string]string {
-	if r.db == nil {
+	if r.db == nil || !r.cfg.EnableWAFBypassHeaders {
 		return nil
 	}
 	host := wafintel.HostFromTarget(endpointURL)
@@ -54,16 +54,39 @@ func (r *Runner) modulePayloads(target ScanTarget, vulnClass, oastURL string) []
 				}
 			}
 		}
-		return existing
+		return dedupePayloads(existing)
 	}
 	vendor := ""
+	var preferred []string
 	if r.db != nil {
 		host := wafintel.HostFromTarget(target.EndpointURL)
 		if waf, err := r.db.GetWAFProfile(r.scanID, host); err == nil {
 			vendor = waf.Vendor
 		}
+		if raw, err := r.db.LoadWAFLearningProfile(host); err == nil {
+			learn := wafintel.NewLearningProfile(host)
+			if json.Unmarshal([]byte(raw), &learn) == nil {
+				preferred = wafintel.PreferredTechniques(learn)
+			}
+		}
 	}
-	return payloadgen.GenerateGroupB(vulnClass, oastURL, payloadgen.WAFHints{
-		Vendor: vendor, AllowEvasion: r.cfg.EnableWAFBypassHeaders,
-	})
+	return dedupePayloads(payloadgen.GenerateGroupB(vulnClass, oastURL, payloadgen.WAFHints{
+		Vendor: vendor, AllowEvasion: r.cfg.EnableWAFBypassHeaders, PreferredTechniques: preferred,
+	}))
+}
+
+func dedupePayloads(payloads []payloadgen.Payload) []payloadgen.Payload {
+	seen := map[string]struct{}{}
+	out := make([]payloadgen.Payload, 0, len(payloads))
+	for _, p := range payloads {
+		key := strings.ToLower(strings.Join([]string{
+			p.Family, p.VulnClass, p.Value, p.Encoding, p.WAFVendor,
+		}, "|"))
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, p)
+	}
+	return out
 }

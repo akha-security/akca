@@ -63,6 +63,7 @@ type WAFHints struct {
 	Vendor                  string
 	CautiousModeRecommended bool
 	AllowEvasion            bool
+	PreferredTechniques     []string
 }
 
 type EventSink func(eventType, message string, payload map[string]interface{}) error

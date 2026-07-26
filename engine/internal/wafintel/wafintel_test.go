@@ -25,6 +25,24 @@ func TestAdaptiveStrategyLearning(t *testing.T) {
 	}
 }
 
+func TestAdaptiveTechniqueLearningRanksSuccessfulEncodings(t *testing.T) {
+	learn := wafintel.NewLearningProfile("example.com")
+	learn = wafintel.RecordTechniqueResult(learn, "double_url", true)
+	learn = wafintel.RecordTechniqueResult(learn, "unicode", true)
+	learn = wafintel.RecordTechniqueResult(learn, "double_url", true)
+	learn = wafintel.RecordTechniqueResult(learn, "html_entity", false)
+
+	got := wafintel.PreferredTechniques(learn)
+	if len(got) < 2 || got[0] != "double_url" || got[1] != "unicode" {
+		t.Fatalf("unexpected technique preference order: %#v", got)
+	}
+	for _, item := range got {
+		if item == "html_entity" {
+			t.Fatalf("blocked technique should not be preferred: %#v", got)
+		}
+	}
+}
+
 func TestEncodingCascade(t *testing.T) {
 	out := wafintel.EncodingCascade("<script>", "url", "double_url")
 	if !strings.Contains(out, "%25") {

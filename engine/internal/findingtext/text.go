@@ -23,6 +23,7 @@ var humanTitles = map[string]string{
 	"cors":                "CORS Misconfiguration",
 	"csrf":                "Cross-Site Request Forgery (CSRF)",
 	"graphql":             "GraphQL Security Issue",
+	"crlf":                "CRLF Injection",
 	"jwt":                 "JWT Security Issue",
 	"file_upload":         "Unsafe File Upload",
 	"prototype_pollution": "Prototype Pollution",

@@ -27,7 +27,7 @@ func fpCategoryFor(module string) fpCategory {
 	case "secret_exposure", "sensitive_data", "cicd_exposure", "git_recovery",
 		"source_code_disclosure", "cloud_storage", "cloud_posture", "vulnerable_components":
 		return fpContentMatch
-	case "cors", "open_redirect", "host_header", "cache_poisoning", "cache_deception", "jwt", "oauth":
+	case "cors", "open_redirect", "host_header", "crlf", "cache_poisoning", "cache_deception", "jwt", "oauth":
 		return fpHeaderEvidence
 	default:
 		return fpDifferential
@@ -146,6 +146,8 @@ func moduleSignalConfirmed(
 		return smugglingModuleConfirmed(probeHeaders, body, baseBody, probeStatus, baseStatus)
 	case "ldap_xpath_injection":
 		return ldapXPathModuleConfirmed(body, baseBody, p.Value, signal, probeStatus, baseStatus)
+	case "crlf":
+		return crlfHeaderConfirmed(baseHeaders, probeHeaders, p.Value)
 	case "debug_admin":
 		return debugAdminSignal(body, probeStatus)
 	case "race_condition":

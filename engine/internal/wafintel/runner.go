@@ -24,6 +24,10 @@ type Runner struct {
 	client HTTPDoer
 }
 
+type CalibrationOptions struct {
+	MaxStrategies int
+}
+
 func NewRunner(scanID string, db *storage.DB, emit EventSink) *Runner {
 	return &Runner{scanID: scanID, db: db, emit: emit}
 }
@@ -33,6 +37,10 @@ func (r *Runner) SetClient(client HTTPDoer) {
 }
 
 func (r *Runner) Calibrate(ctx context.Context, targets []string) error {
+	return r.CalibrateWithOptions(ctx, targets, CalibrationOptions{MaxStrategies: 3})
+}
+
+func (r *Runner) CalibrateWithOptions(ctx context.Context, targets []string, opts CalibrationOptions) error {
 	_ = r.emit("waf_evasion_started", "waf evasion intelligence started", map[string]interface{}{"scan_id": r.scanID})
 	for _, target := range targets {
 		if ctx.Err() != nil {
@@ -55,8 +63,12 @@ func (r *Runner) Calibrate(ctx context.Context, targets []string) error {
 			strategies = defaultStrategies()
 		}
 		limit := len(strategies)
-		if limit > 3 {
-			limit = 3
+		maxStrategies := opts.MaxStrategies
+		if maxStrategies <= 0 {
+			maxStrategies = 3
+		}
+		if limit > maxStrategies {
+			limit = maxStrategies
 		}
 		for i := 0; i < limit; i++ {
 			if ctx.Err() != nil {
@@ -75,6 +87,12 @@ func (r *Runner) Calibrate(ctx context.Context, targets []string) error {
 			status, body := r.probe(ctx, testURL, mutated, headers)
 			blocked := isWAFBlocked(baselineStatus, baselineBody, status, body)
 			learn = RecordStrategyResult(learn, strategy.ID, !blocked)
+			for _, enc := range strategy.Encodings {
+				learn = RecordTechniqueResult(learn, enc, !blocked)
+			}
+			for _, protocol := range strategy.Protocol {
+				learn = RecordTechniqueResult(learn, "protocol:"+protocol, !blocked)
+			}
 			raw, _ := json.Marshal(map[string]interface{}{
 				"vendor": waf.Vendor, "strategy_id": strategy.ID, "blocked": blocked,
 				"status": status, "headers": headers,
