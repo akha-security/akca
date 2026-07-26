@@ -12,10 +12,11 @@ import (
 	"github.com/akha-security/akca/engine/internal/ratelimit"
 	"github.com/akha-security/akca/engine/internal/scope"
 	"github.com/akha-security/akca/engine/internal/storage"
+	"github.com/akha-security/akca/engine/internal/testfixtures"
 )
 
 func TestAnalyzerUsesCentralHTTPClient(t *testing.T) {
-	jsBody := `fetch("/api/internal"); const t="ghp_abcdefghijklmnopqrstuvwxyz"; //# sourceMappingURL=leak.map`
+	jsBody := `fetch("/api/internal"); const t="` + testfixtures.GitHubShortToken() + `"; //# sourceMappingURL=leak.map`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/app.js" {
 			_, _ = w.Write([]byte(jsBody))

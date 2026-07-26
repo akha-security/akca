@@ -3,9 +3,11 @@ package cloudposture
 import (
 	"strings"
 	"testing"
+
+	"github.com/akha-security/akca/engine/internal/testfixtures"
 )
 
-const sampleJS = `
+var sampleJS = `
 const awsConfig = {
   region: "us-east-1",
   userPoolId: "us-east-1_AbCdEfGhI",
@@ -13,7 +15,7 @@ const awsConfig = {
   identityPoolId: "us-east-1:12345678-1234-1234-1234-123456789012"
 };
 const firebaseConfig = {
-  apiKey: "AIzaSy0123456789abcdefghijklmnopqrstuvx",
+  apiKey: "` + testfixtures.GoogleCloudAPIKey() + `",
   projectId: "my-app-prod",
   appId: "1:1234567890:web:abc123def456"
 };

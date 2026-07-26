@@ -3,6 +3,8 @@ package secretscan
 import (
 	"strings"
 	"testing"
+
+	"github.com/akha-security/akca/engine/internal/testfixtures"
 )
 
 func kinds(ms []Match) map[string]bool {
@@ -17,19 +19,17 @@ func TestDetectProviderSecrets(t *testing.T) {
 	// Assemble provider-shaped fixtures at runtime so repository secret
 	// protection does not mistake intentionally fake scanner inputs for live
 	// credentials.
-	stripeFixture := "sk_" + "live_0123456789abcdefghij0123"
-	slackTokenFixture := "xoxb-" + "1234567890-abcdefghijklmnop"
 	body := `
-google = "AIza012345678901234567890123456789abcde";
-ghp    = "ghp_1234567890abcdefghijklmnopqrstuvwxyz";
-stripe = "` + stripeFixture + `";
-slack  = "https://hooks.slack.com/services/T00000000/B00000000/abcdefABCDEF1234";
+google = "` + testfixtures.GoogleAPIKey() + `";
+ghp    = "` + testfixtures.GitHubToken() + `";
+stripe = "` + testfixtures.StripeSecretKey() + `";
+slack  = "` + testfixtures.SlackWebhook() + `";
 db     = "postgres://app:s3cretValue99@db.internal:5432/app";
 url    = "https://admin:s3cretValue99@db.internal.example.com";
-openai = "sk-proj-abcdefghijklmnopqrstuvwxyz0123";
-ant    = "sk-ant-abcdefghijklmnopqrstuvwxyz0123";
-hf     = "hf_abcdefghijklmnopqrstuvwxyz0123456789";
-slacktok = "` + slackTokenFixture + `";
+openai = "` + testfixtures.OpenAIKey() + `";
+ant    = "` + testfixtures.AnthropicKey() + `";
+hf     = "` + testfixtures.HuggingFaceToken() + `";
+slacktok = "` + testfixtures.SlackToken() + `";
 `
 	got := kinds(Detect(body))
 	if got["aws_access_key_id"] {
@@ -47,21 +47,22 @@ slacktok = "` + slackTokenFixture + `";
 }
 
 func TestExampleAWSKeyFiltered(t *testing.T) {
-	if ms := Detect(`token = "AKIAIOSFODNN7EXAMPLE";`); len(ms) != 0 {
+	if ms := Detect(`token = "` + testfixtures.AWSExampleAccessKey() + `";`); len(ms) != 0 {
 		t.Fatalf("expected EXAMPLE AWS key to be filtered, got %+v", ms)
 	}
 }
 
 func TestRedactionHidesValue(t *testing.T) {
-	ms := Detect(`token = "ghp_1234567890abcdefghijklmnopqrstuvwxyz";`)
+	raw := testfixtures.GitHubToken()
+	ms := Detect(`token = "` + raw + `";`)
 	if len(ms) == 0 {
 		t.Fatal("expected detection")
 	}
 	for _, m := range ms {
-		if m.Value != "ghp_1234567890abcdefghijklmnopqrstuvwxyz" {
+		if m.Value != raw {
 			t.Fatalf("expected full value stored, got %q", m.Value)
 		}
-		if strings.Contains(m.Redacted, "ghp_1234567890abcdefghijklmnopqrstuvwxyz") {
+		if strings.Contains(m.Redacted, raw) {
 			t.Fatalf("value not redacted: %s", m.Redacted)
 		}
 	}
@@ -90,7 +91,7 @@ func TestGenericRequiresEntropy(t *testing.T) {
 }
 
 func TestLineNumberReported(t *testing.T) {
-	body := "line one\nline two\nkey = \"ghp_1234567890abcdefghijklmnopqrstuvwxyz\"\n"
+	body := "line one\nline two\nkey = \"" + testfixtures.GitHubToken() + "\"\n"
 	ms := Detect(body)
 	if len(ms) == 0 || ms[0].Line != 3 {
 		t.Fatalf("expected secret on line 3, got %+v", ms)
@@ -98,7 +99,7 @@ func TestLineNumberReported(t *testing.T) {
 }
 
 func TestEvidenceJSONKeepsRawSecretForCompleteReporting(t *testing.T) {
-	raw := "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+	raw := testfixtures.GitHubToken()
 	ev := EvidenceJSON("github_token", raw, "https://example.com/app.js", 7)
 	if !strings.Contains(ev, raw) {
 		t.Fatalf("evidence did not preserve raw secret: %s", ev)

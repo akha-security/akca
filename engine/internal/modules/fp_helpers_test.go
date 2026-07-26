@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/testfixtures"
 )
 
 func TestStatusOnlyDifferentialRejects405(t *testing.T) {
@@ -25,7 +26,7 @@ func TestDifferentialRejectsPayloadReflection(t *testing.T) {
 }
 
 func TestSecretExposureRequiresNovelSecret(t *testing.T) {
-	token := "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+	token := testfixtures.GitHubToken()
 	body := `key = "` + token + `"`
 	base := body
 	if secretExposureConfirmed(body, base, "github_token") {

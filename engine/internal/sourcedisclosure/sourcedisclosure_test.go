@@ -1,6 +1,10 @@
 package sourcedisclosure
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/akha-security/akca/engine/internal/testfixtures"
+)
 
 func TestLooksLikeSourceCodePHP(t *testing.T) {
 	if !LooksLikeSourceCode(`<?php $db="localhost";`, "text/html") {
@@ -9,7 +13,7 @@ func TestLooksLikeSourceCodePHP(t *testing.T) {
 }
 
 func TestAnalyzeSecretsAndInternalIP(t *testing.T) {
-	body := `api_key="AKIAIOSFODNN7EXAMPLE"; if (debug == true) { } // 10.0.0.5`
+	body := `api_key="` + testfixtures.AWSExampleAccessKey() + `"; if (debug == true) { } // 10.0.0.5`
 	findings := Analyze(body)
 	if len(findings) < 2 {
 		t.Fatalf("expected multiple findings, got %v", findings)

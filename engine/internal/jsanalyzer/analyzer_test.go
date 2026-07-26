@@ -3,6 +3,8 @@ package jsanalyzer
 import (
 	"strings"
 	"testing"
+
+	"github.com/akha-security/akca/engine/internal/testfixtures"
 )
 
 func TestASTAndHeuristicExtraction(t *testing.T) {
@@ -44,26 +46,26 @@ func TestRouteManifestExtraction(t *testing.T) {
 }
 
 func TestSecretRedaction(t *testing.T) {
-	js := `const key = "AKIAIOSFODNN7EXAMP1A"; const token = "ghp_1234567890abcdefghijklmnop";`
+	awsKey := testfixtures.AWSDetectableAccessKey()
+	js := `const key = "` + awsKey + `"; const token = "` + testfixtures.GitHubToken() + `";`
 	secrets := DetectSecrets(js)
 	if len(secrets) < 2 {
 		t.Fatalf("expected secrets, got %d", len(secrets))
 	}
 	for _, s := range secrets {
-		if strings.Contains(s.Redacted, "AKIAIOSFODNN7EXAMP1A") {
+		if strings.Contains(s.Redacted, awsKey) {
 			t.Fatal("secret not redacted")
 		}
 	}
 }
 
 func TestExpandedSecretDetection(t *testing.T) {
-	stripeFixture := "sk_" + "live_0123456789abcdefghij0123"
 	js := `
-const google = "AIza012345678901234567890123456789abcde";
-const stripe = "` + stripeFixture + `";
-const slack = "https://hooks.slack.com/services/T00000000/B00000000/abcdefABCDEF1234";
+const google = "` + testfixtures.GoogleAPIKey() + `";
+const stripe = "` + testfixtures.StripeSecretKey() + `";
+const slack = "` + testfixtures.SlackWebhook() + `";
 const dbURL = "https://admin:secretPass123@db.internal.example.com";
-const openai = "sk-proj-abcdefghijklmnopqrstuvwxyz0123";
+const openai = "` + testfixtures.OpenAIKey() + `";
 const placeholder = { api_key: "your_api_key_here_value" };
 `
 	secrets := DetectSecrets(js)

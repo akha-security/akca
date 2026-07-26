@@ -12,6 +12,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/checkpoint"
 	"github.com/akha-security/akca/engine/internal/events"
 	"github.com/akha-security/akca/engine/internal/storage"
+	"github.com/akha-security/akca/engine/internal/testfixtures"
 )
 
 type mockEventsWriter struct{}
@@ -83,7 +84,7 @@ func TestHandleQuery_ValidateAPIKey_ErrorPropagation(t *testing.T) {
 	input := CommandInput{
 		RequestID: "req-2",
 		Query:     "validate_api_key",
-		Params:    json.RawMessage(`{"token":"ghp_testtesttoken123"}`),
+		Params:    json.RawMessage(fmt.Sprintf(`{"token":%q}`, testfixtures.GitHubQueryToken())),
 	}
 
 	err = eng.HandleQuery(input)

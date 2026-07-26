@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/akha-security/akca/engine/internal/storage"
+	"github.com/akha-security/akca/engine/internal/testfixtures"
 )
 
 func TestPassiveSecretIsPublishedAndPersisted(t *testing.T) {
@@ -30,7 +31,7 @@ func TestPassiveSecretIsPublishedAndPersisted(t *testing.T) {
 			return nil
 		},
 	}
-	raw := "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+	raw := testfixtures.GitHubToken()
 	c.scanSecrets("https://example.test/config.json", `{"token":"`+raw+`"}`)
 
 	findings, err := db.ListFindings("scan-passive", 20, 0)

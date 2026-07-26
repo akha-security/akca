@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/akha-security/akca/engine/internal/storage"
+	"github.com/akha-security/akca/engine/internal/testfixtures"
 )
 
 func TestEveryPassiveJavaScriptCategoryIsPublishedAndPersisted(t *testing.T) {
@@ -32,7 +33,7 @@ func TestEveryPassiveJavaScriptCategoryIsPublishedAndPersisted(t *testing.T) {
 	a.publishResult(AnalysisResult{
 		JSURL:         "https://example.test/app.js",
 		SourceMaps:    []SourceMapRef{{URL: "app.js.map", FromFile: "https://example.test/app.js", Confidence: 0.9}},
-		Secrets:       []SecretMatch{{Kind: "github_token", Value: "ghp_1234567890abcdefghijklmnopqrstuvwxyz", Confidence: 0.9}},
+		Secrets:       []SecretMatch{{Kind: "github_token", Value: testfixtures.GitHubToken(), Confidence: 0.9}},
 		InternalPaths: []InternalPath{{Path: "./internal/admin-client", Kind: "internal", Confidence: 0.7}},
 	})
 

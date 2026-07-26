@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/akha-security/akca/engine/internal/testfixtures"
 )
 
 const DefaultDomain = "lab.akca.test"
@@ -452,15 +454,14 @@ func (s *Server) serveAppJS(w http.ResponseWriter) {
 		_, _ = io.WriteString(w, `const apiBase="/api/v1"; console.log("safe application bundle");`)
 		return
 	}
-	stripeFixture := "sk_" + "live_0123456789abcdefghij0123"
 	_, _ = io.WriteString(w, `fetch("/graphql",{method:"POST",body:JSON.stringify({query:"{__typename}"})});
 const apiBase="/api/v1";
 const cfg={baseURL:"/api/internal/v2"};
 axios.get("/api/v1/profile");
-const ghToken="ghp_abcdefghijklmnopqrstuvwxyz";
-const awsKey="AKIAIOSFODNN7EXAMPLE";
-const googleKey="AIza012345678901234567890123456789abcde";
-const stripeKey="`+stripeFixture+`";
+const ghToken="`+testfixtures.GitHubShortToken()+`";
+const awsKey="`+testfixtures.AWSExampleAccessKey()+`";
+const googleKey="`+testfixtures.GoogleAPIKey()+`";
+const stripeKey="`+testfixtures.StripeSecretKey()+`";
 import("./admin/secret-module.js");
 //# sourceMappingURL=app.js.map`)
 }

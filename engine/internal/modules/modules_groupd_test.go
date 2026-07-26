@@ -12,6 +12,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/reflection"
 	"github.com/akha-security/akca/engine/internal/scope"
+	"github.com/akha-security/akca/engine/internal/testfixtures"
 	"github.com/akha-security/akca/engine/internal/verification"
 )
 
@@ -173,7 +174,7 @@ func TestSensitiveDataExposure(t *testing.T) {
 func TestSecretExposure(t *testing.T) {
 	c := &groupDClient{responses: map[string]string{
 		"akca-secret-base": "config page",
-		"":                 `api_key="ghp_1234567890abcdefghijklmnopqrstuvwxyz"`,
+		"":                 `api_key="` + testfixtures.GitHubToken() + `"`,
 	}}
 	target := ScanTarget{EndpointURL: "http://example.com/config", Method: "GET", Parameter: "q"}
 	findings := groupDRunner(t, c).runSecretExposure(context.Background(), target)

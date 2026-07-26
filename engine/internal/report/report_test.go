@@ -10,6 +10,7 @@ import (
 
 	"github.com/akha-security/akca/engine/internal/evidencestore"
 	"github.com/akha-security/akca/engine/internal/storage"
+	"github.com/akha-security/akca/engine/internal/testfixtures"
 )
 
 func setupReportDB(t *testing.T, findingCount int) (*storage.DB, string) {
@@ -35,7 +36,7 @@ func setupReportDB(t *testing.T, findingCount int) (*storage.DB, string) {
 			t.Fatal(err)
 		}
 	}
-	_ = db.SaveAPIKeyValidation(scanID, "GitHub", "valid", map[string]string{"key": "ghp_supersecret1234567890"})
+	_ = db.SaveAPIKeyValidation(scanID, "GitHub", "valid", map[string]string{"key": testfixtures.GitHubReportToken()})
 	_ = db.SaveFindingGroup(scanID, "missing_output_encoding", map[string]int{"count": 3})
 	return db, scanID
 }
@@ -57,7 +58,7 @@ func TestExportFormatsSampleData(t *testing.T) {
 	if !strings.Contains(htmlBuf.String(), "HackerOne Submission Report") {
 		t.Fatal("expected HackerOne template title")
 	}
-	if strings.Contains(htmlBuf.String(), "ghp_supersecret") {
+	if strings.Contains(htmlBuf.String(), testfixtures.GitHubReportToken()) {
 		t.Fatal("expected redacted API key in HTML")
 	}
 

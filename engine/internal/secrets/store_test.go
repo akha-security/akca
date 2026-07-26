@@ -2,6 +2,8 @@ package secrets
 
 import (
 	"testing"
+
+	"github.com/akha-security/akca/engine/internal/testfixtures"
 )
 
 func TestEncryptDecryptDisk(t *testing.T) {
@@ -22,7 +24,8 @@ func TestEncryptDecryptDisk(t *testing.T) {
 func TestStorePutGetEncryptedDisk(t *testing.T) {
 	dir := t.TempDir()
 	s := NewStore("encrypted_disk", dir)
-	ref, err := s.Put("api_key", []byte("ghp_test123"))
+	raw := testfixtures.GitHubQueryToken()
+	ref, err := s.Put("api_key", []byte(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +36,7 @@ func TestStorePutGetEncryptedDisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "ghp_test123" {
+	if string(got) != raw {
 		t.Fatalf("unexpected: %s", got)
 	}
 }
