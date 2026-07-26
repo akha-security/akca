@@ -11,12 +11,12 @@ import (
 )
 
 type Result struct {
-	Service    string   `json:"service"`
-	Status     string   `json:"status"`
-	Scopes     []string `json:"scopes,omitempty"`
-	Risk       string   `json:"risk"`
-	TokenHint  string   `json:"token_hint"`
-	Validated  bool     `json:"validated"`
+	Service   string   `json:"service"`
+	Status    string   `json:"status"`
+	Scopes    []string `json:"scopes,omitempty"`
+	Risk      string   `json:"risk"`
+	TokenHint string   `json:"token_hint"`
+	Validated bool     `json:"validated"`
 }
 
 type Validator struct {

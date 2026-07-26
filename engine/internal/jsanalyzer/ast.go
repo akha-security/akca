@@ -13,7 +13,7 @@ func ExtractASTLite(js string) []ExtractedEndpoint {
 	var out []ExtractedEndpoint
 	literals := stringLiteralRe.FindAllString(js, -1)
 	for _, lit := range literals {
-		unquoted := strings.Trim(lit, `"'` + "`")
+		unquoted := strings.Trim(lit, `"'`+"`")
 		if !looksLikeEndpoint(unquoted) {
 			continue
 		}

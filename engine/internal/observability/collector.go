@@ -10,11 +10,11 @@ import (
 )
 
 type Collector struct {
-	db        *storage.DB
-	started   time.Time
-	reqCount  int64
-	errCount  int64
-	backlog   int64
+	db       *storage.DB
+	started  time.Time
+	reqCount int64
+	errCount int64
+	backlog  int64
 }
 
 func NewCollector(db *storage.DB) *Collector {

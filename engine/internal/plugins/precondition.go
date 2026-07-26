@@ -62,7 +62,7 @@ var registry = []Module{
 	{
 		Manifest: models.PluginManifest{Name: "idor", Description: "Insecure direct object reference", Version: "0.1.0"},
 		Precondition: Precondition{
-			RequireAuthSurface: true,
+			RequireAuthSurface:    true,
 			RequiredEndpointTypes: []string{"api", "graphql"},
 		},
 	},

@@ -8,12 +8,12 @@ import (
 
 func TestPluginPreconditionsSkipReasons(t *testing.T) {
 	intel := models.EndpointIntelligence{
-		URL:          "https://example.com/static/app.js",
-		Method:       "GET",
-		EndpointType: "script",
-		ContentType:  "application/javascript",
-		AuthRequired: false,
-		StateChanging: false,
+		URL:             "https://example.com/static/app.js",
+		Method:          "GET",
+		EndpointType:    "script",
+		ContentType:     "application/javascript",
+		AuthRequired:    false,
+		StateChanging:   false,
 		TechFingerprint: &models.TechFingerprint{Hints: []string{"framework:WordPress"}},
 	}
 
@@ -40,11 +40,11 @@ func TestPluginPreconditionsSkipReasons(t *testing.T) {
 
 func TestGraphQLModuleReady(t *testing.T) {
 	intel := models.EndpointIntelligence{
-		URL:          "https://example.com/graphql",
-		Method:       "POST",
-		EndpointType: "graphql",
-		ContentType:  "application/json",
-		AuthRequired: true,
+		URL:           "https://example.com/graphql",
+		Method:        "POST",
+		EndpointType:  "graphql",
+		ContentType:   "application/json",
+		AuthRequired:  true,
 		StateChanging: true,
 	}
 	ready, skipped := EvaluatePreconditions(intel)

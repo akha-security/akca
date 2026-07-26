@@ -8,39 +8,39 @@ import (
 
 func TestDetectCloudflareAkamaiAWSModSecurity(t *testing.T) {
 	cases := []struct {
-		name   string
+		name    string
 		headers map[string]string
-		body   string
-		status int
-		want   string
+		body    string
+		status  int
+		want    string
 	}{
 		{
-			name: "cloudflare headers",
+			name:    "cloudflare headers",
 			headers: map[string]string{"server": "cloudflare", "cf-ray": "abc"},
-			body: "",
-			status: 200,
-			want: "Cloudflare",
+			body:    "",
+			status:  200,
+			want:    "Cloudflare",
 		},
 		{
-			name: "akamai header",
+			name:    "akamai header",
 			headers: map[string]string{"x-akamai-transformed": "1"},
-			body: "",
-			status: 200,
-			want: "Akamai",
+			body:    "",
+			status:  200,
+			want:    "Akamai",
 		},
 		{
-			name: "aws waf header",
+			name:    "aws waf header",
 			headers: map[string]string{"x-amzn-requestid": "req-1"},
-			body: "",
-			status: 403,
-			want: "AWS WAF",
+			body:    "",
+			status:  403,
+			want:    "AWS WAF",
 		},
 		{
-			name: "modsecurity body",
+			name:    "modsecurity body",
 			headers: map[string]string{},
-			body: "blocked by mod_security",
-			status: 403,
-			want: "ModSecurity",
+			body:    "blocked by mod_security",
+			status:  403,
+			want:    "ModSecurity",
 		},
 	}
 

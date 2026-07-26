@@ -8,23 +8,23 @@ import (
 type Outcome string
 
 const (
-	OutcomeWorked         Outcome = "worked"
-	OutcomeFailed         Outcome = "failed"
-	OutcomeWAFBlocked     Outcome = "waf_blocked"
-	OutcomeUnstable       Outcome = "unstable"
-	OutcomeFalsePositive  Outcome = "false_positive"
+	OutcomeWorked        Outcome = "worked"
+	OutcomeFailed        Outcome = "failed"
+	OutcomeWAFBlocked    Outcome = "waf_blocked"
+	OutcomeUnstable      Outcome = "unstable"
+	OutcomeFalsePositive Outcome = "false_positive"
 )
 
 type Profile struct {
-	Domain        string            `json:"domain"`
-	EndpointURL   string            `json:"endpoint_url,omitempty"`
-	Worked        []string          `json:"worked,omitempty"`
-	Blocked       []string          `json:"blocked,omitempty"`
-	Noisy         []string          `json:"noisy,omitempty"`
-	FalsePositive []string          `json:"false_positive,omitempty"`
-	Stability     map[string]int    `json:"stability,omitempty"`
-	WAFBlocks     map[string]int    `json:"waf_blocks,omitempty"`
-	UpdatedAt     time.Time         `json:"updated_at"`
+	Domain        string         `json:"domain"`
+	EndpointURL   string         `json:"endpoint_url,omitempty"`
+	Worked        []string       `json:"worked,omitempty"`
+	Blocked       []string       `json:"blocked,omitempty"`
+	Noisy         []string       `json:"noisy,omitempty"`
+	FalsePositive []string       `json:"false_positive,omitempty"`
+	Stability     map[string]int `json:"stability,omitempty"`
+	WAFBlocks     map[string]int `json:"waf_blocks,omitempty"`
+	UpdatedAt     time.Time      `json:"updated_at"`
 }
 
 func NewProfile(domain, endpointURL string) Profile {

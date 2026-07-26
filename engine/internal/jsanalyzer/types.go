@@ -9,13 +9,13 @@ const (
 )
 
 type ExtractedEndpoint struct {
-	URL           string  `json:"url"`
-	Method        string  `json:"method"`
-	Template      string  `json:"template"`
-	Source        string  `json:"source"`
-	Extraction    string  `json:"extraction"` // ast | heuristic
-	Confidence    float64 `json:"confidence"`
-	Why           string  `json:"why"`
+	URL        string  `json:"url"`
+	Method     string  `json:"method"`
+	Template   string  `json:"template"`
+	Source     string  `json:"source"`
+	Extraction string  `json:"extraction"` // ast | heuristic
+	Confidence float64 `json:"confidence"`
+	Why        string  `json:"why"`
 }
 
 type SecretMatch struct {
@@ -40,15 +40,15 @@ type InternalPath struct {
 }
 
 type AnalysisResult struct {
-	JSURL           string              `json:"js_url"`
-	Truncated       bool                `json:"truncated"`
-	PreviewOnly     bool                `json:"preview_only"`
-	BytesAnalyzed   int                 `json:"bytes_analyzed"`
-	Endpoints       []ExtractedEndpoint `json:"endpoints"`
-	Secrets         []SecretMatch       `json:"secrets"`
-	SourceMaps      []SourceMapRef      `json:"source_maps"`
-	InternalPaths   []InternalPath      `json:"internal_paths"`
-	AnalyzedAt      string              `json:"analyzed_at"`
+	JSURL         string              `json:"js_url"`
+	Truncated     bool                `json:"truncated"`
+	PreviewOnly   bool                `json:"preview_only"`
+	BytesAnalyzed int                 `json:"bytes_analyzed"`
+	Endpoints     []ExtractedEndpoint `json:"endpoints"`
+	Secrets       []SecretMatch       `json:"secrets"`
+	SourceMaps    []SourceMapRef      `json:"source_maps"`
+	InternalPaths []InternalPath      `json:"internal_paths"`
+	AnalyzedAt    string              `json:"analyzed_at"`
 }
 
 type EventSink func(eventType, message string, payload map[string]interface{}) error

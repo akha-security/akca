@@ -16,8 +16,8 @@ const (
 
 // Baseline holds harmless-request timing statistics for a target parameter.
 type Baseline struct {
-	Samples []int64
-	AvgMs   float64
+	Samples  []int64
+	AvgMs    float64
 	MedianMs int64
 	JitterMs float64
 }

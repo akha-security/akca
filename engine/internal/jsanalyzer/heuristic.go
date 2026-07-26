@@ -16,10 +16,10 @@ var (
 	reDynamicImp  = regexp.MustCompile(`(?i)import\s*\(\s*["']([^"']+)["']\s*\)`)
 	reChunk       = regexp.MustCompile(`(?i)["']([^"']+\.chunk\.js)["']`)
 	// Tightened: require at least one letter after / and only allow path-like chars.
-	reRoutes      = regexp.MustCompile(`["'](/[a-zA-Z][a-zA-Z0-9_./:-]{1,120})["']`)
-	reNextData    = regexp.MustCompile(`(?i)__NEXT_DATA__[\s\S]*?"pathname"\s*:\s*"([^"]+)"`)
-	reNuxt        = regexp.MustCompile(`(?i)window\.__NUXT__`)
-	reSvelteKit   = regexp.MustCompile(`(?i)__sveltekit_[a-z0-9]+`)
+	reRoutes        = regexp.MustCompile(`["'](/[a-zA-Z][a-zA-Z0-9_./:-]{1,120})["']`)
+	reNextData      = regexp.MustCompile(`(?i)__NEXT_DATA__[\s\S]*?"pathname"\s*:\s*"([^"]+)"`)
+	reNuxt          = regexp.MustCompile(`(?i)window\.__NUXT__`)
+	reSvelteKit     = regexp.MustCompile(`(?i)__sveltekit_[a-z0-9]+`)
 	reServiceWorker = regexp.MustCompile(`(?i)navigator\.serviceWorker\.register\s*\(\s*["']([^"']+)["']`)
 	reConfigURL     = regexp.MustCompile(`(?i)(?:base_?url|api_?url|api_?base|api_?host|endpoint|gateway_?url|graphql_?(?:uri|url|endpoint))\s*[:=]\s*["']([^"']+)["']`)
 )
@@ -124,13 +124,13 @@ func routeLooksValid(path string) bool {
 
 	// ── Reject common JS/CSS/framework artifacts ──
 	for _, noise := range []string{
-		"//", "/../", "/./",                         // degenerate paths
-		"/node_modules/", "/bower_components/",      // package manager
-		"/dist/", "/build/", "/out/", "/tmp/",       // build artifacts
-		"/src/", "/lib/", "/vendor/",                // source dirs (not API)
-		"/.git/", "/.svn/",                          // VCS
+		"//", "/../", "/./", // degenerate paths
+		"/node_modules/", "/bower_components/", // package manager
+		"/dist/", "/build/", "/out/", "/tmp/", // build artifacts
+		"/src/", "/lib/", "/vendor/", // source dirs (not API)
+		"/.git/", "/.svn/", // VCS
 		"/undefined", "/null", "/NaN", "/true", "/false", // JS literal noise
-		"@", "#", "=",                               // query/fragment/selector noise
+		"@", "#", "=", // query/fragment/selector noise
 	} {
 		if strings.Contains(path, noise) {
 			return false
@@ -139,7 +139,7 @@ func routeLooksValid(path string) bool {
 
 	// ── Reject paths that start with framework-internal prefixes ──
 	for _, prefix := range []string{
-		"/_next/", "/_nuxt/", "/_app/", "/__",       // framework internal routes
+		"/_next/", "/_nuxt/", "/_app/", "/__", // framework internal routes
 		"/static/", "/assets/", "/images/", "/img/", // static resource dirs
 		"/fonts/", "/media/", "/public/",
 	} {
@@ -173,4 +173,3 @@ func routeLooksValid(path string) bool {
 
 	return true
 }
-

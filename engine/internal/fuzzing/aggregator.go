@@ -3,11 +3,11 @@ package fuzzing
 import "sync"
 
 type ResultAggregator struct {
-	mu      sync.Mutex
-	batch   []FuzzResult
-	limit   int
-	emit    EventSink
-	scanID  string
+	mu     sync.Mutex
+	batch  []FuzzResult
+	limit  int
+	emit   EventSink
+	scanID string
 }
 
 func NewResultAggregator(scanID string, limit int, emit EventSink) *ResultAggregator {

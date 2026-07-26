@@ -91,11 +91,11 @@ func TestRunnerStopIdempotency(t *testing.T) {
 	defer db.Close()
 	_ = db.Migrate()
 	r := NewRunner(db, nil)
-	
+
 	// Calling Stop multiple times concurrently and sequentially should be safe and not panic
 	r.Stop()
 	r.Stop()
-	
+
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(1)

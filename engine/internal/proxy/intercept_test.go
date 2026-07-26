@@ -57,15 +57,15 @@ func TestProxyChunkedWriteBodyUnion(t *testing.T) {
 		ResponseWriter: &mockResponseWriter{},
 		record:         rec,
 	}
-	
+
 	// Test appending multiple chunked writes
 	_, _ = cw.Write([]byte("chunk1"))
 	_, _ = cw.Write([]byte("chunk2"))
-	
+
 	if rec.RespBody != "chunk1chunk2" {
 		t.Fatalf("expected chunk1chunk2, got %q", rec.RespBody)
 	}
-	
+
 	// Test truncation limit
 	rec2 := &TrafficRecord{}
 	cw2 := &captureWriter{
@@ -73,13 +73,13 @@ func TestProxyChunkedWriteBodyUnion(t *testing.T) {
 		record:         rec2,
 	}
 	// Write more than 2MB
-	largeChunk := make([]byte, 2*1024*1024 + 100)
+	largeChunk := make([]byte, 2*1024*1024+100)
 	for i := range largeChunk {
 		largeChunk[i] = 'A'
 	}
 	_, _ = cw2.Write(largeChunk)
-	
-	if len(rec2.RespBody) > 2*1024*1024 + 100 {
+
+	if len(rec2.RespBody) > 2*1024*1024+100 {
 		t.Fatalf("expected truncation under 2MB + metadata size")
 	}
 	if !strings.HasSuffix(rec2.RespBody, "[TRUNCATED - RESPONSE TOO LARGE]") {
@@ -88,23 +88,24 @@ func TestProxyChunkedWriteBodyUnion(t *testing.T) {
 }
 
 type mockResponseWriter struct{}
-func (m *mockResponseWriter) Header() http.Header { return http.Header{} }
+
+func (m *mockResponseWriter) Header() http.Header         { return http.Header{} }
 func (m *mockResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
-func (m *mockResponseWriter) WriteHeader(statusCode int) {}
+func (m *mockResponseWriter) WriteHeader(statusCode int)  {}
 
 func TestProxyCONNECTTunnelClose(t *testing.T) {
 	c1, s1 := net.Pipe()
 	c2, s2 := net.Pipe()
-	
+
 	// Start tunnel asynchronously
 	go tunnel(s1, s2)
-	
+
 	// Write from client 1 side
 	go func() {
 		_, _ = c1.Write([]byte("hello"))
 		_ = c1.Close() // Half close simulation: client 1 stops writing
 	}()
-	
+
 	// Read from client 2 side
 	buf := make([]byte, 5)
 	n, err := io.ReadFull(c2, buf)
@@ -119,7 +120,7 @@ func TestProxyMalformedURLTarget(t *testing.T) {
 	_ = db.Migrate()
 	s := NewInterceptServer(db, scope.NewEngine(config.DefaultScanConfig()), "sess-3")
 	s.enabled = true
-	
+
 	rec := &mockResponseWriterWithStatus{}
 	req := &http.Request{
 		Method: "GET",
@@ -131,7 +132,7 @@ func TestProxyMalformedURLTarget(t *testing.T) {
 		},
 	}
 	s.handle(rec, req)
-	
+
 	if rec.status != http.StatusBadRequest {
 		t.Fatalf("expected HTTP 400 Bad Request for malformed target, got %d", rec.status)
 	}
@@ -140,6 +141,7 @@ func TestProxyMalformedURLTarget(t *testing.T) {
 type mockResponseWriterWithStatus struct {
 	status int
 }
-func (m *mockResponseWriterWithStatus) Header() http.Header { return http.Header{} }
+
+func (m *mockResponseWriterWithStatus) Header() http.Header         { return http.Header{} }
 func (m *mockResponseWriterWithStatus) Write(b []byte) (int, error) { return len(b), nil }
-func (m *mockResponseWriterWithStatus) WriteHeader(statusCode int) { m.status = statusCode }
+func (m *mockResponseWriterWithStatus) WriteHeader(statusCode int)  { m.status = statusCode }

@@ -21,7 +21,7 @@ type Ref struct {
 }
 
 type Store struct {
-	mode   string
+	mode    string
 	dataDir string
 }
 

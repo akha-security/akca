@@ -113,7 +113,7 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 			methodHits[name] = map[string]struct{}{}
 		}
 		methodHits[name][surfaceKey] = struct{}{}
-		
+
 		// Autogen and probe variants of the discovered parameter
 		for _, variant := range paramVariants(name) {
 			if variant != name {
@@ -124,7 +124,7 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 
 	probes := 0
 	wordlist := DifferentialWordlist(endpointURL, d.wordlistCap)
-	
+
 	// Inject JS parameters if any
 	if rows, jerr := d.db.Conn().Query(`SELECT DISTINCT name FROM parameters WHERE priority >= 80 AND endpoint_id IN (SELECT id FROM endpoints WHERE scan_id = ?)`, d.scanID); jerr == nil {
 		defer rows.Close()
@@ -257,7 +257,7 @@ func (d *Discoverer) Run(ctx context.Context, limit int) error {
 	if err != nil {
 		return err
 	}
-	
+
 	// Perform cross-endpoint parameter transfer first
 	d.crossEndpointTransfer(ctx, endpoints)
 
@@ -531,4 +531,3 @@ func (d *Discoverer) SetParallelism(n int) {
 }
 
 func Now() time.Time { return time.Now().UTC() }
-

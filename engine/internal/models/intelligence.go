@@ -24,10 +24,10 @@ type TechComponent struct {
 }
 
 type ReconSecurityAudit struct {
-	Score         int               `json:"score"`
-	PresentCount  int               `json:"present_count"`
-	Headers       map[string]string `json:"headers,omitempty"`
-	Missing       []string          `json:"missing,omitempty"`
+	Score        int               `json:"score"`
+	PresentCount int               `json:"present_count"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	Missing      []string          `json:"missing,omitempty"`
 }
 
 type ReconCookie struct {
@@ -39,36 +39,36 @@ type ReconCookie struct {
 }
 
 type TechFingerprint struct {
-	Host            string              `json:"host"`
-	BackendLanguage string              `json:"backend_language,omitempty"`
-	Framework       string              `json:"framework,omitempty"`
-	Database        string              `json:"database,omitempty"`
-	ServerCDN       string              `json:"server_cdn,omitempty"`
-	JSFramework     string              `json:"js_framework,omitempty"`
-	Hints           []string            `json:"hints,omitempty"`
-	DetectedAt      string              `json:"detected_at"`
-	HTTPStatus      int                 `json:"http_status,omitempty"`
-	PageTitle       string              `json:"page_title,omitempty"`
-	MetaGenerator   string              `json:"meta_generator,omitempty"`
-	Components      []TechComponent     `json:"components,omitempty"`
-	ResponseHeaders map[string]string   `json:"response_headers,omitempty"`
-	SecurityHeaders ReconSecurityAudit  `json:"security_headers,omitempty"`
-	Cookies         []ReconCookie       `json:"cookies,omitempty"`
-	TLSHints        []string            `json:"tls_hints,omitempty"`
-	ContentType     string              `json:"content_type,omitempty"`
+	Host            string             `json:"host"`
+	BackendLanguage string             `json:"backend_language,omitempty"`
+	Framework       string             `json:"framework,omitempty"`
+	Database        string             `json:"database,omitempty"`
+	ServerCDN       string             `json:"server_cdn,omitempty"`
+	JSFramework     string             `json:"js_framework,omitempty"`
+	Hints           []string           `json:"hints,omitempty"`
+	DetectedAt      string             `json:"detected_at"`
+	HTTPStatus      int                `json:"http_status,omitempty"`
+	PageTitle       string             `json:"page_title,omitempty"`
+	MetaGenerator   string             `json:"meta_generator,omitempty"`
+	Components      []TechComponent    `json:"components,omitempty"`
+	ResponseHeaders map[string]string  `json:"response_headers,omitempty"`
+	SecurityHeaders ReconSecurityAudit `json:"security_headers,omitempty"`
+	Cookies         []ReconCookie      `json:"cookies,omitempty"`
+	TLSHints        []string           `json:"tls_hints,omitempty"`
+	ContentType     string             `json:"content_type,omitempty"`
 }
 
 type EndpointIntelligence struct {
-	URL                 string   `json:"url"`
-	Method              string   `json:"method"`
-	EndpointType        string   `json:"endpoint_type"`
-	AuthRequired        bool     `json:"auth_required"`
-	StateChanging       bool     `json:"state_changing"`
-	ContentType         string   `json:"content_type,omitempty"`
-	RiskTags            []string `json:"risk_tags,omitempty"`
-	RecommendedModules  []string `json:"recommended_modules,omitempty"`
-	WAFProfile          *WAFProfile       `json:"waf_profile,omitempty"`
-	TechFingerprint     *TechFingerprint  `json:"tech_fingerprint,omitempty"`
+	URL                string           `json:"url"`
+	Method             string           `json:"method"`
+	EndpointType       string           `json:"endpoint_type"`
+	AuthRequired       bool             `json:"auth_required"`
+	StateChanging      bool             `json:"state_changing"`
+	ContentType        string           `json:"content_type,omitempty"`
+	RiskTags           []string         `json:"risk_tags,omitempty"`
+	RecommendedModules []string         `json:"recommended_modules,omitempty"`
+	WAFProfile         *WAFProfile      `json:"waf_profile,omitempty"`
+	TechFingerprint    *TechFingerprint `json:"tech_fingerprint,omitempty"`
 }
 
 type PluginManifest struct {

@@ -6,9 +6,9 @@ import (
 )
 
 type queued403 struct {
-	entry    QueueEntry
-	seq      int64
-	index    int
+	entry QueueEntry
+	seq   int64
+	index int
 }
 
 type priority403Heap []*queued403
@@ -42,15 +42,15 @@ func (h *priority403Heap) Pop() interface{} {
 }
 
 type Queue403 struct {
-	mu               sync.Mutex
-	maxSize          int
-	seen             map[string]struct{}
-	heap             priority403Heap
-	seq              int64
-	totalEnqueued    int
+	mu                sync.Mutex
+	maxSize           int
+	seen              map[string]struct{}
+	heap              priority403Heap
+	seq               int64
+	totalEnqueued     int
 	totalDeduplicated int
-	totalProcessed   int
-	totalEvicted     int
+	totalProcessed    int
+	totalEvicted      int
 }
 
 // lowestPriorityIndex returns the heap index of the entry with the smallest

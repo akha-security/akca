@@ -41,10 +41,10 @@ var vendorStrategies = map[string][]Strategy{
 }
 
 type LearningProfile struct {
-	Domain            string         `json:"domain"`
-	StrategyScores    map[string]int `json:"strategy_scores"`
-	BlockedEncodings  []string       `json:"blocked_encodings"`
-	LastSuccessful    string         `json:"last_successful"`
+	Domain           string         `json:"domain"`
+	StrategyScores   map[string]int `json:"strategy_scores"`
+	BlockedEncodings []string       `json:"blocked_encodings"`
+	LastSuccessful   string         `json:"last_successful"`
 }
 
 func NewLearningProfile(domain string) LearningProfile {

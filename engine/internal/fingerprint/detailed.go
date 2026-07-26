@@ -32,7 +32,7 @@ var (
 	reMetaGenerator  = regexp.MustCompile(`(?i)<meta[^>]+name=["']generator["'][^>]+content=["']([^"']+)["']`)
 	reMetaGenerator2 = regexp.MustCompile(`(?i)<meta[^>]+content=["']([^"']+)["'][^>]+name=["']generator["']`)
 	reWPVersion      = regexp.MustCompile(`(?i)WordPress\s+([\d.]+)`)
-	reJQueryVer       = regexp.MustCompile(`(?i)jquery[.-]([\d.]+)(?:\.min)?\.js`)
+	reJQueryVer      = regexp.MustCompile(`(?i)jquery[.-]([\d.]+)(?:\.min)?\.js`)
 	reBootstrapVer   = regexp.MustCompile(`(?i)bootstrap[.-]([\d.]+)(?:\.min)?\.(?:js|css)`)
 	reReactVer       = regexp.MustCompile(`(?i)react[@.-]([\d.]+)(?:/|\.)`)
 	reVueVer         = regexp.MustCompile(`(?i)vue[@.-]([\d.]+)(?:/|\.)`)

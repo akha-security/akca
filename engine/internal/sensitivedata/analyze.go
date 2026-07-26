@@ -15,16 +15,16 @@ type Finding struct {
 }
 
 var (
-	ssnRe          = regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)
-	emailRe        = regexp.MustCompile(`\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`)
-	cardCandidate  = regexp.MustCompile(`\b(?:\d[ -]*?){13,19}\b`)
-	jwtRe          = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)
-	sessionRe      = regexp.MustCompile(`(?i)(?:PHPSESSID|JSESSIONID|connect\.sid|sessionid|ASP\.NET_SessionId)\s*[=:]\s*([A-Za-z0-9._\-]{8,})`)
-	internalIPRe   = regexp.MustCompile(`\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|127\.0\.0\.1)\b`)
-	stackTraceRe   = regexp.MustCompile(`(?i)(?:stack trace|traceback \(most recent call last\)|exception in thread|at [\w.$]+\([\w./\\]+:\d+\))`)
-	dbErrorRe      = regexp.MustCompile(`(?i)(?:sql syntax|mysql_fetch|mysqli_|pg_query|sqlite3\.|ORA-\d{5}|unclosed quotation mark|odbc sql server driver|sqlstate\[)`)
-	sourceCodeRe   = regexp.MustCompile(`(?m)^\s*(?:import |from .+ import |package |#include |function \w+\(|class \w+|def \w+\()`)
-	piiKeywordRe   = regexp.MustCompile(`(?i)\b(?:date of birth|medical record|driver.?s license|social security|passport number)\b`)
+	ssnRe         = regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)
+	emailRe       = regexp.MustCompile(`\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`)
+	cardCandidate = regexp.MustCompile(`\b(?:\d[ -]*?){13,19}\b`)
+	jwtRe         = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)
+	sessionRe     = regexp.MustCompile(`(?i)(?:PHPSESSID|JSESSIONID|connect\.sid|sessionid|ASP\.NET_SessionId)\s*[=:]\s*([A-Za-z0-9._\-]{8,})`)
+	internalIPRe  = regexp.MustCompile(`\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|127\.0\.0\.1)\b`)
+	stackTraceRe  = regexp.MustCompile(`(?i)(?:stack trace|traceback \(most recent call last\)|exception in thread|at [\w.$]+\([\w./\\]+:\d+\))`)
+	dbErrorRe     = regexp.MustCompile(`(?i)(?:sql syntax|mysql_fetch|mysqli_|pg_query|sqlite3\.|ORA-\d{5}|unclosed quotation mark|odbc sql server driver|sqlstate\[)`)
+	sourceCodeRe  = regexp.MustCompile(`(?m)^\s*(?:import |from .+ import |package |#include |function \w+\(|class \w+|def \w+\()`)
+	piiKeywordRe  = regexp.MustCompile(`(?i)\b(?:date of birth|medical record|driver.?s license|social security|passport number)\b`)
 )
 
 // Analyze scans response bodies for semantically sensitive data exposure.

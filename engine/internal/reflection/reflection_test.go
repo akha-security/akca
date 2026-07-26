@@ -4,10 +4,10 @@ import "testing"
 
 func TestClassifyAllContexts(t *testing.T) {
 	cases := []struct {
-		body    string
-		canary  string
-		ctype   string
-		want    ContextType
+		body   string
+		canary string
+		ctype  string
+		want   ContextType
 	}{
 		{`<html><body>hello akca1239z world</body></html>`, "akca1239z", "text/html", ContextHTML},
 		{`<input value="akca1239z">`, "akca1239z", "text/html", ContextAttribute},

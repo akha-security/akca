@@ -17,17 +17,17 @@ import (
 
 // LoginRequest describes credentials for automated form login.
 type LoginRequest struct {
-	LoginURL       string `json:"login_url"`
-	Username       string `json:"username"`
-	Password       string `json:"password"`
-	UsernameField  string `json:"username_field,omitempty"`
-	PasswordField  string `json:"password_field,omitempty"`
-	ExtraFields    map[string]string `json:"extra_fields,omitempty"`
-	ForceHTTP1     bool   `json:"force_http1"`
+	LoginURL      string            `json:"login_url"`
+	Username      string            `json:"username"`
+	Password      string            `json:"password"`
+	UsernameField string            `json:"username_field,omitempty"`
+	PasswordField string            `json:"password_field,omitempty"`
+	ExtraFields   map[string]string `json:"extra_fields,omitempty"`
+	ForceHTTP1    bool              `json:"force_http1"`
 }
 
 var (
-	inputNameRe = regexp.MustCompile(`(?i)<input[^>]+name=["']([^"']+)["'][^>]*>`)
+	inputNameRe  = regexp.MustCompile(`(?i)<input[^>]+name=["']([^"']+)["'][^>]*>`)
 	formActionRe = regexp.MustCompile(`(?i)<form[^>]*action=["']([^"']*)["']`)
 )
 

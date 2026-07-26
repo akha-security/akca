@@ -3,24 +3,24 @@ package reflection
 type ContextType string
 
 const (
-	ContextHTML        ContextType = "html_body"
-	ContextAttribute   ContextType = "attribute"
-	ContextJavaScript  ContextType = "javascript"
-	ContextCSS         ContextType = "css"
-	ContextURL         ContextType = "url"
-	ContextJSON        ContextType = "json"
-	ContextXML         ContextType = "xml"
-	ContextComment     ContextType = "comment"
-	ContextUnknown     ContextType = "unknown"
+	ContextHTML       ContextType = "html_body"
+	ContextAttribute  ContextType = "attribute"
+	ContextJavaScript ContextType = "javascript"
+	ContextCSS        ContextType = "css"
+	ContextURL        ContextType = "url"
+	ContextJSON       ContextType = "json"
+	ContextXML        ContextType = "xml"
+	ContextComment    ContextType = "comment"
+	ContextUnknown    ContextType = "unknown"
 )
 
 type ReflectionKind string
 
 const (
-	ReflectionRaw      ReflectionKind = "raw"
-	ReflectionEncoded  ReflectionKind = "encoded"
-	ReflectionPartial  ReflectionKind = "partial"
-	ReflectionRemoved  ReflectionKind = "removed"
+	ReflectionRaw     ReflectionKind = "raw"
+	ReflectionEncoded ReflectionKind = "encoded"
+	ReflectionPartial ReflectionKind = "partial"
+	ReflectionRemoved ReflectionKind = "removed"
 )
 
 type ReflectionProfile struct {

@@ -8,18 +8,18 @@ import (
 )
 
 type State struct {
-	Phase        string                 `json:"phase"`
-	Completed    []string               `json:"completed_phases"`
-	PhaseStatus  map[string]string      `json:"phase_status,omitempty"`
-	CrawlQueue   []string               `json:"crawl_queue,omitempty"`
-	FuzzQueue    []string               `json:"fuzz_queue,omitempty"`
-	ModuleState  map[string]interface{} `json:"module_state,omitempty"`
-	OASTPending  []string               `json:"oast_pending,omitempty"`
+	Phase       string                 `json:"phase"`
+	Completed   []string               `json:"completed_phases"`
+	PhaseStatus map[string]string      `json:"phase_status,omitempty"`
+	CrawlQueue  []string               `json:"crawl_queue,omitempty"`
+	FuzzQueue   []string               `json:"fuzz_queue,omitempty"`
+	ModuleState map[string]interface{} `json:"module_state,omitempty"`
+	OASTPending []string               `json:"oast_pending,omitempty"`
 	// Config holds the raw scan configuration so a scan can be fully resumed
 	// (targets, scope, options) even after the engine process restarts.
-	Config       json.RawMessage `json:"config,omitempty"`
-	Version      int             `json:"version"`
-	UpdatedAt    string          `json:"updated_at"`
+	Config    json.RawMessage `json:"config,omitempty"`
+	Version   int             `json:"version"`
+	UpdatedAt string          `json:"updated_at"`
 }
 
 type Store struct {
