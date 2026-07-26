@@ -73,10 +73,8 @@ $env:Path += ";$(go env GOPATH)\bin"
 ```
 
 > [!NOTE]
-> The remote `go install -v ...@latest` command becomes available after this
-> repository is published at `github.com/akha-security/akca` with the `engine`
-> Go module included. Tagged releases are recommended for reproducible
-> installations.
+> `@latest` installs the newest published Akca engine version. Demo releases
+> may introduce breaking changes until the first stable release.
 
 ## Automatic browser setup
 

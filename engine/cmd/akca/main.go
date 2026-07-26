@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	version = "1.0.0"
+	version = "0.1.0-demo.1"
 	uiWidth = 68
 )
 
