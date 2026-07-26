@@ -1,0 +1,49 @@
+name: authorized-akca-dast
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Explicitly authorized http(s) target
+        required: true
+        type: string
+      authorization_confirmed:
+        description: I confirm I am authorized to scan this target
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  dast:
+    if: ${{ inputs.authorization_confirmed }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      AKCA_TARGET: ${{ inputs.target }}
+      AKCA_AUTHORIZED: "true"
+      AKCA_REPORT_PATH: akca-results.sarif
+      AKCA_RATE_LIMIT: "10"
+      AKCA_CONCURRENCY: "8"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache-dependency-path: engine/go.sum
+      - name: Run authorized Akca DAST
+        run: bash scripts/ci-scan.sh
+      - name: Upload SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: akca-sarif
+          path: akca-results.sarif
+      - name: Publish to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: akca-results.sarif

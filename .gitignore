@@ -1,0 +1,51 @@
+# Binaries
+/akca
+/akca.exe
+/akca-api
+/akca-api.exe
+/akca-policy
+/akca-policy.exe
+/engine/akca
+/engine/akca.exe
+/engine/akca-api
+/engine/akca-api.exe
+/engine/akca-policy
+/engine/akca-policy.exe
+
+# Go build/test caches
+.gocache/
+.gotmp/
+*.test
+coverage.out
+coverage-*.out
+*.prof
+
+# Local scan artifacts
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+akca-report-*
+akca-results.*
+benchmark-*.json
+output/
+reports/
+*.log
+*.tmp
+
+# Local secrets and dependencies
+.env
+.env.*
+!.env.example
+node_modules/
+
+# Local workspace metadata
+.agents/
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini

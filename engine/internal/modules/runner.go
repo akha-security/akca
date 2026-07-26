@@ -1,0 +1,365 @@
+package modules
+
+import (
+	"context"
+	"encoding/json"
+	"sync"
+	"time"
+
+	"github.com/akha-security/akca/engine/internal/config"
+	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/learning"
+	"github.com/akha-security/akca/engine/internal/oast"
+	"github.com/akha-security/akca/engine/internal/payloadgen"
+	"github.com/akha-security/akca/engine/internal/reflection"
+	"github.com/akha-security/akca/engine/internal/safemutation"
+	"github.com/akha-security/akca/engine/internal/scope"
+	"github.com/akha-security/akca/engine/internal/sensor"
+	"github.com/akha-security/akca/engine/internal/storage"
+	"github.com/akha-security/akca/engine/internal/verification"
+)
+
+type HTTPDoer interface {
+	Do(ctx context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error)
+}
+
+type OASTClient interface {
+	GenerateURL(payloadID, endpointURL, parameter, vulnClass string, findingID int64) (oast.GeneratedURL, error)
+}
+
+type BrowserRenderer interface {
+	Render(ctx context.Context, rawURL string) (string, error)
+}
+
+type TLSInspector interface {
+	Inspect(ctx context.Context, rawURL string) (TLSInspection, error)
+}
+
+type WebSocketProber interface {
+	Probe(ctx context.Context, rawURL, payload string) (httpclient.RequestResponse, error)
+}
+
+type SmugglingProber interface {
+	Probe(ctx context.Context, rawURL, variant string) (SmugglingProbeResult, error)
+}
+
+type ScanTarget struct {
+	EndpointURL        string
+	Method             string
+	Parameter          string
+	Location           string
+	Profile            reflection.ReflectionProfile
+	Payloads           payloadgen.GenerationResult
+	EndpointType       string
+	RiskTags           []string
+	RecommendedModules []string
+	Priority           int
+	BodyTemplate       string
+}
+
+type Evidence struct {
+	Module          string                    `json:"module"`
+	Signal          string                    `json:"signal"`
+	Payload         payloadgen.Payload        `json:"payload"`
+	Parameter       string                    `json:"parameter,omitempty"`
+	Location        string                    `json:"location,omitempty"`
+	ResponseMarkers []string                  `json:"response_markers,omitempty"`
+	Request         httpclient.RequestRecord  `json:"request"`
+	Response        httpclient.ResponseRecord `json:"response"`
+	Verification    verification.Result       `json:"verification"`
+	OASTURL         string                    `json:"oast_url,omitempty"`
+	StoredMarker    string                    `json:"stored_marker,omitempty"`
+	ReplayPlan      []ReplayStep              `json:"replay_plan,omitempty"`
+	DetectedAt      time.Time                 `json:"detected_at"`
+}
+
+type ReplayStep struct {
+	Role                   verification.ObservationRole `json:"role"`
+	IdentityID             string                       `json:"identity_id,omitempty"`
+	Request                httpclient.RequestRecord     `json:"request"`
+	ExpectedNormalizedHash string                       `json:"expected_normalized_hash"`
+}
+
+type ModuleFinding struct {
+	Title       string
+	VulnClass   string
+	Severity    string
+	Description string
+	Endpoint    string
+	Parameter   string
+	Location    string
+	Confidence  verification.ConfidenceLevel
+	Evidence    Evidence
+}
+
+type EventSink func(eventType, message string, payload map[string]interface{}) error
+
+type Runner struct {
+	scanID        string
+	client        HTTPDoer
+	scope         *scope.Engine
+	db            *storage.DB
+	verifier      *verification.Engine
+	oast          OASTClient
+	roles         RoleComparer
+	authResolve   AuthProfileResolver
+	browser       BrowserRenderer
+	tlsInspector  TLSInspector
+	websocket     WebSocketProber
+	smuggling     SmugglingProber
+	runtimeSensor *sensor.Collector
+	mutationGuard *safemutation.Guard
+	emit          EventSink
+	cfg           config.ScanConfig
+	storedMu      sync.Mutex
+	stored        map[string]string
+	baselineMu    sync.Mutex
+	baselineCache map[string]httpclient.RequestResponse
+	timingMu      sync.Mutex
+	delayedTiming []delayedTimingProbe
+	noticeMu      sync.Mutex
+	notices       map[string]struct{}
+	oastBlocked   bool
+	tlsMu         sync.Mutex
+	tlsReported   map[string]struct{}
+}
+
+func NewRunner(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *storage.DB,
+	verifier *verification.Engine, oastClient OASTClient, emit EventSink, cfg config.ScanConfig, opts ...RunnerOption) *Runner {
+	r := &Runner{
+		scanID: scanID, client: client, scope: scopeEngine, db: db,
+		verifier: verifier, oast: oastClient, emit: emit, cfg: cfg,
+		stored:        make(map[string]string),
+		baselineCache: make(map[string]httpclient.RequestResponse),
+		notices:       make(map[string]struct{}),
+		tlsReported:   make(map[string]struct{}),
+	}
+	r.tlsInspector = newNetworkTLSInspector(cfg)
+	r.websocket = newNetworkWebSocketProber(cfg, scopeEngine)
+	r.smuggling = newNetworkSmugglingProber(cfg, scopeEngine)
+	r.mutationGuard = safemutation.NewGuardWithFailureSink(safemutation.DefaultPolicy(),
+		func(tx safemutation.Transaction, err error) {
+			if r.emit != nil {
+				_ = r.emit("mutation_cleanup_failed", err.Error(), map[string]interface{}{
+					"operation_id": tx.OperationID, "resource_id": tx.ResourceID,
+					"canary": tx.Canary, "state_before_hash": tx.StateBeforeHash,
+					"state_after_hash": tx.StateAfterHash,
+				})
+			}
+		})
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
+}
+
+func (r *Runner) safeMutationGuard() *safemutation.Guard {
+	if r.mutationGuard == nil {
+		r.mutationGuard = safemutation.NewGuard(safemutation.DefaultPolicy())
+	}
+	return r.mutationGuard
+}
+
+func (r *Runner) emitOnce(key, eventType, message string, payload map[string]interface{}) {
+	r.noticeMu.Lock()
+	if _, exists := r.notices[key]; exists {
+		r.noticeMu.Unlock()
+		return
+	}
+	r.notices[key] = struct{}{}
+	r.noticeMu.Unlock()
+	if r.emit != nil {
+		_ = r.emit(eventType, message, payload)
+	}
+}
+
+func (r *Runner) oastDeliveryBlocked() bool {
+	r.noticeMu.Lock()
+	defer r.noticeMu.Unlock()
+	return r.oastBlocked
+}
+
+func (r *Runner) blockOASTDelivery() {
+	r.noticeMu.Lock()
+	r.oastBlocked = true
+	r.noticeMu.Unlock()
+}
+
+type RunnerOption func(*Runner)
+
+func WithRoleComparer(rc RoleComparer) RunnerOption {
+	return func(r *Runner) { r.roles = rc }
+}
+
+func WithAuthResolver(ar AuthProfileResolver) RunnerOption {
+	return func(r *Runner) { r.authResolve = ar }
+}
+
+func WithBrowserRenderer(browser BrowserRenderer) RunnerOption {
+	return func(r *Runner) { r.browser = browser }
+}
+
+func WithTLSInspector(inspector TLSInspector) RunnerOption {
+	return func(r *Runner) { r.tlsInspector = inspector }
+}
+
+func WithWebSocketProber(prober WebSocketProber) RunnerOption {
+	return func(r *Runner) { r.websocket = prober }
+}
+
+func WithSmugglingProber(prober SmugglingProber) RunnerOption {
+	return func(r *Runner) { r.smuggling = prober }
+}
+
+func WithRuntimeSensor(collector *sensor.Collector) RunnerOption {
+	return func(r *Runner) { r.runtimeSensor = collector }
+}
+
+func (r *Runner) RunGroupA(ctx context.Context, targets []ScanTarget) ([]ModuleFinding, error) {
+	_ = r.emit("vuln_modules_started", "Injection vulnerability scanning started", map[string]interface{}{
+		"scan_id": r.scanID, "targets": len(targets),
+	})
+
+	workers := r.cfg.PerHostConcurrency
+	if workers <= 0 {
+		workers = 8
+	}
+	if workers > len(targets) {
+		workers = len(targets)
+	}
+
+	var mu sync.Mutex
+	var findings []ModuleFinding
+
+	targetCh := make(chan ScanTarget, len(targets))
+	for _, t := range targets {
+		targetCh <- t
+	}
+	close(targetCh)
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for target := range targetCh {
+				if ctx.Err() != nil {
+					return
+				}
+				if !r.scope.IsInScope(target.EndpointURL) {
+					continue
+				}
+				var localFindings []ModuleFinding
+				if r.cfg.AllowsModule("xss") {
+					localFindings = append(localFindings, r.runXSS(ctx, target)...)
+				}
+				if r.cfg.AllowsModule("blind_xss") {
+					localFindings = append(localFindings, r.runBlindXSS(ctx, target)...)
+				}
+				if r.cfg.AllowsModule("sqli") {
+					localFindings = append(localFindings, r.runSQLi(ctx, target)...)
+				}
+				if r.cfg.AllowsModule("nosql") {
+					localFindings = append(localFindings, r.runNoSQLi(ctx, target)...)
+				}
+				if r.cfg.AllowsModule("ssti") {
+					localFindings = append(localFindings, r.runSSTI(ctx, target)...)
+				}
+				if r.cfg.AllowsModule("command_injection") {
+					localFindings = append(localFindings, r.runCommandInjection(ctx, target)...)
+				}
+
+				if len(localFindings) > 0 {
+					mu.Lock()
+					findings = append(findings, localFindings...)
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	_ = r.emit("vuln_modules_finished", "Injection vulnerability scanning finished", map[string]interface{}{
+		"scan_id": r.scanID, "findings": len(findings),
+	})
+	findings = append(findings, r.flushDelayedTimingVerifications(ctx)...)
+	return findings, nil
+}
+
+func (r *Runner) persistFinding(f ModuleFinding, eventContext ...string) error {
+	if r.db == nil || f.Confidence == verification.Suppressed || !findingProofEligible(f) {
+		return nil
+	}
+	if f.Confidence == verification.Confirmed {
+		r.recordLearning(f.Endpoint, f.VulnClass, learning.OutcomeWorked)
+	}
+	ev, _ := json.Marshal(f.Evidence)
+	evJSON := string(ev)
+	desc := f.Description + "\n\nevidence: " + evJSON
+	conf := f.Evidence.Verification.Score
+	if conf <= 0 {
+		conf = confidenceScore(f.Confidence)
+	}
+	findingID, err := r.db.SaveFinding(r.scanID, f.Title, f.Severity, f.VulnClass, desc, f.Endpoint, f.Parameter, conf, evJSON)
+	if err != nil {
+		return err
+	}
+	module := f.Evidence.Module
+	signal := f.Evidence.Signal
+	if len(eventContext) > 0 && eventContext[0] != "" {
+		module = eventContext[0]
+	}
+	if len(eventContext) > 1 && eventContext[1] != "" {
+		signal = eventContext[1]
+	}
+	r.emitFindingDetected(f, module, signal, findingID)
+	if err := r.db.SaveEvidenceForFinding(r.scanID, findingID, f.VulnClass+"_signal", evJSON); err != nil {
+		return err
+	}
+	for _, observation := range f.Evidence.Verification.Observations {
+		record := storage.VerificationObservationRecord{
+			ID: observation.ID, FindingID: findingID, ScanID: observation.ScanID,
+			Module: observation.Module, Endpoint: observation.Endpoint, Parameter: observation.Parameter,
+			Location: observation.Location, Role: string(observation.Role), Attempt: observation.Attempt,
+			IdentityID: observation.IdentityID, RequestID: observation.RequestID,
+			RequestMethod: observation.RequestMethod, RequestURL: observation.RequestURL,
+			RequestHash: observation.RequestHash, ResponseHash: observation.ResponseHash,
+			NormalizedHash: observation.NormalizedHash, StatusCode: observation.StatusCode,
+			ContentType: observation.ContentType, DurationMs: observation.DurationMs,
+			StateBeforeHash: observation.StateBeforeHash, StateAfterHash: observation.StateAfterHash,
+			OASTPayloadID: observation.OASTPayloadID, RuntimeTraceID: observation.RuntimeTraceID,
+			RuntimeSink: observation.RuntimeSink, RuntimeSafe: observation.RuntimeSafe,
+			CreatedAt: observation.CreatedAt,
+		}
+		if err := r.db.SaveVerificationObservation(findingID, record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Runner) recordLearning(endpointURL, family string, outcome learning.Outcome) {
+	if r.db == nil || endpointURL == "" || family == "" {
+		return
+	}
+	host := hostFromModuleURL(endpointURL)
+	if host == "" {
+		return
+	}
+	store := learning.NewStore(r.db)
+	_ = store.RecordOutcome(host, endpointURL, family, outcome)
+	_ = store.RecordOutcome(host, "", family, outcome)
+}
+
+func confidenceScore(level verification.ConfidenceLevel) float64 {
+	switch level {
+	case verification.Confirmed:
+		return 0.95
+	case verification.HighConfidence:
+		return 0.8
+	case verification.Potential:
+		return 0.6
+	default:
+		return 0.45
+	}
+}

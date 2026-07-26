@@ -1,0 +1,36 @@
+trigger: none
+pr: none
+
+parameters:
+  - name: target
+    displayName: Explicitly authorized http(s) target
+    type: string
+    default: ""
+  - name: authorizationConfirmed
+    displayName: I confirm authorization to scan
+    type: boolean
+    default: false
+
+jobs:
+  - job: AuthorizedAkcaDAST
+    timeoutInMinutes: 60
+    condition: and(succeeded(), ${{ eq(parameters.authorizationConfirmed, true) }})
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      - task: GoTool@0
+        inputs:
+          version: "1.25.0"
+      - bash: bash scripts/ci-scan.sh
+        displayName: Run authorized Akca DAST
+        env:
+          AKCA_TARGET: ${{ parameters.target }}
+          AKCA_AUTHORIZED: "true"
+          AKCA_REPORT_PATH: akca-results.sarif
+          AKCA_RATE_LIMIT: "10"
+          AKCA_CONCURRENCY: "8"
+      - task: PublishBuildArtifacts@1
+        condition: always()
+        inputs:
+          PathtoPublish: akca-results.sarif
+          ArtifactName: akca-sarif

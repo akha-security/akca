@@ -1,0 +1,18 @@
+stages:
+  - dast
+
+akca_authorized_dast:
+  stage: dast
+  image: golang:1.25
+  timeout: 1h
+  rules:
+    - if: '$AKCA_AUTHORIZED == "true" && $AKCA_TARGET =~ /^https?:\/\//'
+      when: manual
+    - when: never
+  script:
+    - bash scripts/ci-scan.sh
+  artifacts:
+    when: always
+    expire_in: 14 days
+    paths:
+      - akca-results.sarif

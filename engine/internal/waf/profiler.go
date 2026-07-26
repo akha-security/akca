@@ -1,0 +1,182 @@
+package waf
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/models"
+	"github.com/akha-security/akca/engine/internal/ratelimit"
+)
+
+type signature struct {
+	Vendor string
+	Header string
+	Value  string
+	Body   string
+}
+
+var headerSignatures = []signature{
+	{Vendor: "Cloudflare", Header: "server", Value: "cloudflare"},
+	{Vendor: "Cloudflare", Header: "cf-ray", Value: ""},
+	{Vendor: "Akamai", Header: "x-akamai-transformed", Value: ""},
+	{Vendor: "Akamai", Header: "server", Value: "akamaighost"},
+	{Vendor: "AWS WAF", Header: "x-amzn-requestid", Value: ""},
+	{Vendor: "AWS WAF", Header: "x-amz-cf-id", Value: ""},
+	{Vendor: "ModSecurity", Header: "server", Value: "mod_security"},
+}
+
+var bodySignatures = []signature{
+	{Vendor: "Cloudflare", Body: "cf-browser-verification"},
+	{Vendor: "Cloudflare", Body: "attention required! | cloudflare"},
+	{Vendor: "Akamai", Body: "akamai"},
+	{Vendor: "AWS WAF", Body: "request blocked"},
+	{Vendor: "ModSecurity", Body: "mod_security"},
+	{Vendor: "ModSecurity", Body: "not acceptable"},
+}
+
+type Profiler struct {
+	client *httpclient.Client
+}
+
+func NewProfiler(client *httpclient.Client) *Profiler {
+	return &Profiler{client: client}
+}
+
+// Profile performs baseline probes and classifies WAF/CDN behavior from responses.
+func (p *Profiler) Profile(ctx context.Context, targetURL string) (models.WAFProfile, error) {
+	profile := models.WAFProfile{
+		Host:       hostFromURL(targetURL),
+		DetectedAt: models.NowRFC3339(),
+	}
+
+	rr, err := p.client.Do(ctx, http.MethodGet, targetURL, nil, nil)
+	if err != nil {
+		return profile, err
+	}
+	profile.StatusPatterns = append(profile.StatusPatterns, rr.Response.StatusCode)
+	p.applyResponse(&profile, rr.Response.Headers, rr.Response.Body, rr.Response.StatusCode)
+
+	// Baseline probe with harmless canary path.
+	probeURL := strings.TrimRight(targetURL, "/") + "/akca-waf-probe-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	probeRR, probeErr := p.client.Do(ctx, http.MethodGet, probeURL, nil, nil)
+	if probeErr == nil {
+		profile.StatusPatterns = append(profile.StatusPatterns, probeRR.Response.StatusCode)
+		p.applyResponse(&profile, probeRR.Response.Headers, probeRR.Response.Body, probeRR.Response.StatusCode)
+		if probeRR.Response.StatusCode == http.StatusTooManyRequests {
+			profile.RateLimitDetected = true
+		}
+	}
+
+	profile.Confidence = confidenceScore(profile)
+	profile.CautiousModeRecommended = profile.Vendor != "" || profile.ChallengePageDetected || profile.RateLimitDetected
+	return profile, nil
+}
+
+func (p *Profiler) applyResponse(profile *models.WAFProfile, headers map[string]string, body string, status int) {
+	lowerBody := strings.ToLower(body)
+	normalized := normalizeHeaders(headers)
+
+	for _, sig := range headerSignatures {
+		val, ok := normalized[sig.Header]
+		if !ok {
+			continue
+		}
+		if sig.Value == "" || strings.Contains(strings.ToLower(val), sig.Value) {
+			setVendor(profile, sig.Vendor)
+			profile.HeaderSignatures = appendUnique(profile.HeaderSignatures, sig.Header+":"+val)
+		}
+	}
+
+	for _, sig := range bodySignatures {
+		if strings.Contains(lowerBody, strings.ToLower(sig.Body)) {
+			setVendor(profile, sig.Vendor)
+			profile.BodySignatures = appendUnique(profile.BodySignatures, sig.Body)
+		}
+	}
+
+	if status == http.StatusForbidden || status == http.StatusServiceUnavailable {
+		profile.ChallengePageDetected = profile.ChallengePageDetected || strings.Contains(lowerBody, "challenge") || strings.Contains(lowerBody, "captcha")
+	}
+	if status == http.StatusTooManyRequests {
+		profile.RateLimitDetected = true
+	}
+
+	if cdn := detectCDN(normalized, lowerBody); cdn != "" {
+		profile.CDN = cdn
+	}
+}
+
+func detectCDN(headers map[string]string, body string) string {
+	if v, ok := headers["cf-ray"]; ok && v != "" {
+		return "Cloudflare"
+	}
+	if strings.Contains(strings.ToLower(headers["server"]), "cloudfront") {
+		return "AWS CloudFront"
+	}
+	if strings.Contains(body, "akamai") {
+		return "Akamai"
+	}
+	return ""
+}
+
+func setVendor(profile *models.WAFProfile, vendor string) {
+	if profile.Vendor == "" {
+		profile.Vendor = vendor
+	}
+}
+
+func confidenceScore(p models.WAFProfile) float64 {
+	score := 0.0
+	if p.Vendor != "" {
+		score += 0.4
+	}
+	if len(p.HeaderSignatures) > 0 {
+		score += 0.2
+	}
+	if len(p.BodySignatures) > 0 {
+		score += 0.2
+	}
+	if p.RateLimitDetected || p.ChallengePageDetected {
+		score += 0.2
+	}
+	if score > 1 {
+		return 1
+	}
+	return score
+}
+
+func normalizeHeaders(headers map[string]string) map[string]string {
+	out := make(map[string]string, len(headers))
+	for k, v := range headers {
+		out[strings.ToLower(k)] = v
+	}
+	return out
+}
+
+func appendUnique(items []string, item string) []string {
+	for _, existing := range items {
+		if existing == item {
+			return items
+		}
+	}
+	return append(items, item)
+}
+
+func hostFromURL(raw string) string {
+	parts := strings.Split(strings.TrimPrefix(strings.TrimPrefix(raw, "https://"), "http://"), "/")
+	if len(parts) == 0 {
+		return raw
+	}
+	return parts[0]
+}
+
+// ApplyCautiousMode adjusts rate limiter when WAF/CDN defenses are detected.
+func ApplyCautiousMode(limiter *ratelimit.Limiter, profile models.WAFProfile) {
+	if profile.CautiousModeRecommended {
+		limiter.SetWAFSlowDown(20.0)
+	}
+}

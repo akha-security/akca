@@ -1,0 +1,37 @@
+name: quality
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go-quality:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache-dependency-path: engine/go.sum
+      - name: Formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Unit and integration tests
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Race detector
+        run: go test -race ./...
+      - name: Strict observed benchmark gate
+        run: go run ./cmd/akca benchmark --db "${RUNNER_TEMP}/akca-benchmark.db" --output benchmark-quality.json --strict
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: akca-benchmark-quality
+          path: engine/benchmark-quality.json

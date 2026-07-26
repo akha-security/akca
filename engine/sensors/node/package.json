@@ -1,0 +1,14 @@
+{
+  "name": "@akca-security/node-sensor",
+  "version": "0.1.0",
+  "description": "Optional request-correlated runtime sensor for the Akca scanner",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}
