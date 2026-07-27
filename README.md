@@ -1,4 +1,4 @@
-# Akca
+# Akca - Demo Version
 
 [![Status: Demo](https://img.shields.io/badge/status-demo%20%2F%20experimental-f59e0b)](https://github.com/akha-security/akca)
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](https://go.dev/)
