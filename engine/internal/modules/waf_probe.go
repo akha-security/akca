@@ -8,7 +8,10 @@ import (
 	"github.com/akha-security/akca/engine/internal/wafintel"
 )
 
-func (r *Runner) wafHeaders(endpointURL string) map[string]string {
+func (r *Runner) wafHeadersForModule(module, endpointURL string) map[string]string {
+	if !moduleAllowsHeaderPayloads(module) {
+		return nil
+	}
 	if r.db == nil || !r.cfg.EnableWAFBypassHeaders {
 		return nil
 	}
@@ -28,6 +31,18 @@ func (r *Runner) wafHeaders(endpointURL string) map[string]string {
 	strategy := wafintel.SelectStrategy(waf.Vendor, learn)
 	_, headers := wafintel.ApplyStrategy("", strategy)
 	return headers
+}
+
+func (r *Runner) wafHeaders(endpointURL string) map[string]string {
+	return r.wafHeadersForModule("", endpointURL)
+}
+
+func moduleAllowsHeaderPayloads(module string) bool {
+	module = strings.ToLower(strings.TrimSpace(module))
+	if module == "" {
+		return false
+	}
+	return severityRank[moduleMaxSeverity(module)] >= severityRank["high"]
 }
 
 func mergeHeaders(base, extra map[string]string) map[string]string {
@@ -71,7 +86,7 @@ func (r *Runner) modulePayloads(target ScanTarget, vulnClass, oastURL string) []
 		}
 	}
 	return dedupePayloads(payloadgen.GenerateGroupB(vulnClass, oastURL, payloadgen.WAFHints{
-		Vendor: vendor, AllowEvasion: r.cfg.EnableWAFBypassHeaders, PreferredTechniques: preferred,
+		Vendor: vendor, AllowEvasion: r.cfg.EnableWAFBypassHeaders && moduleAllowsHeaderPayloads(vulnClass), PreferredTechniques: preferred,
 	}))
 }
 

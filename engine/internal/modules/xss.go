@@ -14,7 +14,7 @@ import (
 
 func (r *Runner) runXSS(ctx context.Context, target ScanTarget) []ModuleFinding {
 	var out []ModuleFinding
-	baseline, err := r.probe(ctx, target, "akca-xss-base")
+	baseline, err := r.probeForModule(ctx, "xss", target, "akca-xss-base")
 	if err != nil {
 		return nil
 	}
@@ -26,7 +26,7 @@ func (r *Runner) runXSS(ctx context.Context, target ScanTarget) []ModuleFinding 
 		if p.IsControl || p.IsNegativeControl {
 			continue
 		}
-		attempts := r.injectionProbeAttempts(ctx, target, p.Value)
+		attempts := r.injectionProbeAttemptsForModule(ctx, "xss", target, p.Value)
 		attempt := pickBodyDiffAttempt(attempts, baseline.Response.Body)
 		if len(attempts) == 0 {
 			continue
@@ -47,7 +47,7 @@ func (r *Runner) runXSS(ctx context.Context, target ScanTarget) []ModuleFinding 
 		domPresent := verification.CheckDOMPresence(rr.Response.Body, p.Value)
 		domExecuted := false
 		domPayload := verification.DOMXSSPayload()
-		domRR, domErr := r.probe(ctx, target, domPayload)
+		domRR, domErr := r.probeForModule(ctx, "xss", target, domPayload)
 		if domErr == nil && r.browser != nil && domRR.Request.Method == "GET" && domRR.Request.URL != "" {
 			rendered, renderErr := r.browser.Render(ctx, domRR.Request.URL)
 			domExecuted = renderErr == nil && verification.CheckDOMExecution(rendered)

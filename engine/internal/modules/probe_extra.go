@@ -11,6 +11,10 @@ import (
 )
 
 func (r *Runner) probeWithBody(ctx context.Context, target ScanTarget, body string, contentType string, headers map[string]string) (httpclient.RequestResponse, error) {
+	return r.probeWithBodyForModule(ctx, "", target, body, contentType, headers)
+}
+
+func (r *Runner) probeWithBodyForModule(ctx context.Context, module string, target ScanTarget, body string, contentType string, headers map[string]string) (httpclient.RequestResponse, error) {
 	method := strings.ToUpper(target.Method)
 	if method == "" || method == "GET" {
 		method = "POST"
@@ -21,7 +25,7 @@ func (r *Runner) probeWithBody(ctx context.Context, target ScanTarget, body stri
 	if contentType != "" {
 		headers["Content-Type"] = contentType
 	}
-	headers = mergeHeaders(headers, r.wafHeaders(target.EndpointURL))
+	headers = mergeHeaders(headers, r.wafHeadersForModule(module, target.EndpointURL))
 	bodyBytes := []byte(body)
 	headers = sanitizeProbeHeaders(method, bodyBytes, headers)
 	headers = r.registerRuntimeProbe(target, body, headers)
@@ -67,6 +71,13 @@ func (r *Runner) cachedEmptyHeaderProbe(ctx context.Context, target ScanTarget) 
 }
 
 func (r *Runner) probeWithHeaders(ctx context.Context, target ScanTarget, payload string, headers map[string]string) (httpclient.RequestResponse, error) {
+	return r.probeWithHeadersForModule(ctx, "", target, payload, headers)
+}
+
+func (r *Runner) probeWithHeadersForModule(ctx context.Context, module string, target ScanTarget, payload string, headers map[string]string) (httpclient.RequestResponse, error) {
+	if module != "" && len(headers) > 0 && !moduleAllowsHeaderPayloads(module) {
+		headers = nil
+	}
 	method := strings.ToUpper(target.Method)
 	if method == "" {
 		method = "GET"
@@ -75,7 +86,7 @@ func (r *Runner) probeWithHeaders(ctx context.Context, target ScanTarget, payloa
 	if err != nil {
 		return httpclient.RequestResponse{}, err
 	}
-	headers = mergeHeaders(headers, r.wafHeaders(target.EndpointURL))
+	headers = mergeHeaders(headers, r.wafHeadersForModule(module, target.EndpointURL))
 	headers = sanitizeProbeHeaders(method, nil, headers)
 	headers = r.registerRuntimeProbe(target, payload, headers)
 	return r.client.Do(ctx, method, rawURL, nil, headers)

@@ -125,7 +125,7 @@ func (r *Runner) runSSRF(ctx context.Context, target ScanTarget) []ModuleFinding
 		}
 		return nil
 	}
-	baseline, ok := r.stableNativeBaseline(ctx, target)
+	baseline, ok := r.stableNativeBaselineForModule(ctx, "ssrf", target)
 	if !ok {
 		return nil
 	}
@@ -211,16 +211,20 @@ func (r *Runner) probeSSRF(ctx context.Context, target ScanTarget, p payloadgen.
 		headers["Metadata"] = "true"
 	}
 	if len(headers) > 0 {
-		return r.probeWithHeaders(ctx, target, strings.TrimSpace(p.Value), headers)
+		return r.probeWithHeadersForModule(ctx, "ssrf", target, strings.TrimSpace(p.Value), headers)
 	}
-	return r.probe(ctx, target, strings.TrimSpace(p.Value))
+	return r.probeForModule(ctx, "ssrf", target, strings.TrimSpace(p.Value))
 }
 
 func (r *Runner) stableNativeBaseline(ctx context.Context, target ScanTarget) (httpclient.RequestResponse, bool) {
+	return r.stableNativeBaselineForModule(ctx, "", target)
+}
+
+func (r *Runner) stableNativeBaselineForModule(ctx context.Context, module string, target ScanTarget) (httpclient.RequestResponse, bool) {
 	value := nativeTargetValue(target)
 	var first httpclient.RequestResponse
 	for i := 0; i < 3; i++ {
-		rr, err := r.probe(ctx, target, value)
+		rr, err := r.probeForModule(ctx, module, target, value)
 		if err != nil {
 			return httpclient.RequestResponse{}, false
 		}

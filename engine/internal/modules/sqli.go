@@ -16,14 +16,14 @@ import (
 
 func (r *Runner) runSQLi(ctx context.Context, target ScanTarget) []ModuleFinding {
 	var out []ModuleFinding
-	baseline, ok := r.stableNativeBaseline(ctx, target)
+	baseline, ok := r.stableNativeBaselineForModule(ctx, "sqli", target)
 	if !ok {
 		return nil
 	}
 	sqliPayloads := payloadsForClass(target.Payloads.Payloads, "sqli")
 	advancedAllowed := sqliAdvancedSurfaceReady(target, sqliPayloads)
 	preflightEvidence := false
-	timingBase := r.calibrateTargetTiming(ctx, target)
+	timingBase := r.calibrateTargetTimingForModule(ctx, "sqli", target)
 	sleepSec := timingblind.RecommendSleepSec(timingBase)
 	dbHint := r.techDatabaseHint(target.EndpointURL)
 
@@ -120,12 +120,12 @@ func (r *Runner) runSQLi(ctx context.Context, target ScanTarget) []ModuleFinding
 		}
 		// Deterministic re-probes to eliminate false positives
 		if signal == "error_based" {
-			reprobe, err := r.probe(ctx, probeTarget, probePayload.Value)
+			reprobe, err := r.probeForModule(ctx, "sqli", probeTarget, probePayload.Value)
 			if err != nil || !sqliErrorInBody(reprobe.Response.Body, baseline.Response.Body) {
 				continue
 			}
 			syntaxControl := sqliSyntaxPreservingControl(probePayload.Value)
-			controlRR, controlErr := r.probe(ctx, probeTarget, syntaxControl)
+			controlRR, controlErr := r.probeForModule(ctx, "sqli", probeTarget, syntaxControl)
 			if controlErr != nil || sqliErrorInBody(controlRR.Response.Body, baseline.Response.Body) {
 				continue
 			}

@@ -24,12 +24,16 @@ type delayedTimingProbe struct {
 }
 
 func (r *Runner) calibrateTargetTiming(ctx context.Context, target ScanTarget) timingblind.Baseline {
+	return r.calibrateTargetTimingForModule(ctx, "", target)
+}
+
+func (r *Runner) calibrateTargetTimingForModule(ctx context.Context, module string, target ScanTarget) timingblind.Baseline {
 	n := timingblind.DefaultBaselineSampleCount()
 	samples := make([]int64, 0, n)
 	value := nativeTargetValue(target)
 	for i := 0; i < n; i++ {
 		start := time.Now()
-		rr, err := r.probe(ctx, target, value)
+		rr, err := r.probeForModule(ctx, module, target, value)
 		if err != nil {
 			continue
 		}
@@ -73,7 +77,7 @@ func (r *Runner) flushDelayedTimingVerifications(ctx context.Context) []ModuleFi
 			break
 		}
 		start := time.Now()
-		rr, err := r.probe(ctx, item.Target, item.Payload.Value)
+		rr, err := r.probeForModule(ctx, item.Module, item.Target, item.Payload.Value)
 		if err != nil {
 			continue
 		}
@@ -88,7 +92,7 @@ func (r *Runner) flushDelayedTimingVerifications(ctx context.Context) []ModuleFi
 		if item.Module == "sqli" {
 			zeroValue = timingblind.SQLiMatchedZeroDelayPayload(item.Payload.Value, r.techDatabaseHint(item.Target.EndpointURL)).Value
 		}
-		zeroRR, err := r.probe(ctx, item.Target, zeroValue)
+		zeroRR, err := r.probeForModule(ctx, item.Module, item.Target, zeroValue)
 		if err != nil {
 			continue
 		}
@@ -98,7 +102,7 @@ func (r *Runner) flushDelayedTimingVerifications(ctx context.Context) []ModuleFi
 		zeroMs := responseDurationMs(zeroRR)
 		zeroSamples := []int64{zeroMs}
 		for len(zeroSamples) < 3 {
-			repeatZero, repeatErr := r.probe(ctx, item.Target, zeroValue)
+			repeatZero, repeatErr := r.probeForModule(ctx, item.Module, item.Target, zeroValue)
 			if repeatErr != nil || item.Module == "sqli" &&
 				(!usableTimingSQLiResponse(repeatZero.Response) || repeatZero.Response.StatusCode != rr.Response.StatusCode) {
 				zeroSamples = nil
@@ -115,7 +119,7 @@ func (r *Runner) flushDelayedTimingVerifications(ctx context.Context) []ModuleFi
 		}
 		if item.Module == "sqli" {
 			if falseControl, hasFalseControl := timingblind.SQLiXORFalseConditionControl(item.Payload.Value); hasFalseControl {
-				falseRR, falseErr := r.probe(ctx, item.Target, falseControl.Value)
+				falseRR, falseErr := r.probeForModule(ctx, item.Module, item.Target, falseControl.Value)
 				if falseErr != nil || !usableTimingSQLiResponse(falseRR.Response) || falseRR.Response.StatusCode != rr.Response.StatusCode {
 					continue
 				}
@@ -124,7 +128,7 @@ func (r *Runner) flushDelayedTimingVerifications(ctx context.Context) []ModuleFi
 				}
 			}
 		}
-		thirdRR, err := r.probe(ctx, item.Target, item.Payload.Value)
+		thirdRR, err := r.probeForModule(ctx, item.Module, item.Target, item.Payload.Value)
 		if err != nil {
 			continue
 		}

@@ -16,6 +16,10 @@ import (
 )
 
 func (r *Runner) probe(ctx context.Context, target ScanTarget, payload string) (httpclient.RequestResponse, error) {
+	return r.probeForModule(ctx, "", target, payload)
+}
+
+func (r *Runner) probeForModule(ctx context.Context, module string, target ScanTarget, payload string) (httpclient.RequestResponse, error) {
 	method := strings.ToUpper(target.Method)
 	if method == "" {
 		method = http.MethodGet
@@ -24,13 +28,16 @@ func (r *Runner) probe(ctx context.Context, target ScanTarget, payload string) (
 	if loc == "" {
 		loc = target.Profile.ParameterLocation
 	}
+	if module != "" && isHeaderLocation(loc) && !moduleAllowsHeaderPayloads(module) {
+		return r.probeWithoutInjectedPayload(ctx, module, target)
+	}
 	probeURL, body, headers, err := reflection.BuildProbeRequestWithTemplate(
 		target.EndpointURL, method, target.Parameter, loc, payload, target.BodyTemplate,
 	)
 	if err != nil {
 		return httpclient.RequestResponse{}, err
 	}
-	headers = mergeHeaders(headers, r.wafHeaders(target.EndpointURL))
+	headers = mergeHeaders(headers, r.wafHeadersForModule(module, target.EndpointURL))
 	effMethod := effectiveMethod(method, loc)
 	headers = sanitizeProbeHeaders(effMethod, body, headers)
 	headers = r.registerRuntimeProbe(target, payload, headers)
@@ -60,6 +67,20 @@ func sanitizeProbeHeaders(method string, body []byte, headers map[string]string)
 // (form, JSON, XML) since those payloads cannot be delivered via query string.
 func effectiveMethod(method, location string) string {
 	return reflection.EffectiveMethod(method, location)
+}
+
+func isHeaderLocation(location string) bool {
+	return strings.EqualFold(strings.TrimSpace(location), "header")
+}
+
+func (r *Runner) probeWithoutInjectedPayload(ctx context.Context, module string, target ScanTarget) (httpclient.RequestResponse, error) {
+	method := strings.ToUpper(target.Method)
+	if method == "" {
+		method = http.MethodGet
+	}
+	headers := r.wafHeadersForModule(module, target.EndpointURL)
+	headers = sanitizeProbeHeaders(method, nil, headers)
+	return r.client.Do(ctx, method, target.EndpointURL, nil, headers)
 }
 
 func injectParameter(endpointURL, param, value string) (string, error) {
@@ -104,6 +125,15 @@ func baseSeverity(module string) string {
 	default:
 		return "medium"
 	}
+}
+
+func moduleMaxSeverity(module string) string {
+	base := baseSeverity(module)
+	switch strings.ToLower(strings.TrimSpace(module)) {
+	case "security_headers", "tls_misconfig", "rate_limit", "api_exposure", "api_versioning":
+		base = capSeverity(base, "low")
+	}
+	return base
 }
 
 var severityRank = map[string]int{"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}

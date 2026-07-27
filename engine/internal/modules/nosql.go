@@ -20,16 +20,16 @@ func (r *Runner) runNoSQLi(ctx context.Context, target ScanTarget) []ModuleFindi
 		return nil
 	}
 
-	baseline, err := r.probe(ctx, target, "akca-nosql-base")
+	baseline, err := r.probeForModule(ctx, "nosql", target, "akca-nosql-base")
 	if err != nil {
 		return nil
 	}
 
 	var controlRR httpclient.RequestResponse
 	if jsonBodySurface(target) {
-		controlRR, _ = r.probeWithBody(ctx, target, nosql.ControlBody(target.Parameter), "application/json", nil)
+		controlRR, _ = r.probeWithBodyForModule(ctx, "nosql", target, nosql.ControlBody(target.Parameter), "application/json", nil)
 	}
-	queryControlRR, _ := r.probe(ctx, target, "akca-nosql-control")
+	queryControlRR, _ := r.probeForModule(ctx, "nosql", target, "akca-nosql-control")
 
 	probes := nosql.ProbesForTarget(
 		target.Parameter,
@@ -147,7 +147,7 @@ func (r *Runner) nosqlProbe(ctx context.Context, target ScanTarget, probe nosql.
 		}
 		sub := target
 		sub.Method = method
-		return r.probeWithBody(ctx, sub, probe.Value, ct, nil)
+		return r.probeWithBodyForModule(ctx, "nosql", sub, probe.Value, ct, nil)
 	case "bracket_query":
 		op := "ne"
 		if probe.Name == "bracket_gt" {
@@ -157,9 +157,9 @@ func (r *Runner) nosqlProbe(ctx context.Context, target ScanTarget, probe nosql.
 		if err != nil {
 			return httpclient.RequestResponse{}, err
 		}
-		return r.client.Do(ctx, http.MethodGet, rawURL, nil, r.wafHeaders(target.EndpointURL))
+		return r.client.Do(ctx, http.MethodGet, rawURL, nil, r.wafHeadersForModule("nosql", target.EndpointURL))
 	default:
-		return r.probe(ctx, target, probe.Value)
+		return r.probeForModule(ctx, "nosql", target, probe.Value)
 	}
 }
 

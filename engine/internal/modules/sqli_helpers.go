@@ -85,7 +85,7 @@ func sqliErrorInBody(body, baseline string) bool {
 }
 
 func (r *Runner) sqliBestAttempt(ctx context.Context, target ScanTarget, value, baselineBody string) (InjectionAttempt, bool) {
-	attempts := r.injectionProbeAttempts(ctx, target, value)
+	attempts := r.injectionProbeAttemptsForModule(ctx, "sqli", target, value)
 	if len(attempts) == 0 {
 		return InjectionAttempt{}, false
 	}
@@ -257,7 +257,7 @@ func (r *Runner) sqliTimingMedianMs(ctx context.Context, target ScanTarget, payl
 			break
 		}
 		start := time.Now()
-		attempts := r.injectionProbeAttempts(ctx, target, payload)
+		attempts := r.injectionProbeAttemptsForModule(ctx, "sqli", target, payload)
 		if len(attempts) == 0 {
 			return 0, vals, status, false
 		}

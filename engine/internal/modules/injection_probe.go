@@ -21,6 +21,10 @@ type InjectionAttempt struct {
 // and can turn routing errors (for example, a synthetic POST returning 405)
 // into incorrectly attributed injection findings.
 func (r *Runner) injectionProbeAttempts(ctx context.Context, target ScanTarget, value string) []InjectionAttempt {
+	return r.injectionProbeAttemptsForModule(ctx, "", target, value)
+}
+
+func (r *Runner) injectionProbeAttemptsForModule(ctx context.Context, module string, target ScanTarget, value string) []InjectionAttempt {
 	location := strings.ToLower(strings.TrimSpace(target.Location))
 	if location == "" {
 		location = strings.ToLower(strings.TrimSpace(target.Profile.ParameterLocation))
@@ -37,7 +41,7 @@ func (r *Runner) injectionProbeAttempts(ctx context.Context, target ScanTarget, 
 		probeTarget.Parameter = "q"
 	}
 
-	rr, err := r.probe(ctx, probeTarget, value)
+	rr, err := r.probeForModule(ctx, module, probeTarget, value)
 	if err != nil {
 		return nil
 	}

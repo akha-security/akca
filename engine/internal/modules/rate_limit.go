@@ -30,7 +30,7 @@ func (r *Runner) runRateLimit(ctx context.Context, target ScanTarget) []ModuleFi
 		if ctx.Err() != nil {
 			return nil
 		}
-		rr, err := r.probe(ctx, target, policy.Account)
+		rr, err := r.probeForModule(ctx, "rate_limit", target, policy.Account)
 		if err != nil {
 			return nil
 		}
@@ -42,7 +42,7 @@ func (r *Runner) runRateLimit(ctx context.Context, target ScanTarget) []ModuleFi
 		}
 		attempts = append(attempts, rr)
 		if index%3 == 2 {
-			control, err := r.probe(ctx, target, "akca-control-"+randomAccountNonce()+"@example.invalid")
+			control, err := r.probeForModule(ctx, "rate_limit", target, "akca-control-"+randomAccountNonce()+"@example.invalid")
 			if err != nil || rateLimitBlockSignal(control.Response.StatusCode, control.Response.Body) {
 				return nil
 			}
@@ -89,12 +89,12 @@ func (r *Runner) runRateLimitXFFBypass(ctx context.Context, target ScanTarget, p
 	var blockedControls []httpclient.RequestResponse
 	var bypasses []httpclient.RequestResponse
 	for index := 0; index < 3; index++ {
-		control, err := r.probe(ctx, target, policy.Account)
+		control, err := r.probeForModule(ctx, "rate_limit", target, policy.Account)
 		if err != nil || !rateLimitBlockSignal(control.Response.StatusCode, control.Response.Body) {
 			return nil
 		}
 		blockedControls = append(blockedControls, control)
-		bypass, err := r.probeWithHeaders(ctx, target, policy.Account, map[string]string{
+		bypass, err := r.probeWithHeadersForModule(ctx, "rate_limit", target, policy.Account, map[string]string{
 			"X-Forwarded-For": fmt.Sprintf("198.51.100.%d", index+20),
 		})
 		if err != nil || rateLimitBlockSignal(bypass.Response.StatusCode, bypass.Response.Body) ||
@@ -110,7 +110,7 @@ func (r *Runner) runRateLimitXFFBypass(ctx context.Context, target ScanTarget, p
 		return nil
 	case <-timer.C:
 	}
-	recovered, err := r.probe(ctx, target, policy.Account)
+	recovered, err := r.probeForModule(ctx, "rate_limit", target, policy.Account)
 	if err != nil || rateLimitBlockSignal(recovered.Response.StatusCode, recovered.Response.Body) ||
 		!failedAuthenticationOutcome(recovered.Response) {
 		return nil

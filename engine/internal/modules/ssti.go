@@ -45,7 +45,7 @@ func (r *Runner) runSSTI(ctx context.Context, target ScanTarget) []ModuleFinding
 		return nil
 	}
 	var out []ModuleFinding
-	baseline, ok := r.stableNativeBaseline(ctx, target)
+	baseline, ok := r.stableNativeBaselineForModule(ctx, "ssti", target)
 	if !ok {
 		return nil
 	}
@@ -55,7 +55,7 @@ func (r *Runner) runSSTI(ctx context.Context, target ScanTarget) []ModuleFinding
 		sstibypass.EsotericPayloads(target.Payloads.Tech),
 	)
 	for _, p := range probes {
-		attempts := r.injectionProbeAttempts(ctx, target, p.Value)
+		attempts := r.injectionProbeAttemptsForModule(ctx, "ssti", target, p.Value)
 		attempt := pickBodyDiffAttempt(attempts, baseline.Response.Body)
 		if len(attempts) == 0 {
 			continue
@@ -100,7 +100,7 @@ func (r *Runner) runSSTI(ctx context.Context, target ScanTarget) []ModuleFinding
 			if !ok {
 				continue
 			}
-			reprobe, repErr := r.probe(ctx, probeTarget, control.Value)
+			reprobe, repErr := r.probeForModule(ctx, "ssti", probeTarget, control.Value)
 			if repErr != nil || reprobe.Response.StatusCode != rr.Response.StatusCode ||
 				!sstiSignalConfirmed(control, reprobe.Response.Body, baseline.Response.Body, signal) ||
 				normalizeVolatileFields(reprobe.Response.Body) == normalizeVolatileFields(rr.Response.Body) {
@@ -133,7 +133,7 @@ func (r *Runner) sstiTemplateOnlyEvaluation(ctx context.Context, target ScanTarg
 		if control == "" || control == p.Value {
 			return false
 		}
-		rr, err := r.probe(ctx, target, control)
+		rr, err := r.probeForModule(ctx, "ssti", target, control)
 		if err != nil {
 			return false
 		}

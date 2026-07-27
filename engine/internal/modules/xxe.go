@@ -11,7 +11,7 @@ func (r *Runner) runXXE(ctx context.Context, target ScanTarget) []ModuleFinding 
 		return nil
 	}
 	var out []ModuleFinding
-	baseline, err := r.probeWithBody(ctx, target, `<root>baseline</root>`, "application/xml", nil)
+	baseline, err := r.probeWithBodyForModule(ctx, "xxe", target, `<root>baseline</root>`, "application/xml", nil)
 	if err != nil {
 		return nil
 	}
@@ -24,14 +24,14 @@ func (r *Runner) runXXE(ctx context.Context, target ScanTarget) []ModuleFinding 
 			if oast == "" {
 				continue
 			}
-			_, _ = r.probeWithBody(ctx, target, p.Value, "application/xml", nil)
+			_, _ = r.probeWithBodyForModule(ctx, "xxe", target, p.Value, "application/xml", nil)
 			continue
 		}
 		ct := "application/xml"
 		if p.ExpectedSignal == "soap_xxe" {
 			ct = "text/xml"
 		}
-		rr, err := r.probeWithBody(ctx, target, p.Value, ct, nil)
+		rr, err := r.probeWithBodyForModule(ctx, "xxe", target, p.Value, ct, nil)
 		if err != nil {
 			continue
 		}

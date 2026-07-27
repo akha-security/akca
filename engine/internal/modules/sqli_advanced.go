@@ -108,7 +108,7 @@ func (r *Runner) unionSQLiProbe(ctx context.Context, target ScanTarget, baseline
 	// reflection. If those values also appear without SQL syntax, they are not
 	// database-row evidence.
 	controlValue := buildUnionLexicalControl(colCount, primarySentinels)
-	controlRR, err := r.probe(ctx, probeTarget, controlValue)
+	controlRR, err := r.probeForModule(ctx, "sqli", probeTarget, controlValue)
 	if err != nil || unionVisibleMarkerCount(controlRR.Response.Body, primarySentinels) > 0 {
 		return nil
 	}
@@ -116,7 +116,7 @@ func (r *Runner) unionSQLiProbe(ctx context.Context, target ScanTarget, baseline
 	// A second independent UNION result must reproduce on the exact same
 	// injection surface with a different canary set.
 	secondaryValue := buildUnionPayload(colCount, secondarySentinels)
-	secondaryRR, err := r.probe(ctx, probeTarget, secondaryValue)
+	secondaryRR, err := r.probeForModule(ctx, "sqli", probeTarget, secondaryValue)
 	if err != nil || secondaryRR.Response.StatusCode != rr.Response.StatusCode ||
 		isInfrastructureError(secondaryRR.Response.StatusCode) ||
 		!unionSignalConfirmed(secondaryValue, secondaryRR.Response.Body, baseline.Response.Body) ||
@@ -453,11 +453,11 @@ func (r *Runner) booleanBlindSQLiProbe(ctx context.Context, target ScanTarget, b
 
 		// Alternating replay: both the true and false branches must reproduce on
 		// the same native injection surface. This rejects dynamic/cache/WAF pages.
-		falseReplay, err := r.probe(ctx, trueAttempt.Target, pair.falseVal)
+		falseReplay, err := r.probeForModule(ctx, "sqli", trueAttempt.Target, pair.falseVal)
 		if err != nil {
 			continue
 		}
-		trueReplay, err := r.probe(ctx, trueAttempt.Target, pair.trueVal)
+		trueReplay, err := r.probeForModule(ctx, "sqli", trueAttempt.Target, pair.trueVal)
 		if err != nil || !booleanPairConfirmed(baseline.Response, trueReplay.Response, falseReplay.Response, pair.trueVal, pair.falseVal) ||
 			!sqliBodiesEquivalent(trueRR.Body, trueReplay.Response.Body) ||
 			!sqliBodiesEquivalent(falseRR.Body, falseReplay.Response.Body) {
@@ -466,11 +466,11 @@ func (r *Runner) booleanBlindSQLiProbe(ctx context.Context, target ScanTarget, b
 
 		// A second operand set in the same quote/context family must reproduce
 		// the same branch orientation.
-		secondTrue, err := r.probe(ctx, trueAttempt.Target, pair.secondTrueVal)
+		secondTrue, err := r.probeForModule(ctx, "sqli", trueAttempt.Target, pair.secondTrueVal)
 		if err != nil {
 			continue
 		}
-		secondFalse, err := r.probe(ctx, trueAttempt.Target, pair.secondFalseVal)
+		secondFalse, err := r.probeForModule(ctx, "sqli", trueAttempt.Target, pair.secondFalseVal)
 		if err != nil || !booleanPairConfirmed(baseline.Response, secondTrue.Response, secondFalse.Response,
 			pair.secondTrueVal, pair.secondFalseVal) ||
 			orientation == 0 ||
@@ -483,7 +483,7 @@ func (r *Runner) booleanBlindSQLiProbe(ctx context.Context, target ScanTarget, b
 		// or query-language parser that routes SQL-looking text differently
 		// should not be mistaken for database predicate execution.
 		syntaxControl := booleanSyntaxControl(pair.trueVal)
-		controlRR, err := r.probe(ctx, trueAttempt.Target, syntaxControl)
+		controlRR, err := r.probeForModule(ctx, "sqli", trueAttempt.Target, syntaxControl)
 		if err != nil || !usableBooleanSQLiResponse(controlRR.Response) ||
 			bodyDiffRatio(normalizeVolatileFields(baseline.Response.Body),
 				normalizeVolatileFields(controlRR.Response.Body)) > 0.08 {

@@ -32,7 +32,7 @@ func (r *Runner) runLFI(ctx context.Context, target ScanTarget) []ModuleFinding 
 		return nil
 	}
 	var out []ModuleFinding
-	baseline, err := r.probe(ctx, target, "index.html")
+	baseline, err := r.probeForModule(ctx, "lfi", target, "index.html")
 	if err != nil {
 		return nil
 	}
@@ -60,7 +60,7 @@ func (r *Runner) runLFI(ctx context.Context, target ScanTarget) []ModuleFinding 
 		if ctx.Err() != nil {
 			break
 		}
-		rr, err := r.probe(ctx, target, p.Value)
+		rr, err := r.probeForModule(ctx, "lfi", target, p.Value)
 		if err != nil {
 			continue
 		}

@@ -17,11 +17,11 @@ import (
 
 func (r *Runner) runCommandInjection(ctx context.Context, target ScanTarget) []ModuleFinding {
 	var out []ModuleFinding
-	baseline, err := r.probe(ctx, target, "akca-cmd-base")
+	baseline, err := r.probeForModule(ctx, "command_injection", target, "akca-cmd-base")
 	if err != nil {
 		return nil
 	}
-	timingBase := r.calibrateTargetTiming(ctx, target)
+	timingBase := r.calibrateTargetTimingForModule(ctx, "command_injection", target)
 	sleepSec := timingblind.RecommendSleepSec(timingBase)
 	windows := strings.Contains(strings.ToLower(r.techDatabaseHint(target.EndpointURL)+" "+target.EndpointURL), "windows")
 
@@ -42,7 +42,7 @@ func (r *Runner) runCommandInjection(ctx context.Context, target ScanTarget) []M
 			probePayload.Value = timingblind.RewriteSleepDuration(p.Value, sleepSec)
 		}
 		start := time.Now()
-		attempts := r.injectionProbeAttempts(ctx, target, probePayload.Value)
+		attempts := r.injectionProbeAttemptsForModule(ctx, "command_injection", target, probePayload.Value)
 		attempt := pickBodyDiffAttempt(attempts, baseline.Response.Body)
 		if len(attempts) == 0 {
 			continue
@@ -88,7 +88,7 @@ func (r *Runner) runCommandInjection(ctx context.Context, target ScanTarget) []M
 		// URL/HTML reflection cannot satisfy this proof.
 		if signal == "separator_output" || signal == "command_output" || signal == "canary_output" {
 			proofPayload := commandCanaryProbe(probePayload, windows, verificationSeed, "verification")
-			reprobe, repErr := r.probe(ctx, probeTarget, proofPayload.Value)
+			reprobe, repErr := r.probeForModule(ctx, "command_injection", probeTarget, proofPayload.Value)
 			if repErr != nil || !cmdInjSignalConfirmed(proofPayload, reprobe.Response.Body, baseline.Response.Body, "canary_output") {
 				continue
 			}
@@ -115,7 +115,7 @@ func (r *Runner) runCommandInjection(ctx context.Context, target ScanTarget) []M
 
 	dyn := timingblind.CommandSleepPayload(sleepSec, windows)
 	start := time.Now()
-	attempts := r.injectionProbeAttempts(ctx, target, dyn.Value)
+	attempts := r.injectionProbeAttemptsForModule(ctx, "command_injection", target, dyn.Value)
 	attempt := pickSlowestAttempt(attempts)
 	if len(attempts) == 0 {
 		return out
