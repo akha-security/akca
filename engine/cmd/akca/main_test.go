@@ -5,9 +5,30 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
+
+func TestVersionComesFromModuleBuildInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info *debug.BuildInfo
+		want string
+	}{
+		{"release", &debug.BuildInfo{Main: debug.Module{Version: "v0.1.0-demo.3"}}, "0.1.0-demo.3"},
+		{"development", &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}}, developmentVersion},
+		{"missing", nil, developmentVersion},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := versionFromBuildInfo(tt.info); got != tt.want {
+				t.Fatalf("versionFromBuildInfo()=%q, want %q", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestFindingStatusDoesNotCallManualReviewVerified(t *testing.T) {
 	glyph, label, _, confirmed := findingStatus("NeedsManualReview")

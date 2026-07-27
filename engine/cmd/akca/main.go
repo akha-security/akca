@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,9 +25,30 @@ import (
 )
 
 const (
-	version = "0.1.0-demo.1"
-	uiWidth = 68
+	developmentVersion = "0.1.0-dev"
+	uiWidth            = 68
 )
+
+var version = detectedVersion()
+
+func detectedVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return developmentVersion
+	}
+	return versionFromBuildInfo(info)
+}
+
+func versionFromBuildInfo(info *debug.BuildInfo) string {
+	if info == nil {
+		return developmentVersion
+	}
+	v := strings.TrimSpace(info.Main.Version)
+	if v == "" || v == "(devel)" {
+		return developmentVersion
+	}
+	return strings.TrimPrefix(v, "v")
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  NEON PULSE — True-Color Design System
