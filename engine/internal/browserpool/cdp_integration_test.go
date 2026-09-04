@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,9 @@ import (
 func TestCDPRealBrowserCapturesSPAState(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real Chromium integration test")
+	}
+	if os.Getenv("CI") == "true" && os.Getenv("AKCA_RUN_REAL_BROWSER_TESTS") != "1" {
+		t.Skip("real Chromium integration test is opt-in on CI")
 	}
 	renderer := NewHeadlessRenderer()
 	if !renderer.Available() {
