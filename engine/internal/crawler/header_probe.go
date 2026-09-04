@@ -35,4 +35,3 @@ func extractLinkHeaderURLs(baseURL string, headers map[string]string) []string {
 	}
 	return out
 }
-

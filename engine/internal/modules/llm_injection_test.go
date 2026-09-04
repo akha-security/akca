@@ -178,4 +178,3 @@ func TestLLMInjection_JSONEchoMirror_Suppressed(t *testing.T) {
 		t.Fatalf("expected 0 findings for JSON input echo (false positive prevented), got %d", len(findings))
 	}
 }
-

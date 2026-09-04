@@ -87,15 +87,15 @@ func (r *Runner) runIISDiscovery(ctx context.Context, target ScanTarget) []Modul
 	// Stage 1: Calibration & Vulnerability Determination (shortscan methodology)
 	// -------------------------------------------------------------------------
 	type workingSetup struct {
-		basePath  string
-		method    string
-		suffix    string
-		statusPos int
-		statusNeg int
+		basePath    string
+		method      string
+		suffix      string
+		statusPos   int
+		statusNeg   int
 		activeTilde int
-		posRR     httpclient.RequestResponse
-		negRR     httpclient.RequestResponse
-		probeURL  string
+		posRR       httpclient.RequestResponse
+		negRR       httpclient.RequestResponse
+		probeURL    string
 	}
 
 	var foundSetup *workingSetup

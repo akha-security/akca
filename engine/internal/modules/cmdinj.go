@@ -222,7 +222,7 @@ func commandCanaryProbes(windows bool, seed int, stage string) []payloadgen.Payl
 	if windows {
 		return []payloadgen.Payload{
 			{
-				Value: fmt.Sprintf(`&cmd /V:ON /C "set /A x=%d+1&echo AKCA_CMD_!x!"`, seed),
+				Value:     fmt.Sprintf(`&cmd /V:ON /C "set /A x=%d+1&echo AKCA_CMD_!x!"`, seed),
 				VulnClass: "command_injection", Family: "command_injection",
 				Variant: "windows_computed_canary_" + stage, ExpectedSignal: "canary_output",
 				VerificationStrategy: "computed_output_pair", NoiseLevel: "high", RiskLevel: "active", Priority: 80, BudgetCost: 2,
@@ -241,7 +241,7 @@ func commandCanaryProbes(windows bool, seed int, stage string) []payloadgen.Payl
 	var out []payloadgen.Payload
 	for _, sep := range separators {
 		out = append(out, payloadgen.Payload{
-			Value: fmt.Sprintf(`%sprintf 'AKCA_CMD_%%d' $((%d+1))%s`, sep.prefix, seed, sep.suffix),
+			Value:     fmt.Sprintf(`%sprintf 'AKCA_CMD_%%d' $((%d+1))%s`, sep.prefix, seed, sep.suffix),
 			VulnClass: "command_injection", Family: "command_injection",
 			Variant: "unix_computed_canary_" + sep.name + "_" + stage, ExpectedSignal: "canary_output",
 			VerificationStrategy: "computed_output_pair", NoiseLevel: "high", RiskLevel: "active", Priority: 80, BudgetCost: 2,
@@ -253,7 +253,7 @@ func commandCanaryProbes(windows bool, seed int, stage string) []payloadgen.Payl
 func commandCanaryProbe(original payloadgen.Payload, windows bool, seed int, stage string) payloadgen.Payload {
 	if windows {
 		return payloadgen.Payload{
-			Value: fmt.Sprintf(`&cmd /V:ON /C "set /A x=%d+1&echo AKCA_CMD_!x!"`, seed),
+			Value:     fmt.Sprintf(`&cmd /V:ON /C "set /A x=%d+1&echo AKCA_CMD_!x!"`, seed),
 			VulnClass: "command_injection", Family: "command_injection",
 			Variant: "windows_computed_canary_" + stage, ExpectedSignal: "canary_output",
 			VerificationStrategy: "computed_output_pair", NoiseLevel: "high", RiskLevel: "active", Priority: 80, BudgetCost: 2,

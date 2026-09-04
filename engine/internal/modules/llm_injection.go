@@ -23,14 +23,14 @@ var (
 )
 
 type llmProbe struct {
-	name             string
-	variant          string
-	payload          string
-	signal           string
-	matchMarker      string
-	instructionEcho  string
-	severity         string
-	title            string
+	name            string
+	variant         string
+	payload         string
+	signal          string
+	matchMarker     string
+	instructionEcho string
+	severity        string
+	title           string
 }
 
 func (r *Runner) runLLMInjection(ctx context.Context, target ScanTarget) []ModuleFinding {
@@ -320,4 +320,3 @@ func extractJSONCompletionFields(doc interface{}) string {
 	walk(doc, "")
 	return strings.Join(foundText, "\n")
 }
-

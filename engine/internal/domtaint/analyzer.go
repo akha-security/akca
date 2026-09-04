@@ -17,9 +17,9 @@ type StaticWarning struct {
 }
 
 var (
-	rePostMessageOrigin = regexp.MustCompile(`(?i)\.addEventListener\s*\(\s*["']message["']\s*,\s*(?:function|\([^)]*\)\s*=>)`)
-	reOriginCheck       = regexp.MustCompile(`(?i)(?:event|e)\.origin\s*(?:===|!==|==|!=|\.includes|\.indexOf)`)
-	reDangerousEval     = regexp.MustCompile(`(?i)\beval\s*\(\s*(?:location|document|window\.)`)
+	rePostMessageOrigin  = regexp.MustCompile(`(?i)\.addEventListener\s*\(\s*["']message["']\s*,\s*(?:function|\([^)]*\)\s*=>)`)
+	reOriginCheck        = regexp.MustCompile(`(?i)(?:event|e)\.origin\s*(?:===|!==|==|!=|\.includes|\.indexOf)`)
+	reDangerousEval      = regexp.MustCompile(`(?i)\beval\s*\(\s*(?:location|document|window\.)`)
 	reDangerousInnerHTML = regexp.MustCompile(`(?i)\.innerHTML\s*=\s*(?:location|document|decodeURI)`)
 )
 

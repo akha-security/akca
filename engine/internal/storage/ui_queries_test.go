@@ -184,4 +184,3 @@ func TestDashboardMetrics_DurationAndRequestsAccurate(t *testing.T) {
 		t.Fatalf("expected distinct StartedAt and FinishedAt timestamps, got started=%q finished=%q", m.StartedAt, m.FinishedAt)
 	}
 }
-

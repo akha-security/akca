@@ -210,8 +210,8 @@ func (r *Runner) probeCORSOptionsPNA(ctx context.Context, target ScanTarget, ori
 		rawURL = target.RequestTemplate.URL
 	}
 	headers := map[string]string{
-		"Origin":                                origin,
-		"Access-Control-Request-Method":         "GET",
+		"Origin":                                 origin,
+		"Access-Control-Request-Method":          "GET",
 		"Access-Control-Request-Private-Network": "true",
 	}
 	headers = mergeHeaders(headers, r.wafHeadersForModule("cors", rawURL))

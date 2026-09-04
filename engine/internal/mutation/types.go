@@ -86,11 +86,11 @@ func (v ValueType) String() string {
 type MutationIntent int
 
 const (
-	IntentNeighbor MutationIntent = iota // Semantically close variants (increment, swap)
-	IntentBoundary                       // Edge cases, limits, overflows
-	IntentEscalation                     // Privilege escalation variants
-	IntentFormat                         // Format/type confusion
-	IntentEmpty                          // Null, empty, undefined
+	IntentNeighbor   MutationIntent = iota // Semantically close variants (increment, swap)
+	IntentBoundary                         // Edge cases, limits, overflows
+	IntentEscalation                       // Privilege escalation variants
+	IntentFormat                           // Format/type confusion
+	IntentEmpty                            // Null, empty, undefined
 )
 
 func (m MutationIntent) String() string {

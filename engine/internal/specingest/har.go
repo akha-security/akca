@@ -9,7 +9,7 @@ import (
 
 type harDoc struct {
 	Log struct {
-		Version string     `json:"version"`
+		Version string `json:"version"`
 		Creator struct {
 			Name    string `json:"name"`
 			Version string `json:"version"`
@@ -23,13 +23,13 @@ type harEntry struct {
 }
 
 type harRequest struct {
-	Method      string        `json:"method"`
-	URL         string        `json:"url"`
-	HTTPVersion string        `json:"httpVersion"`
-	Headers     []harHeader   `json:"headers"`
-	QueryString []harQuery    `json:"queryString"`
-	Cookies     []harCookie   `json:"cookies"`
-	PostData    *harPostData  `json:"postData,omitempty"`
+	Method      string       `json:"method"`
+	URL         string       `json:"url"`
+	HTTPVersion string       `json:"httpVersion"`
+	Headers     []harHeader  `json:"headers"`
+	QueryString []harQuery   `json:"queryString"`
+	Cookies     []harCookie  `json:"cookies"`
+	PostData    *harPostData `json:"postData,omitempty"`
 }
 
 type harHeader struct {
@@ -48,9 +48,9 @@ type harCookie struct {
 }
 
 type harPostData struct {
-	MimeType string        `json:"mimeType"`
-	Text     string        `json:"text"`
-	Params   []harParam    `json:"params,omitempty"`
+	MimeType string     `json:"mimeType"`
+	Text     string     `json:"text"`
+	Params   []harParam `json:"params,omitempty"`
 }
 
 type harParam struct {
