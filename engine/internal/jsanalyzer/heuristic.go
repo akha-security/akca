@@ -22,6 +22,12 @@ var (
 	reSvelteKit     = regexp.MustCompile(`(?i)__sveltekit_[a-z0-9]+`)
 	reServiceWorker = regexp.MustCompile(`(?i)navigator\.serviceWorker\.register\s*\(\s*["']([^"']+)["']`)
 	reConfigURL     = regexp.MustCompile(`(?i)(?:base_?url|api_?url|api_?base|api_?host|endpoint|gateway_?url|graphql_?(?:uri|url|endpoint))\s*[:=]\s*["']([^"']+)["']`)
+	reApiRoute      = regexp.MustCompile(`(?i)["'](/api/(?:v[0-9]+/|v[0-9]+)?[a-zA-Z0-9_./:-]{2,100})["']`)
+	reRouterPath    = regexp.MustCompile(`(?i)(?:path|route)\s*:\s*["'](/[a-zA-Z][a-zA-Z0-9_./:-]{1,100})["']`)
+	reTemplateRoute     = regexp.MustCompile("`(/[a-zA-Z0-9_./:-]*\\$\\{[^}]+\\}[a-zA-Z0-9_./:-]*)`")
+	reParamPlaceholder  = regexp.MustCompile(`\$\{[^}]+\}`)
+	reViteAsset         = regexp.MustCompile(`(?i)["'](/assets/[a-zA-Z0-9_-]+\.js)["']`)
+	reReactRoute        = regexp.MustCompile(`(?i)<(?:Route|NavLink|Link)\s+[^>]*to=["'](/[^"']+)["']|<Route\s+[^>]*path=["'](/[^"']+)["']`)
 )
 
 // ExtractHeuristic uses regex patterns for minified or syntactically broken JavaScript.
@@ -59,6 +65,9 @@ func ExtractHeuristic(js string) []ExtractedEndpoint {
 	for _, m := range reChunk.FindAllStringSubmatch(js, -1) {
 		add(m[1], "GET", "chunk", "heuristic chunk manifest")
 	}
+	for _, m := range reViteAsset.FindAllStringSubmatch(js, -1) {
+		add(m[1], "GET", "vite_asset", "heuristic vite asset chunk")
+	}
 	for _, m := range reServiceWorker.FindAllStringSubmatch(js, -1) {
 		add(m[1], "GET", "service_worker", "heuristic service worker")
 	}
@@ -66,6 +75,32 @@ func ExtractHeuristic(js string) []ExtractedEndpoint {
 		v := strings.TrimSpace(m[1])
 		if strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://") || strings.HasPrefix(v, "/") {
 			add(v, "GET", "config", "heuristic API base/config URL")
+		}
+	}
+	for _, m := range reTemplateRoute.FindAllStringSubmatch(js, -1) {
+		// Replace ${param} with {param} to normalize template literals
+		tRoute := reParamPlaceholder.ReplaceAllString(m[1], "{param}")
+		if routeLooksValid(tRoute) {
+			add(NormalizeTemplate(tRoute), "GET", "template_literal", "heuristic template literal route")
+		}
+	}
+	for _, m := range reReactRoute.FindAllStringSubmatch(js, -1) {
+		rPath := m[1]
+		if rPath == "" {
+			rPath = m[2]
+		}
+		if routeLooksValid(rPath) {
+			add(NormalizeTemplate(rPath), "GET", "react_route", "heuristic react route path")
+		}
+	}
+	for _, m := range reApiRoute.FindAllStringSubmatch(js, -1) {
+		if routeLooksValid(m[1]) {
+			add(NormalizeTemplate(m[1]), "GET", "api_route", "heuristic api route")
+		}
+	}
+	for _, m := range reRouterPath.FindAllStringSubmatch(js, -1) {
+		if routeLooksValid(m[1]) {
+			add(NormalizeTemplate(m[1]), "GET", "spa_router", "heuristic spa router definition")
 		}
 	}
 	for _, m := range reRoutes.FindAllStringSubmatch(js, -1) {

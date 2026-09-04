@@ -103,7 +103,7 @@ func ExtractPassive(endpointURL, method, contentType, body string, headers map[s
 	}
 	// Universal header injection surfaces — backends and proxies often parse these.
 	for _, h := range []string{"User-Agent", "Referer", "X-Forwarded-For", "X-Forwarded-Host", "X-Original-URL", "X-Custom-IP-Authorization"} {
-		add(h, LocationHeader, 72, "passive")
+		add(h, LocationHeader, 72, "synthetic_header")
 	}
 
 	if reGraphQLVar.MatchString(body) {
@@ -277,22 +277,14 @@ func Differs(a, b ResponseFingerprint) bool {
 		return true
 	}
 	lenDiff := abs(a.BodyLength - b.BodyLength)
-	if lenDiff > 48 {
-		return true
-	}
-	if a.BodyHash != b.BodyHash && lenDiff > 8 {
+	if lenDiff > 64 {
 		return true
 	}
 	if a.BodyHash != b.BodyHash && a.BodyLength < 256 && lenDiff > 0 {
 		return true
 	}
 	if a.HeaderHash != b.HeaderHash {
-		if lenDiff > 16 {
-			return true
-		}
-		if a.BodyHash == b.BodyHash && a.BodyLength > 0 {
-			return true
-		}
+		return true
 	}
 	return false
 }
@@ -302,4 +294,37 @@ func abs(x int) int {
 		return -x
 	}
 	return x
+}
+
+// ExtractFromTemplateBody extracts parameter names from a request template body (form urlencoded or JSON).
+func ExtractFromTemplateBody(endpointURL, method, contentType, body string) []DiscoveredParameter {
+	var out []DiscoveredParameter
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" {
+		return nil
+	}
+	ct := strings.ToLower(contentType)
+	if strings.Contains(ct, "json") || strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		for k := range extractJSONKeys(body) {
+			out = append(out, DiscoveredParameter{
+				Name: k, Location: LocationJSON, Priority: 95, Confidence: 0.98,
+				Source: "form_template", EndpointURL: endpointURL, EndpointMethod: method,
+			})
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	if parsed, err := url.ParseQuery(trimmed); err == nil && len(parsed) > 0 {
+		for k := range parsed {
+			k = strings.TrimSpace(k)
+			if k != "" {
+				out = append(out, DiscoveredParameter{
+					Name: k, Location: LocationForm, Priority: 95, Confidence: 0.98,
+					Source: "form_template", EndpointURL: endpointURL, EndpointMethod: method,
+				})
+			}
+		}
+	}
+	return out
 }

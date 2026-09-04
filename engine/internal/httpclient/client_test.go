@@ -65,6 +65,84 @@ func TestRetryAfterDurationSupportsHTTPDate(t *testing.T) {
 	}
 }
 
+func TestHTTPClientReturns429WithoutRetrying(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("account temporarily locked"))
+	}))
+	defer srv.Close()
+
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{srv.URL}
+	client, err := New(cfg, scope.NewEngine(cfg), ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr, err := client.Do(context.Background(), http.MethodPost, srv.URL, []byte("x=1"), nil)
+	if err != nil {
+		t.Fatalf("429 must be returned as evidence, got error: %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("429 was retried %d times", requests.Load())
+	}
+	if rr.Response.StatusCode != http.StatusTooManyRequests || rr.Response.Body != "account temporarily locked" {
+		t.Fatalf("429 evidence was not preserved: %+v", rr.Response)
+	}
+}
+
+func TestHTTPClientEnforcesGlobalRequestBudget(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{srv.URL}
+	cfg.RequestBudget = 1
+	client, err := New(cfg, scope.NewEngine(cfg), ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Do(context.Background(), http.MethodGet, srv.URL, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Do(context.Background(), http.MethodGet, srv.URL, nil, nil); err == nil || !strings.Contains(err.Error(), "request budget exhausted") {
+		t.Fatalf("second request should exhaust budget, got %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("budget allowed %d network requests, want 1", requests.Load())
+	}
+}
+
+func TestHTTPClientAppliesExplicitHostOverride(t *testing.T) {
+	var gotHost, gotMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost, gotMethod = r.Host, r.Method
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{srv.URL}
+	client, err := New(cfg, scope.NewEngine(cfg), ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr, err := client.Do(context.Background(), http.MethodGet, srv.URL, nil, map[string]string{"Host": "canary.invalid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotHost != "canary.invalid" || gotMethod != http.MethodGet {
+		t.Fatalf("server observed Host=%q method=%q", gotHost, gotMethod)
+	}
+	if rr.Request.Headers["Host"] != "canary.invalid" {
+		t.Fatalf("evidence did not preserve Host override: %+v", rr.Request.Headers)
+	}
+}
+
 func TestHTTPClientRoutesRequestsThroughConfiguredProxy(t *testing.T) {
 	var requests atomic.Int32
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -157,17 +235,17 @@ func TestHTTPClientScopeBlocking(t *testing.T) {
 	}
 }
 
-func TestSensitiveHeaderRedaction(t *testing.T) {
+func TestSensitiveHeaderRedactionPreservesRawValues(t *testing.T) {
 	rr := RequestResponse{
 		Request:  RequestRecord{Headers: map[string]string{"Authorization": "secret"}},
 		Response: ResponseRecord{Headers: map[string]string{"Set-Cookie": "a=b"}},
 	}
 	redacted := Redact(rr)
-	if redacted.Request.Headers["Authorization"] != "[REDACTED]" {
-		t.Fatal("authorization not redacted")
+	if redacted.Request.Headers["Authorization"] != "secret" {
+		t.Fatal("authorization was unexpectedly redacted")
 	}
-	if redacted.Response.Headers["Set-Cookie"] != "[REDACTED]" {
-		t.Fatal("set-cookie not redacted")
+	if redacted.Response.Headers["Set-Cookie"] != "a=b" {
+		t.Fatal("set-cookie was unexpectedly redacted")
 	}
 }
 
@@ -189,11 +267,11 @@ func TestWAFBypassHeadersDefaultOnAndCanBeDisabled(t *testing.T) {
 	if _, err := client.Do(context.Background(), "GET", srv.URL, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got.Get("X-Forwarded-For") == "" || got.Get("CF-Connecting-IP") == "" {
-		t.Fatalf("expected default WAF evasion headers: %v", got)
+	if got.Get("X-Forwarded-For") != "" || got.Get("CF-Connecting-IP") != "" {
+		t.Fatalf("default scan config should NOT add WAF bypass headers: %v", got)
 	}
 
-	cfg.EnableWAFBypassHeaders = false
+	cfg.EnableWAFBypassHeaders = true
 	client, err = New(cfg, scopeEngine, ratelimit.New(1000, 1000))
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +280,7 @@ func TestWAFBypassHeadersDefaultOnAndCanBeDisabled(t *testing.T) {
 	if _, err := client.Do(context.Background(), "GET", srv.URL, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got.Get("X-Forwarded-For") != "" || got.Get("CF-Connecting-IP") != "" {
-		t.Fatalf("disabled WAF evasion should not add bypass headers: %v", got)
+	if got.Get("X-Forwarded-For") == "" || got.Get("CF-Connecting-IP") == "" {
+		t.Fatalf("explicitly enabled WAF evasion should add bypass headers: %v", got)
 	}
 }

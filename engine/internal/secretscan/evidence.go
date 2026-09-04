@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 )
 
-// EvidenceJSON builds stored finding evidence. Akca's report policy keeps raw
-// evidence intact, so the exact detected value is included alongside a preview
-// and hash for correlation.
+// EvidenceJSON builds complete local finding evidence. The exact value is kept
+// for reproduction while a masked preview and hash are included for UIs that
+// explicitly request redacted output.
 func EvidenceJSON(kind, value, sourceURL string, line int) string {
 	sum := sha256.Sum256([]byte(value))
 	payload := map[string]interface{}{

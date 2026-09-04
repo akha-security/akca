@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/akha-security/akca/engine/internal/findingevent"
 	"github.com/akha-security/akca/engine/internal/fuzzing"
@@ -25,22 +26,49 @@ type QueueConsumer interface {
 }
 
 type Engine struct {
-	scanID  string
-	client  HTTPDoer
-	scope   *scope.Engine
-	db      *storage.DB
-	queue   QueueConsumer
-	emit    EventSink
-	workers int
+	scanID   string
+	client   HTTPDoer
+	scope    *scope.Engine
+	db       *storage.DB
+	queue    QueueConsumer
+	emit     EventSink
+	workers  int
+	limits   Limits
+	requests atomic.Int64
+}
+
+type Limits struct {
+	MaxEntries          int
+	MaxAttemptsPerEntry int
+	MaxRequests         int64
+}
+
+var DefaultLimits = Limits{
+	MaxEntries:          40,
+	MaxAttemptsPerEntry: 36,
+	MaxRequests:         800,
 }
 
 func NewEngine(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *storage.DB, queue QueueConsumer, emit EventSink, workers int) *Engine {
+	return NewEngineWithLimits(scanID, client, scopeEngine, db, queue, emit, workers, DefaultLimits)
+}
+
+func NewEngineWithLimits(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *storage.DB, queue QueueConsumer, emit EventSink, workers int, limits Limits) *Engine {
 	if workers <= 0 {
 		workers = 2
 	}
+	if limits.MaxEntries <= 0 {
+		limits.MaxEntries = DefaultLimits.MaxEntries
+	}
+	if limits.MaxAttemptsPerEntry <= 0 {
+		limits.MaxAttemptsPerEntry = DefaultLimits.MaxAttemptsPerEntry
+	}
+	if limits.MaxRequests <= 0 {
+		limits.MaxRequests = DefaultLimits.MaxRequests
+	}
 	return &Engine{
 		scanID: scanID, client: client, scope: scopeEngine, db: db,
-		queue: queue, emit: emit, workers: workers,
+		queue: queue, emit: emit, workers: workers, limits: limits,
 	}
 }
 
@@ -57,11 +85,19 @@ func (e *Engine) Run(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		defer close(entryCh)
+		produced := 0
 		for {
+			if produced >= e.limits.MaxEntries {
+				_ = e.emit("bypass403_budget_exhausted", "auth bypass entry budget exhausted", map[string]interface{}{
+					"scan_id": e.scanID, "max_entries": e.limits.MaxEntries, "queue": e.queue.Metrics(),
+				})
+				return
+			}
 			entry, ok := e.queue.Dequeue()
 			if !ok {
 				return
 			}
+			produced++
 			select {
 			case <-ctx.Done():
 				return
@@ -85,7 +121,16 @@ func (e *Engine) Run(ctx context.Context) error {
 					if !ok {
 						return
 					}
-					e.processEntry(ctx, entry)
+					func() {
+						defer func() {
+							if recovered := recover(); recovered != nil {
+								_ = e.emit("log", fmt.Sprintf("403 bypass task recovered from panic: %v", recovered), map[string]interface{}{
+									"scan_id": e.scanID, "url": entry.URL,
+								})
+							}
+						}()
+						e.processEntry(ctx, entry)
+					}()
 				}
 			}
 		}()
@@ -118,6 +163,13 @@ func (e *Engine) processEntry(ctx context.Context, entry fuzzing.QueueEntry) {
 		})
 		return
 	}
+	if looksLikeInfrastructureChallenge(baseline.Body) || looksLikeInfrastructureChallenge(baselineRecheck.Body) {
+		_ = e.emit("auth_bypass_skipped", "infrastructure WAF/challenge baseline skipped", map[string]interface{}{
+			"scan_id": e.scanID, "url": entry.URL, "method": entry.Method, "status": baseline.StatusCode,
+			"reason": "infrastructure_challenge_baseline",
+		})
+		return
+	}
 
 	_ = e.emit("auth_challenge_analyzed", baseline.AuthScheme.Kind, map[string]interface{}{
 		"scan_id": e.scanID, "url": entry.URL, "method": entry.Method,
@@ -127,7 +179,20 @@ func (e *Engine) processEntry(ctx context.Context, entry fuzzing.QueueEntry) {
 	})
 
 	attempts := BuildAuthBypassAttempts(entry.URL, entry.Method, baseline)
+	if len(attempts) > e.limits.MaxAttemptsPerEntry {
+		_ = e.emit("bypass403_attempt_budget_applied", "auth bypass attempt budget applied", map[string]interface{}{
+			"scan_id": e.scanID, "url": entry.URL, "method": entry.Method,
+			"attempts_total": len(attempts), "attempts_run": e.limits.MaxAttemptsPerEntry,
+		})
+		attempts = attempts[:e.limits.MaxAttemptsPerEntry]
+	}
 	for _, attempt := range attempts {
+		if !e.reserveRequestBudget() {
+			_ = e.emit("bypass403_budget_exhausted", "auth bypass request budget exhausted", map[string]interface{}{
+				"scan_id": e.scanID, "max_requests": e.limits.MaxRequests, "queue": e.queue.Metrics(),
+			})
+			return
+		}
 		if !e.scope.IsInScope(attempt.URL) {
 			continue
 		}
@@ -171,6 +236,13 @@ func (e *Engine) processEntry(ctx context.Context, entry fuzzing.QueueEntry) {
 			_ = e.createFinding(result)
 		}
 	}
+}
+
+func (e *Engine) reserveRequestBudget() bool {
+	if e.limits.MaxRequests <= 0 {
+		return true
+	}
+	return e.requests.Add(1) <= e.limits.MaxRequests
 }
 
 func isAuthBlockedStatus(code int) bool {

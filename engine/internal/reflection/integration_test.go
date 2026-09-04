@@ -90,8 +90,8 @@ func TestAnalyzerUsesPOSTForFormReflection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(client.methods) != 2 {
-		t.Fatalf("reflection requests = %d, want 2", len(client.methods))
+	if len(client.methods) != 3 {
+		t.Fatalf("reflection requests = %d, want 3", len(client.methods))
 	}
 	for _, method := range client.methods {
 		if method != http.MethodPost {

@@ -27,3 +27,11 @@ func AnalyzeResponse(status int, body string) (ok bool, signal string) {
 	}
 	return false, ""
 }
+
+// CheckDependencyConfusion checks whether an internal/scoped npm or pypi package is unregistered on the public registry.
+func CheckDependencyConfusion(status int, body string) (bool, string) {
+	if status == 404 && (strings.Contains(body, "Not found") || strings.Contains(body, "package not found") || strings.Contains(body, "version not found")) {
+		return true, "dependency_confusion_unregistered"
+	}
+	return false, ""
+}

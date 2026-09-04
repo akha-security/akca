@@ -27,14 +27,26 @@ func deepTraversalPayloads() []payloadgen.Payload {
 }
 
 func (r *Runner) runLFI(ctx context.Context, target ScanTarget) []ModuleFinding {
+	if strings.TrimSpace(target.Parameter) == "" {
+		return nil
+	}
+	if !isLikelyLFIParam(target.Parameter) {
+		r.emitSkip("lfi", target, "parameter is not a file/path candidate")
+		return nil
+	}
 	if ok, reason := r.shouldRunModule("lfi", target); !ok {
 		r.emitSkip("lfi", target, reason)
 		return nil
 	}
 	var out []ModuleFinding
-	baseline, err := r.probeForModule(ctx, "lfi", target, "index.html")
-	if err != nil {
-		return nil
+	var err error
+	baseline, ok, baselineReason := r.stableNativeBaselineForModule(ctx, "lfi", target)
+	if !ok {
+		baseline, err = r.cachedEmptyProbe(ctx, target)
+		if err != nil {
+			r.emitSkip("lfi", target, "baseline failed: "+baselineReason)
+			return nil
+		}
 	}
 	oast := ""
 	if r.cfg.EnableOAST && r.oast != nil {
@@ -46,6 +58,8 @@ func (r *Runner) runLFI(ctx context.Context, target ScanTarget) []ModuleFinding 
 		rr      httpclient.RequestResponse
 	}
 	proofs := make(map[string][]directProof)
+	coreTested := 0
+	coreHadSignal := false
 	for _, p := range probes {
 		if p.ExpectedSignal == "rfi_oast" {
 			if oast == "" {
@@ -60,13 +74,18 @@ func (r *Runner) runLFI(ctx context.Context, target ScanTarget) []ModuleFinding 
 		if ctx.Err() != nil {
 			break
 		}
+		// Fast-fail: if the first 6 core payloads fail to produce any signal or change, terminate.
+		if coreTested >= 6 && !coreHadSignal && len(proofs) == 0 {
+			break
+		}
+		coreTested++
 		rr, err := r.probeForModule(ctx, "lfi", target, p.Value)
 		if err != nil {
 			continue
 		}
 		if runtimeFinding, handled := r.runtimeSinkProof(ctx, "lfi", target, p, baseline, rr); handled {
 			if runtimeFinding != nil {
-				r.recordFinding(&out, runtimeFinding, "lfi", runtimeFinding.Evidence.Signal)
+				r.recordFinding(ctx, &out, runtimeFinding, "lfi", runtimeFinding.Evidence.Signal)
 				return out
 			}
 			continue
@@ -75,31 +94,41 @@ func (r *Runner) runLFI(ctx context.Context, target ScanTarget) []ModuleFinding 
 			!lfiSignal(rr.Response.Body, baseline.Response.Body, p.ExpectedSignal) {
 			continue
 		}
+		coreHadSignal = true
 		family := lfiSignalFamily(p.ExpectedSignal)
 		proofs[family] = append(proofs[family], directProof{payload: p, rr: rr})
 	}
 	for family, familyProofs := range proofs {
-		if len(familyProofs) < 2 {
-			continue
-		}
-		first, independent := familyProofs[0], familyProofs[1]
-		f := r.verifyAndBuildWithCandidate(ctx, "lfi", target, first.payload, baseline, first.rr,
-			first.payload.ExpectedSignal, false, false, "", "", func(candidate *verification.Candidate) {
-				candidate.RequestedProofType = verification.ProofDifferentialReplay
-				independentObservation := r.observation(
-					"lfi", target, verification.RolePositiveReplay, 4, independent.rr,
+		if len(familyProofs) >= 2 {
+			first, independent := familyProofs[0], familyProofs[1]
+			f := r.verifyAndBuildWithCandidate(ctx, "lfi", target, first.payload, baseline, first.rr,
+				first.payload.ExpectedSignal, false, false, "", "", func(candidate *verification.Candidate) {
+					candidate.RequestedProofType = verification.ProofDifferentialReplay
+					independentObservation := r.observation(
+						"lfi", target, verification.RolePositiveReplay, 4, independent.rr,
+					)
+					if independentObservation.Valid() {
+						candidate.Observations = append(candidate.Observations, independentObservation)
+					}
+				})
+			if f != nil {
+				f.Description += " Two distinct traversal encodings retrieved the same operating-system file family, followed by replay and a clean negative control."
+				f.Evidence.Verification.UpgradeReasons = append(
+					f.Evidence.Verification.UpgradeReasons, "independent_traversal_variants",
 				)
-				if independentObservation.Valid() {
-					candidate.Observations = append(candidate.Observations, independentObservation)
+			}
+			r.recordFinding(ctx, &out, f, "lfi", family)
+		} else if len(familyProofs) == 1 {
+			first := familyProofs[0]
+			reprobe, repErr := r.probeForModule(ctx, "lfi", target, first.payload.Value)
+			if repErr == nil && (deeptraversal.DetectSignal(reprobe.Response.Body, baseline.Response.Body, first.payload.ExpectedSignal) || lfiSignal(reprobe.Response.Body, baseline.Response.Body, first.payload.ExpectedSignal)) {
+				f := r.verifyAndBuild(ctx, "lfi", target, first.payload, baseline, reprobe, first.payload.ExpectedSignal, false, false, "", "")
+				if f != nil {
+					f.Title = "Local File Inclusion (" + family + ")"
+					r.recordFinding(ctx, &out, f, "lfi", first.payload.ExpectedSignal)
 				}
-			})
-		if f != nil {
-			f.Description += " Two distinct traversal encodings retrieved the same operating-system file family, followed by replay and a clean negative control."
-			f.Evidence.Verification.UpgradeReasons = append(
-				f.Evidence.Verification.UpgradeReasons, "independent_traversal_variants",
-			)
+			}
 		}
-		r.recordFinding(&out, f, "lfi", family)
 	}
 	return out
 }
@@ -138,4 +167,33 @@ func lfiSignal(body, baseline, signal string) bool {
 		return false
 	}
 	return deeptraversal.DetectSignal(body, baseline, signal)
+}
+
+func isLikelyLFIParam(param string) bool {
+	p := strings.ToLower(strings.TrimSpace(param))
+	if p == "" {
+		return false
+	}
+	switch p {
+	case "_", "t", "ts", "timestamp", "cb", "cache", "nocache", "v", "ver", "version",
+		"format", "lang", "locale", "theme", "sort", "order", "dir", "asc", "desc",
+		"limit", "offset", "page_size", "per_page", "count", "qty", "quantity",
+		"price", "amount", "total", "id", "user_id", "product_id", "item_id", "category_id",
+		"account_id", "org_id", "role_id", "status", "state", "is_active", "enabled",
+		"disabled", "color", "size", "width", "height", "lat", "lon", "lng", "zoom",
+		"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "ref", "fbclid", "gclid":
+		return false
+	}
+	for _, kw := range []string{
+		"file", "path", "page", "doc", "document", "folder", "root", "template", "view",
+		"layout", "include", "inc", "load", "read", "url", "uri", "module", "content",
+		"dir", "filename", "image", "img", "pdf", "download", "cat", "source", "src",
+		"conf", "config", "action", "item", "name", "report", "target", "dest",
+		"resource", "data", "logfile", "log", "feed", "style", "sheet", "nav",
+	} {
+		if strings.Contains(p, kw) {
+			return true
+		}
+	}
+	return false
 }

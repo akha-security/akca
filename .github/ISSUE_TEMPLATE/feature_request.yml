@@ -1,0 +1,30 @@
+name: Feature request
+description: Propose a focused capability or detection improvement.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What security or workflow problem should AKCA solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain the expected user experience and evidence requirements.
+    validations:
+      required: true
+  - type: textarea
+    id: false_positives
+    attributes:
+      label: False-positive controls
+      description: What negative controls, replay, identity, state, DOM, runtime, or OAST proof should be required?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

@@ -82,12 +82,25 @@ func (r *Runner) oastURL(ctx context.Context, payloadID string, target ScanTarge
 }
 
 func uniqueOASTPayloadID(base string, target ScanTarget, vulnClass string) string {
-	sum := sha256.Sum256([]byte(target.EndpointURL + "|" + target.Method + "|" + target.Parameter + "|" + target.Location + "|" + vulnClass))
-	base = strings.Trim(strings.TrimSpace(base), "-")
-	if base == "" {
-		base = vulnClass
+	sum := sha256.Sum256([]byte(target.EndpointURL + "|" + target.Method + "|" + target.Parameter + "|" + target.Location + "|" + vulnClass + "|" + base))
+	classPrefix := "p"
+	switch strings.ToLower(vulnClass) {
+	case "ssrf":
+		classPrefix = "s"
+	case "sqli":
+		classPrefix = "q"
+	case "xxe":
+		classPrefix = "x"
+	case "rce", "command_injection":
+		classPrefix = "c"
+	case "lfi":
+		classPrefix = "l"
+	case "xss", "blind_xss":
+		classPrefix = "b"
+	case "cors":
+		classPrefix = "o"
 	}
-	return base + "-" + fmt.Sprintf("%x", sum[:6])
+	return fmt.Sprintf("%s%x", classPrefix, sum[:5])
 }
 
 func (r *Runner) hasOASTCallback(payloadID string) bool {
@@ -104,9 +117,22 @@ func FinalizeOASTFindings(db *storage.DB, scanID string, emit EventSink) ([]Modu
 	if db == nil {
 		return nil, nil
 	}
-	records, err := db.ListOASTCallbackRecords(scanID, 500)
-	if err != nil {
-		return nil, err
+	const callbackPageSize = 500
+	var records []storage.OASTCallbackRecord
+	var beforeID int64
+	for {
+		page, err := db.ListOASTCallbackRecordsPage(scanID, beforeID, callbackPageSize)
+		if err != nil {
+			return nil, err
+		}
+		if len(page) == 0 {
+			break
+		}
+		records = append(records, page...)
+		beforeID = page[len(page)-1].ID
+		if len(page) < callbackPageSize {
+			break
+		}
 	}
 	// Prefer HTTP interactions over DNS for the same payload so deduplication
 	// retains the stronger fetch evidence.
@@ -279,6 +305,8 @@ func oastSignalForModule(module string) string {
 		return "oob_sqli"
 	case "lfi":
 		return "rfi_oast"
+	case "blind_xss":
+		return "blind_xss_oast_callback"
 	default:
 		return "blind_oast"
 	}
@@ -286,9 +314,9 @@ func oastSignalForModule(module string) string {
 
 // sendOASTProbe registers a callback URL and delivers the payload without
 // emitting a finding; findings are created later from confirmed callbacks.
-func (r *Runner) sendOASTProbe(ctx context.Context, target ScanTarget, payload string) {
+func (r *Runner) sendOASTProbe(ctx context.Context, target ScanTarget, payload string) bool {
 	if strings.TrimSpace(payload) == "" || r.oastDeliveryBlocked() {
-		return
+		return false
 	}
 	rr, err := r.probe(ctx, target, strings.TrimSpace(payload))
 	if err != nil {
@@ -296,12 +324,9 @@ func (r *Runner) sendOASTProbe(ctx context.Context, target ScanTarget, payload s
 		// scary terminal warning behind while the user is intentionally
 		// cancelling the scan.
 		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-			return
+			return false
 		}
 		failureClass := oastProbeFailureClass(err)
-		if failureClass == "host_circuit_open" {
-			r.blockOASTDelivery()
-		}
 		method := oastProbeMethod(target)
 		safeToRetry := oastProbeSafeToRetry(method)
 		message := oastProbeFailureMessage(failureClass)
@@ -313,8 +338,13 @@ func (r *Runner) sendOASTProbe(ctx context.Context, target ScanTarget, payload s
 			"failure_class": failureClass, "failure_scope": "target_delivery",
 			"safe_to_retry": safeToRetry, "error": err.Error(),
 		})
-		return
+		return false
 	}
+	r.recordOASTProbeDelivery(target, payload, rr)
+	return true
+}
+
+func (r *Runner) recordOASTProbeDelivery(target ScanTarget, payload string, rr httpclient.RequestResponse) {
 	if recorder, ok := r.oast.(interface {
 		RecordProbe(payload, location string, request httpclient.RequestRecord)
 	}); ok {

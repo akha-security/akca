@@ -101,6 +101,9 @@ func (l *Limiter) reserveWait(host string) time.Duration {
 
 	if l.globalRPS > 0 {
 		interval := time.Duration(float64(time.Second) / (l.globalRPS / l.wafMultiplier))
+		// Apply subtle non-periodic jitter (up to 10%) so requests appear organic
+		jitterNanos := (now.UnixNano() % int64(max(int(interval/10), 1)))
+		interval += time.Duration(jitterNanos)
 		if now.Before(l.globalNext) {
 			waits = append(waits, l.globalNext.Sub(now))
 		} else {
@@ -111,6 +114,8 @@ func (l *Limiter) reserveWait(host string) time.Duration {
 
 	if l.perHostRPS > 0 && host != "" {
 		interval := time.Duration(float64(time.Second) / (l.perHostRPS / l.wafMultiplier))
+		jitterNanos := (now.UnixNano() % int64(max(int(interval/10), 1)))
+		interval += time.Duration(jitterNanos)
 		next := l.hostNext[host]
 		if now.Before(next) {
 			waits = append(waits, next.Sub(now))
@@ -119,6 +124,13 @@ func (l *Limiter) reserveWait(host string) time.Duration {
 	}
 
 	return maxDuration(waits)
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func maxTime(a, b time.Time) time.Time {

@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a reproducible AKCA defect. Do not include private target data.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug. Security vulnerabilities in AKCA must be reported privately according to SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: AKCA version
+      placeholder: v0.1.0 or commit SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: Windows 11 / Ubuntu 24.04, Go version
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe expected and actual behavior without exposing credentials or private target data.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide a safe local fixture, command, or test case.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      render: shell
+  - type: checkboxes
+    id: authorization
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I removed credentials and private target data from this report.
+          required: true

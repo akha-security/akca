@@ -11,56 +11,61 @@ func (r *Runner) runXXE(ctx context.Context, target ScanTarget) []ModuleFinding 
 		return nil
 	}
 	var out []ModuleFinding
-	baseline, err := r.probeWithBodyForModule(ctx, "xxe", target, `<root>baseline</root>`, "application/xml", nil)
-	if err != nil {
-		return nil
-	}
 	oast := ""
 	if r.cfg.EnableOAST && r.oast != nil {
 		oast = strings.TrimSpace(r.oastURL(ctx, "xxe-"+target.Parameter, target, "xxe"))
 	}
-	for _, p := range r.modulePayloads(target, "xxe", oast) {
-		if p.ExpectedSignal == "blind_oast" {
-			if oast == "" {
-				continue
-			}
-			_, _ = r.probeWithBodyForModule(ctx, "xxe", target, p.Value, "application/xml", nil)
+	payloads := r.modulePayloads(target, "xxe", oast)
+	if len(payloads) == 0 {
+		return nil
+	}
+	for _, carrier := range xxeCarriers(target) {
+		baselineBody, baselineType, err := buildXXECarrierRequest(carrier, target, payloads[0], true, oast)
+		if err != nil || len(baselineBody) == 0 {
 			continue
 		}
-		ct := "application/xml"
-		if p.ExpectedSignal == "soap_xxe" {
-			ct = "text/xml"
-		}
-		rr, err := r.probeWithBodyForModule(ctx, "xxe", target, p.Value, ct, nil)
+		baseline, err := r.probeWithRawBodyForModule(ctx, "xxe", target, baselineBody, baselineType, nil)
 		if err != nil {
 			continue
 		}
-		if runtimeFinding, handled := r.runtimeSinkProof(ctx, "xxe", target, p, baseline, rr); handled {
-			if runtimeFinding != nil {
-				r.recordFinding(&out, runtimeFinding, "xxe", runtimeFinding.Evidence.Signal)
-				return out
-			}
-			continue
-		}
-		if p.ExpectedSignal == "classic_entity" && !xxeSignalConfirmed(rr.Response.Body, baseline.Response.Body, p.ExpectedSignal) {
-			continue
-		}
-		if p.ExpectedSignal == "soap_xxe" && !xxeSignalConfirmed(rr.Response.Body, baseline.Response.Body, p.ExpectedSignal) {
-			continue
-		}
-		signal := strings.TrimSpace(p.ExpectedSignal)
-		if signal == "" {
-			switch {
-			case xxeSignalConfirmed(rr.Response.Body, baseline.Response.Body, "classic_entity"):
-				signal = "classic_entity"
-			case xxeSignalConfirmed(rr.Response.Body, baseline.Response.Body, "soap_xxe"):
-				signal = "soap_xxe"
-			default:
+		for _, original := range payloads {
+			p := original
+			body, contentType, err := buildXXECarrierRequest(carrier, target, p, false, oast)
+			if err != nil || len(body) == 0 {
 				continue
 			}
+			if carrier.name != "xml" {
+				p.Variant += "_" + carrier.name
+				p.Encoding = carrier.encoding()
+			}
+			rr, err := r.probeWithRawBodyForModule(ctx, "xxe", target, body, contentType, nil)
+			if err != nil {
+				continue
+			}
+			if p.ExpectedSignal == "blind_oast" {
+				if oast != "" {
+					r.recordOASTProbeDelivery(target, original.Value, rr)
+				}
+				continue
+			}
+			if runtimeFinding, handled := r.runtimeSinkProof(ctx, "xxe", target, p, baseline, rr); handled {
+				if runtimeFinding != nil {
+					r.recordFinding(ctx, &out, runtimeFinding, "xxe", runtimeFinding.Evidence.Signal)
+					return out
+				}
+				continue
+			}
+			if !xxeSignalConfirmed(rr.Response.Body, baseline.Response.Body, p.ExpectedSignal) {
+				continue
+			}
+			f := r.verifyAndBuild(ctx, "xxe", target, p, baseline, rr, p.ExpectedSignal, false, false, "", "")
+			if f != nil && (p.ExpectedSignal == "classic_entity" || p.ExpectedSignal == "soap_xxe") {
+				f.Title = "XML Internal Entity Expansion Enabled"
+				f.Severity = "medium"
+				f.Description = "The XML parser expanded a controlled internal entity. This proves entity expansion, but does not by itself prove local-file disclosure or external network access; those impacts require file-specific, runtime, or correlated OAST evidence."
+			}
+			r.recordFinding(ctx, &out, f, "xxe", p.ExpectedSignal)
 		}
-		f := r.verifyAndBuild(ctx, "xxe", target, p, baseline, rr, signal, false, false, "", "")
-		r.recordFinding(&out, f, "xxe", p.ExpectedSignal)
 	}
 	return out
 }

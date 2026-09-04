@@ -1,7 +1,6 @@
 package urlutil
 
 import (
-	"net"
 	"net/url"
 	"regexp"
 	"strings"
@@ -11,11 +10,11 @@ const MaxURLLength = 2048
 
 var (
 	embeddedSchemeRe = regexp.MustCompile(`(?i)(?:^|/)(?:https?://|%68%74%74%70|%48%54%54%50)`)
-	templateTokenRe  = regexp.MustCompile(`[{][{]|[:]\w+[/)]|%\s*7[Bb]|%\s*7[Dd]|\$\{`)
+	templateTokenRe  = regexp.MustCompile(`[{][{]|[:]\w+[/)]|\$\{`)
 	badHostRe        = regexp.MustCompile(`[\s"'<>\\]|%22|%3[Aa]%2[Ff]%2[Ff]`)
 )
 
-// IsPlausibleEndpointURL rejects javascript/data links, embedded URLs, templates, and malformed hosts.
+// IsPlausibleEndpointURL rejects javascript/data links, embedded URLs, templates, semantic garbage, and malformed hosts.
 func IsPlausibleEndpointURL(raw string) bool {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || len(raw) > MaxURLLength {
@@ -39,11 +38,6 @@ func IsPlausibleEndpointURL(raw string) bool {
 	if host == "" || badHostRe.MatchString(host) {
 		return false
 	}
-	if ip := net.ParseIP(host); ip == nil {
-		if !strings.Contains(host, ".") && host != "localhost" {
-			return false
-		}
-	}
 	pathQuery := u.Path + "?" + u.RawQuery
 	if embeddedSchemeRe.MatchString(pathQuery) {
 		return false
@@ -54,6 +48,19 @@ func IsPlausibleEndpointURL(raw string) bool {
 	if strings.Count(u.Path, "/") > 64 {
 		return false
 	}
+
+	lowerPath := strings.ToLower(u.Path)
+	// Reject semantic noise and JS artifacts
+	for _, noise := range []string{
+		"/undefined", "/null", "/nan", "/[object object]",
+		"/dd/mm/yyyy", "/mm/dd/yyyy", "/yyyy/mm/dd",
+		"/node_modules/", "/bower_components/",
+	} {
+		if strings.Contains(lowerPath, noise) {
+			return false
+		}
+	}
+
 	for _, vals := range u.Query() {
 		for _, v := range vals {
 			vl := strings.ToLower(strings.TrimSpace(v))

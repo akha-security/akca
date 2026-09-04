@@ -1,6 +1,10 @@
 package modules
 
-import "github.com/akha-security/akca/engine/internal/models"
+import (
+	"strings"
+
+	"github.com/akha-security/akca/engine/internal/models"
+)
 
 var GroupARegistry = []ModuleDescriptor{
 	{
@@ -9,11 +13,14 @@ var GroupARegistry = []ModuleDescriptor{
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "blind_xss", Description: "Blind XSS via OAST callback correlation", Version: "0.1.0"},
-		Precondition: contentTypes("html", "javascript", "json"),
+		Precondition: contentTypes("html", "javascript", "json", "x-www-form-urlencoded", "multipart/form-data", "text/plain", "form", "feedback", "support"),
 	},
 }
 
 func sstiReady(t ScanTarget) (bool, string) {
+	if strings.TrimSpace(t.Parameter) != "" {
+		return true, ""
+	}
 	if ok, _ := paramLike("template", "view", "layout", "format", "message", "subject", "body", "preview", "render")(t); ok {
 		return true, ""
 	}

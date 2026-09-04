@@ -2,6 +2,7 @@ package events
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,21 @@ import (
 
 type memWriter struct {
 	buf bytes.Buffer
+}
+
+type failingWriter struct{}
+
+func (failingWriter) WriteEvent(Event) error { return errors.New("write failed") }
+
+func TestBatcherRetainsEventsAfterWriteFailure(t *testing.T) {
+	b := NewBatcher(failingWriter{}, 1, time.Hour)
+	defer b.Close()
+	if err := b.Emit(Event{Type: "log"}); err == nil {
+		t.Fatal("expected write failure")
+	}
+	if b.PendingCount() != 1 {
+		t.Fatalf("pending events = %d, want 1", b.PendingCount())
+	}
 }
 
 func (m *memWriter) WriteEvent(e Event) error {
@@ -49,5 +65,21 @@ func TestBatcherBoundedPending(t *testing.T) {
 	_ = b.Emit(Event{Type: "log"})
 	if b.PendingCount() != 1 {
 		t.Fatalf("expected one pending event")
+	}
+}
+
+func TestFindingEventsFlushImmediately(t *testing.T) {
+	w := &memWriter{}
+	b := NewBatcher(w, 100, time.Hour)
+	defer b.Close()
+
+	if err := b.Emit(Event{Type: "finding_detected"}); err != nil {
+		t.Fatal(err)
+	}
+	if b.PendingCount() != 0 {
+		t.Fatal("finding_detected must not wait in the event batch")
+	}
+	if !strings.Contains(w.buf.String(), "finding_detected") {
+		t.Fatalf("finding event was not delivered immediately: %q", w.buf.String())
 	}
 }

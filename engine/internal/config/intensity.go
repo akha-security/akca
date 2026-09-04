@@ -10,13 +10,13 @@ func ApplyScanIntensity(cfg *ScanConfig) {
 			cfg.GlobalRateLimit = 20
 		}
 		if cfg.PerHostRateLimit <= 0 {
-			cfg.PerHostRateLimit = 12
+			cfg.PerHostRateLimit = 10
 		}
 		if cfg.PerHostConcurrency <= 0 {
 			cfg.PerHostConcurrency = 8
 		}
 		if cfg.MaxConcurrency <= 0 {
-			cfg.MaxConcurrency = 24
+			cfg.MaxConcurrency = 16
 		}
 	case "stealth":
 		if !cfg.Explicit.GlobalRateLimit && (cfg.GlobalRateLimit > 1 || cfg.GlobalRateLimit <= 0) {

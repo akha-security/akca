@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            artifact: akca-linux-amd64
+          - goos: linux
+            goarch: arm64
+            artifact: akca-linux-arm64
+          - goos: windows
+            goarch: amd64
+            artifact: akca-windows-amd64.exe
+          - goos: darwin
+            goarch: amd64
+            artifact: akca-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            artifact: akca-darwin-arm64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: engine/go.sum
+
+      - name: Build
+        working-directory: engine
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p ../dist
+          go build -buildvcs=false -trimpath -ldflags="-s -w" -o "../dist/${{ matrix.artifact }}" ./cmd/akca
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: akca-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: sha256sum dist/* > dist/SHA256SUMS.txt
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --generate-notes --verify-tag

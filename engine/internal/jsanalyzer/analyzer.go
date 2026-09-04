@@ -64,6 +64,7 @@ func (a *Analyzer) DownloadAndAnalyze(ctx context.Context, jsURL string) (Analys
 		return AnalysisResult{}, nil
 	}
 	result := a.AnalyzeContent(jsURL, rr.Response.Body)
+	result.SourceMaps = a.verifySourceMaps(ctx, result.SourceMaps)
 	a.publishResult(result)
 	return result, nil
 }
@@ -82,8 +83,7 @@ func (a *Analyzer) Run(ctx context.Context, jsURLs []string) error {
 }
 
 func (a *Analyzer) RunFromStorage(ctx context.Context) error {
-	limit := 2000
-	urls, err := a.db.ListScriptEndpoints(a.scanID, limit)
+	urls, err := a.db.ListScriptEndpoints(a.scanID, 0)
 	if err != nil {
 		return err
 	}
@@ -116,6 +116,9 @@ func (a *Analyzer) publishResult(result AnalysisResult) {
 	}
 
 	for _, sm := range result.SourceMaps {
+		if !sm.Exposed {
+			continue
+		}
 		_ = a.emit("source_map_exposed", sm.URL, map[string]interface{}{
 			"scan_id": a.scanID, "from_file": sm.FromFile, "map_url": sm.URL,
 		})
@@ -135,16 +138,20 @@ func (a *Analyzer) publishResult(result AnalysisResult) {
 
 	for _, sec := range result.Secrets {
 		_ = a.emit("js_secret_detected", sec.Kind, map[string]interface{}{
-			"scan_id": a.scanID, "kind": sec.Kind, "redacted": sec.Redacted, "js_url": result.JSURL,
+			"scan_id": a.scanID, "kind": sec.Kind, "redacted": sec.Redacted, "value": sec.Value, "js_url": result.JSURL,
 		})
+		if !secretscan.IsReportable(secretscan.Match{Kind: sec.Kind, Value: sec.Value, Confidence: sec.Confidence}) {
+			continue
+		}
 		title := "Secret-like string in JavaScript (" + sec.Kind + ")"
 		desc := sec.Kind + " pattern detected in JS source: " + sec.Value
 		evidence := secretscan.EvidenceJSON(sec.Kind, sec.Value, result.JSURL, sec.LineHint)
-		findingID, err := a.db.SaveFinding(a.scanID, title, "high", "secret_exposure",
+		severity := secretscan.Severity(sec.Confidence)
+		findingID, err := a.db.SaveFinding(a.scanID, title, severity, "secret_exposure",
 			desc, result.JSURL, "", sec.Confidence, evidence)
 		if err == nil {
 			_ = a.emit("finding_detected", title, findingevent.Payload(findingevent.Data{
-				FindingID: findingID, ScanID: a.scanID, Title: title, Severity: "high",
+				FindingID: findingID, ScanID: a.scanID, Title: title, Severity: severity,
 				VulnClass: "secret_exposure", Endpoint: result.JSURL, Location: "javascript_source",
 				Method: "GET", Payload: sec.Value, Signal: "passive_secret", Score: sec.Confidence,
 				Passive: true,
@@ -173,6 +180,34 @@ func (a *Analyzer) publishResult(result AnalysisResult) {
 			}
 		}
 	}
+}
+
+func (a *Analyzer) verifySourceMaps(ctx context.Context, refs []SourceMapRef) []SourceMapRef {
+	verified := make([]SourceMapRef, 0, len(refs))
+	for _, ref := range refs {
+		resolved, err := resolveReference(ref.FromFile, ref.URL)
+		if err != nil || resolved == "" || !a.scope.IsInScope(resolved) {
+			continue
+		}
+		rr, err := a.client.Do(ctx, http.MethodGet, resolved, nil, nil)
+		if err != nil || rr.Response.StatusCode != http.StatusOK {
+			continue
+		}
+		var document struct {
+			Version        int               `json:"version"`
+			Sources        []string          `json:"sources"`
+			SourcesContent []json.RawMessage `json:"sourcesContent"`
+		}
+		if json.Unmarshal([]byte(rr.Response.Body), &document) != nil || document.Version <= 0 ||
+			(len(document.Sources) == 0 && len(document.SourcesContent) == 0) {
+			continue
+		}
+		ref.URL = resolved
+		ref.Exposed = true
+		ref.Confidence = 0.98
+		verified = append(verified, ref)
+	}
+	return verified
 }
 
 func passiveEvidenceJSON(module, signal, payload, sourceURL string) string {

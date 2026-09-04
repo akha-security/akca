@@ -17,8 +17,10 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/akha-security/akca/engine/internal/branding"
 	"github.com/akha-security/akca/engine/internal/config"
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/scope"
@@ -58,7 +60,11 @@ func (p *networkTLSInspector) Inspect(ctx context.Context, rawURL string) (TLSIn
 	address := hostPort(u, "443")
 	conn, err := p.dial(ctx, address, u.Hostname(), tls.VersionTLS12, 0, nil)
 	if err != nil {
-		return TLSInspection{}, err
+		// Try fallback with legacy TLS 1.0 in case server only supports legacy protocols
+		conn, err = p.dial(ctx, address, u.Hostname(), tls.VersionTLS10, 0, nil)
+		if err != nil {
+			return TLSInspection{}, err
+		}
 	}
 	state := conn.ConnectionState()
 	_ = conn.Close()
@@ -110,6 +116,10 @@ func (p *networkTLSInspector) Inspect(ctx context.Context, rawURL string) (TLSIn
 			inspection.Signals = append(inspection.Signals, "weak_cipher")
 		}
 		_ = weakConn.Close()
+	}
+	// Check TLS 1.3 availability
+	if tls13Conn, tls13Err := p.dial(ctx, address, u.Hostname(), tls.VersionTLS13, tls.VersionTLS13, nil); tls13Err == nil {
+		_ = tls13Conn.Close()
 	}
 	inspection.Signals = uniqueStrings(inspection.Signals)
 	return inspection, nil
@@ -259,7 +269,7 @@ func (p *networkWebSocketProber) Probe(ctx context.Context, rawURL, payload stri
 	}, nil
 }
 
-const defaultProbeUserAgent = "Akca-Security-Scanner/1.0"
+const defaultProbeUserAgent = branding.UserAgent
 
 func websocketURL(rawURL string) (*url.URL, error) {
 	u, err := url.Parse(rawURL)
@@ -370,12 +380,27 @@ func readWebSocketMessage(r *bufio.Reader, w io.Writer) ([]byte, error) {
 }
 
 type networkSmugglingProber struct {
-	cfg   config.ScanConfig
-	scope *scope.Engine
+	cfg       config.ScanConfig
+	scope     *scope.Engine
+	controlMu sync.Mutex
+	controls  map[string]smugglingControlCacheEntry
+	h2Mu      sync.Mutex
+	h2NoALPN  map[string]struct{}
 }
 
 func newNetworkSmugglingProber(cfg config.ScanConfig, scopeEngine *scope.Engine) SmugglingProber {
-	return &networkSmugglingProber{cfg: cfg, scope: scopeEngine}
+	return &networkSmugglingProber{
+		cfg:      cfg,
+		scope:    scopeEngine,
+		controls: make(map[string]smugglingControlCacheEntry),
+		h2NoALPN: make(map[string]struct{}),
+	}
+}
+
+type smugglingControlCacheEntry struct {
+	responses []rawHTTPResponse
+	exchange  httpclient.RequestResponse
+	err       error
 }
 
 func (p *networkSmugglingProber) Probe(ctx context.Context, rawURL, variant string) (SmugglingProbeResult, error) {
@@ -386,16 +411,28 @@ func (p *networkSmugglingProber) Probe(ctx context.Context, rawURL, variant stri
 	if p.scope != nil && !p.scope.IsInScope(rawURL) {
 		return SmugglingProbeResult{}, errors.New("smuggling target is outside scope")
 	}
-	controlRaw := buildControlPipeline(u)
-	control, err := p.exchange(ctx, u, controlRaw)
-	if err != nil || len(control) < 2 {
-		return SmugglingProbeResult{}, errors.New("target does not support a stable HTTP/1.1 keep-alive control")
+
+	// Dispatch to dedicated HTTP/2 binary framer & h2c upgrade confusion probers
+	h2Prober := NewH2SmugglingProber(p.cfg)
+	switch strings.ToLower(variant) {
+	case "h2_cl", "h2_cl_0", "h2_te", "h2_te_pause", "h2_crlf", "h2_authority_crlf", "h2_pseudo":
+		if strings.EqualFold(u.Scheme, "https") {
+			if p.h2KnownUnsupported(u) {
+				return SmugglingProbeResult{Confirmed: false, Signal: variant, Reason: "target did not negotiate HTTP/2 via ALPN"}, nil
+			}
+			result, err := h2Prober.ProbeH2Desync(ctx, rawURL, variant)
+			if err == nil && !result.Confirmed && strings.Contains(result.Reason, "did not negotiate HTTP/2") {
+				p.rememberH2Unsupported(u)
+			}
+			return result, err
+		}
+	case "h2c_upgrade_confusion":
+		return h2Prober.ProbeH2CUpgrade(ctx, rawURL)
 	}
-	controlExchange := httpclient.RequestResponse{
-		Request: httpclient.RequestRecord{Method: http.MethodPost, URL: rawURL, Body: controlRaw},
-		Response: httpclient.ResponseRecord{
-			StatusCode: control[0].StatusCode, Body: summarizeRawResponses(control),
-		},
+
+	control, controlExchange, err := p.controlExchange(ctx, u, rawURL)
+	if err != nil {
+		return SmugglingProbeResult{}, err
 	}
 	var confirmed int
 	var confirmedAttempts []httpclient.RequestResponse
@@ -434,6 +471,57 @@ func (p *networkSmugglingProber) Probe(ctx context.Context, rawURL, variant stri
 		},
 		Control: controlExchange, Attempts: confirmedAttempts,
 	}, nil
+}
+
+func (p *networkSmugglingProber) controlExchange(ctx context.Context, u *url.URL, rawURL string) ([]rawHTTPResponse, httpclient.RequestResponse, error) {
+	key := smugglingCacheKey(u)
+	p.controlMu.Lock()
+	if entry, ok := p.controls[key]; ok {
+		p.controlMu.Unlock()
+		return entry.responses, entry.exchange, entry.err
+	}
+	p.controlMu.Unlock()
+
+	controlRaw := buildControlPipeline(u)
+	control, err := p.exchange(ctx, u, controlRaw)
+	if err != nil || len(control) < 2 {
+		err = errors.New("target does not support a stable HTTP/1.1 keep-alive control")
+	}
+	controlExchange := httpclient.RequestResponse{}
+	if err == nil {
+		controlExchange = httpclient.RequestResponse{
+			Request: httpclient.RequestRecord{Method: http.MethodPost, URL: rawURL, Body: controlRaw},
+			Response: httpclient.ResponseRecord{
+				StatusCode: control[0].StatusCode, Body: summarizeRawResponses(control),
+			},
+		}
+	}
+	entry := smugglingControlCacheEntry{responses: control, exchange: controlExchange, err: err}
+	p.controlMu.Lock()
+	p.controls[key] = entry
+	p.controlMu.Unlock()
+	return entry.responses, entry.exchange, entry.err
+}
+
+func (p *networkSmugglingProber) h2KnownUnsupported(u *url.URL) bool {
+	p.h2Mu.Lock()
+	defer p.h2Mu.Unlock()
+	_, ok := p.h2NoALPN[smugglingOriginKey(u)]
+	return ok
+}
+
+func (p *networkSmugglingProber) rememberH2Unsupported(u *url.URL) {
+	p.h2Mu.Lock()
+	p.h2NoALPN[smugglingOriginKey(u)] = struct{}{}
+	p.h2Mu.Unlock()
+}
+
+func smugglingCacheKey(u *url.URL) string {
+	return smugglingOriginKey(u) + requestPath(u)
+}
+
+func smugglingOriginKey(u *url.URL) string {
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
 }
 
 type rawHTTPResponse struct {
@@ -482,18 +570,53 @@ func buildSmugglingPipeline(u *url.URL, variant, token string) (string, error) {
 	smuggled := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nX-Akca-Canary: %s\r\n\r\n", canaryPath, u.Host, token)
 	body := "0\r\n\r\n" + smuggled
 	contentLength := len(body)
+	var attack string
+
 	switch variant {
 	case "cl_te":
 		// A CL frontend consumes the full body while a TE backend stops at the
 		// zero chunk, leaving the harmless GET canary queued.
+		attack = fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n%s", path, u.Host, contentLength, body)
 	case "te_cl":
 		// A TE frontend consumes the chunks while a CL backend consumes only
 		// the zero-chunk prefix, leaving the same harmless GET canary queued.
 		contentLength = len("0\r\n\r\n")
+		attack = fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n%s", path, u.Host, contentLength, body)
+	case "te_te_space":
+		// Obfuscated TE.TE using space before colon header format (Transfer-Encoding : chunked).
+		attack = fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\nTransfer-Encoding : chunked\r\nConnection: keep-alive\r\n\r\n%s", path, u.Host, contentLength, body)
+	case "te_te_prefix":
+		// Obfuscated TE.TE using invalid prefix (Transfer-Encoding: xchunked).
+		attack = fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\nTransfer-Encoding: xchunked\r\nConnection: keep-alive\r\n\r\n%s", path, u.Host, contentLength, body)
+	case "te_te_duplicate":
+		// Obfuscated TE.TE using dual Transfer-Encoding headers.
+		attack = fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\nConnection: keep-alive\r\n\r\n%s", path, u.Host, contentLength, body)
+	case "cl_cl_conflict":
+		// Conflicting dual Content-Length headers.
+		attack = fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\nContent-Length: %d\r\nConnection: keep-alive\r\n\r\n%s", path, u.Host, contentLength, contentLength+100, body)
+	case "cl_te_crlf":
+		// CRLF injection inside Transfer-Encoding header
+		attack = fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\nTransfer-Encoding:\r\n chunked\r\nConnection: keep-alive\r\n\r\n%s", path, u.Host, contentLength, body)
+	case "te_cl_tab":
+		// Tab obfuscated Transfer-Encoding header
+		contentLength = len("0\r\n\r\n")
+		attack = fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\nTransfer-Encoding:\tchunked\r\nConnection: keep-alive\r\n\r\n%s", path, u.Host, contentLength, body)
+	case "te_newline":
+		// Space before Transfer-Encoding
+		contentLength = len("0\r\n\r\n")
+		attack = fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\n Transfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n%s", path, u.Host, contentLength, body)
+	case "cl_zero":
+		// CL.0: Backend server ignores Content-Length: 0 on POST and reads subsequent request from buffer
+		attack = fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n%s", path, u.Host, smuggled)
+	case "h2_cl":
+		// H2.CL frontend passes Content-Length down to HTTP/1.1 backend
+		attack = fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\nConnection: keep-alive\r\n\r\n%s", path, u.Host, contentLength, body)
+	case "h2_te":
+		// H2.TE frontend forwards body while HTTP/1.1 backend terminates on zero chunk
+		attack = fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n%s", path, u.Host, body)
 	default:
 		return "", errors.New("unknown smuggling variant")
 	}
-	attack := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n%s", path, u.Host, contentLength, body)
 	victim := fmt.Sprintf("GET %s?akca_canary=%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, token, u.Host)
 	return attack + victim, nil
 }
@@ -528,9 +651,30 @@ func dialURL(ctx context.Context, u *url.URL, insecureSkipVerify bool) (net.Conn
 		return dialer.DialContext(ctx, "tcp", address)
 	}
 	tlsDialer := &tls.Dialer{NetDialer: dialer, Config: &tls.Config{
-		ServerName: u.Hostname(), InsecureSkipVerify: insecureSkipVerify, MinVersion: tls.VersionTLS12,
+		ServerName: u.Hostname(), InsecureSkipVerify: insecureSkipVerify,
+		MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS13,
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_AES_256_GCM_SHA384,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+			tls.TLS_AES_128_GCM_SHA256,
+		},
 	}}
-	return tlsDialer.DialContext(ctx, "tcp", address)
+	conn, err := tlsDialer.DialContext(ctx, "tcp", address)
+	if err != nil {
+		// Fallback for legacy target servers
+		fallbackDialer := &tls.Dialer{NetDialer: dialer, Config: &tls.Config{
+			ServerName: u.Hostname(), InsecureSkipVerify: insecureSkipVerify,
+			MinVersion: tls.VersionTLS10, MaxVersion: tls.VersionTLS13,
+		}}
+		return fallbackDialer.DialContext(ctx, "tcp", address)
+	}
+	return conn, nil
 }
 
 func hostPort(u *url.URL, defaultPort string) string {

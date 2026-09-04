@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/akha-security/akca/engine/internal/config"
@@ -20,6 +21,39 @@ type groupDClient struct {
 	responses map[string]string
 	headers   map[string]map[string]string
 	statuses  map[string]int
+}
+
+type putCleanupClient struct {
+	content       string
+	cleanupFails  bool
+	deleteAttempt bool
+}
+
+func (c *putCleanupClient) Do(_ context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	status, responseBody := 404, "not found"
+	switch method {
+	case "PUT":
+		c.content = string(body)
+		status = 201
+	case "GET":
+		if c.content != "" {
+			status, responseBody = 200, c.content
+		}
+	case "DELETE":
+		c.deleteAttempt = true
+		if c.cleanupFails {
+			status, responseBody = 500, "cleanup failed"
+		} else {
+			c.content = ""
+			status, responseBody = 204, ""
+		}
+	case "TRACE":
+		status, responseBody = 405, "method not allowed"
+	}
+	return httpclient.RequestResponse{
+		Request:  httpclient.RequestRecord{Method: method, URL: rawURL, Body: string(body), Headers: headers},
+		Response: httpclient.ResponseRecord{StatusCode: status, Body: responseBody, Headers: map[string]string{"Content-Type": "text/plain"}},
+	}, nil
 }
 
 func (m *groupDClient) lookup(rawURL string, body []byte, headers map[string]string) (string, int, map[string]string) {
@@ -174,12 +208,75 @@ func TestSensitiveDataExposure(t *testing.T) {
 func TestSecretExposure(t *testing.T) {
 	c := &groupDClient{responses: map[string]string{
 		"akca-secret-base": "config page",
-		"":                 `api_key="` + testfixtures.GitHubToken() + `"`,
+		"/config":          `api_key="` + testfixtures.GitHubToken() + `"`,
 	}}
 	target := ScanTarget{EndpointURL: "http://example.com/config", Method: "GET", Parameter: "q"}
 	findings := groupDRunner(t, c).runSecretExposure(context.Background(), target)
 	if len(findings) == 0 {
 		t.Fatal("expected secret exposure finding")
+	}
+}
+
+func TestPassiveSecretExposureDoesNotInjectBaselineMarker(t *testing.T) {
+	var mu sync.Mutex
+	var requests []string
+	c := &activeDynamicClient{handler: func(method, rawURL string, headers map[string]string) httpclient.ResponseRecord {
+		mu.Lock()
+		requests = append(requests, rawURL)
+		mu.Unlock()
+		return httpclient.ResponseRecord{StatusCode: 200, Body: `api_key="` + testfixtures.GitHubToken() + `"`, Headers: map[string]string{"Content-Type": "text/plain"}}
+	}}
+	cfg := config.DefaultScanConfig()
+	cfg.PassiveMode = true
+	cfg.AllowedVulnerabilityClasses = []string{"secret_exposure"}
+	r := NewRunner("scan-passive-module", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+		func(string, string, map[string]interface{}) error { return nil }, cfg)
+	findings := r.runSecretExposure(context.Background(), ScanTarget{EndpointURL: "https://example.com/config?q=original", Method: "GET", Parameter: "q"})
+	if len(findings) == 0 {
+		t.Fatal("passive secret inspection should retain evidence-backed findings")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, rawURL := range requests {
+		if strings.Contains(rawURL, "akca-secret-base") {
+			t.Fatalf("passive mode injected a differential marker: %s", rawURL)
+		}
+	}
+}
+
+func TestSecretExposureScansSameURLOnceAcrossParameterSurfaces(t *testing.T) {
+	var mu sync.Mutex
+	var requests []string
+	c := &activeDynamicClient{handler: func(method, rawURL string, headers map[string]string) httpclient.ResponseRecord {
+		mu.Lock()
+		requests = append(requests, rawURL)
+		mu.Unlock()
+		return httpclient.ResponseRecord{StatusCode: 200, Body: `api_key="` + testfixtures.GitHubToken() + `"`, Headers: map[string]string{"Content-Type": "text/plain"}}
+	}}
+	cfg := config.DefaultScanConfig()
+	cfg.AllowedVulnerabilityClasses = []string{"secret_exposure"}
+	r := NewRunner("scan-secret-once", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+		func(string, string, map[string]interface{}) error { return nil }, cfg)
+	targets := []ScanTarget{
+		{EndpointURL: "https://example.com/config?debug=true", Method: "GET", Parameter: "debug"},
+		{EndpointURL: "https://example.com/config?debug=true", Method: "GET", Parameter: "token"},
+	}
+	var findings []ModuleFinding
+	for _, target := range targets {
+		if r.contentModuleOnce("secret_exposure", target) {
+			findings = append(findings, r.runSecretExposure(context.Background(), target)...)
+		}
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected secret exposure finding")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requests) != 1 {
+		t.Fatalf("expected one passive fetch for duplicate URL surfaces, got %d: %v", len(requests), requests)
+	}
+	if strings.Contains(requests[0], "akca-secret-base") {
+		t.Fatalf("secret exposure must not inject an active baseline marker: %s", requests[0])
 	}
 }
 
@@ -387,6 +484,57 @@ func TestCRLFInjectionRunsAsFirstClassModule(t *testing.T) {
 	}
 }
 
+func TestCRLFInjectionDoesNotSkipCommonParameterNames(t *testing.T) {
+	c := &activeDynamicClient{handler: func(method, rawURL string, headers map[string]string) httpclient.ResponseRecord {
+		resp := httpclient.ResponseRecord{StatusCode: 200, Body: "ok", Headers: map[string]string{"Content-Type": "text/plain"}}
+		u, _ := url.Parse(rawURL)
+		value := u.Query().Get("id")
+		if strings.Contains(value, "X-Akca-CRLF:") {
+			token := value[strings.Index(value, "akca-crlf-"):]
+			resp.Headers["X-Akca-CRLF"] = strings.TrimSpace(token)
+		}
+		return resp
+	}}
+	target := ScanTarget{EndpointURL: "http://example.com/search?id=1", Method: "GET", Parameter: "id", Location: "query"}
+	cfg := config.DefaultScanConfig()
+	r := NewRunner("scan-crlf-id", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+		func(string, string, map[string]interface{}) error { return nil }, cfg)
+	findings := r.runCRLF(context.Background(), target)
+	if len(findings) == 0 {
+		t.Fatal("expected CRLF finding on common parameter name id")
+	}
+}
+
+func TestCRLFBodySplittingPassesVerification(t *testing.T) {
+	c := &activeDynamicClient{handler: func(method, rawURL string, headers map[string]string) httpclient.ResponseRecord {
+		resp := httpclient.ResponseRecord{StatusCode: 200, Body: "ok", Headers: map[string]string{"Content-Type": "text/plain"}}
+		u, _ := url.Parse(rawURL)
+		value := u.Query().Get("next")
+		if strings.Contains(value, "AKCA_CRLF_BODY_") {
+			resp.Body = "ok " + value
+		}
+		return resp
+	}}
+	target := ScanTarget{EndpointURL: "http://example.com/redirect?next=/home", Method: "GET", Parameter: "next", Location: "query"}
+	cfg := config.DefaultScanConfig()
+	r := NewRunner("scan-crlf-body", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+		func(string, string, map[string]interface{}) error { return nil }, cfg)
+	findings := r.runCRLF(context.Background(), target)
+	if len(findings) == 0 {
+		t.Fatal("expected CRLF body-splitting finding")
+	}
+	foundBody := false
+	for _, finding := range findings {
+		if finding.Evidence.Signal == "crlf_body_injection" {
+			foundBody = true
+			break
+		}
+	}
+	if !foundBody {
+		t.Fatalf("expected body-splitting signal, got %+v", findings)
+	}
+}
+
 func TestDebugAdminExposure(t *testing.T) {
 	c := &groupDClient{responses: map[string]string{"/debug": "stack trace at admin panel"}}
 	target := ScanTarget{EndpointURL: "http://example.com/debug", Method: "GET", Parameter: "x"}
@@ -414,6 +562,82 @@ func TestRaceConditionDetection(t *testing.T) {
 	findings := groupDRunner(t, c).runRaceCondition(context.Background(), target)
 	if len(findings) != 0 {
 		t.Fatal("race-condition lead must remain manual until an atomicity violation is proven")
+	}
+}
+
+func TestLDAPAndXPathSignaturesAreCaseInsensitive(t *testing.T) {
+	if !ldapErrorSignal("Unhandled Exception in LDAP", "ok") {
+		t.Fatal("mixed-case LDAP signature was missed")
+	}
+	if !xpathErrorSignal("XPathException: invalid query", "ok") {
+		t.Fatal("mixed-case XPath signature was missed")
+	}
+}
+
+func TestRunLDAPInjectionDetectsVulnerability(t *testing.T) {
+	c := &groupDClient{
+		responses: map[string]string{
+			"http://example.com/search?user=":    "ok baseline",
+			"http://example.com/search?user=%2A": "Error: javax.naming.directory.InvalidSearchFilterException: bad filter",
+		},
+		statuses: map[string]int{
+			"http://example.com/search?user=":    200,
+			"http://example.com/search?user=%2A": 200,
+		},
+	}
+	target := ScanTarget{EndpointURL: "http://example.com/search", Method: "GET", Parameter: "user", Location: "query"}
+	findings := groupDRunner(t, c).runLDAPInjection(context.Background(), target)
+	if len(findings) == 0 {
+		t.Fatal("expected LDAP injection finding")
+	}
+	if findings[0].VulnClass != "ldap" {
+		t.Fatalf("expected vulnClass 'ldap', got %s", findings[0].VulnClass)
+	}
+}
+
+func TestRunXPathInjectionDetectsVulnerability(t *testing.T) {
+	c := &groupDClient{
+		responses: map[string]string{
+			"http://example.com/query?q=":                      "ok baseline",
+			"http://example.com/query?q=%27+or+%271%27%3D%271": "Warning: SimpleXMLElement::xpath(): Invalid expression in xpath",
+		},
+		statuses: map[string]int{
+			"http://example.com/query?q=":                      200,
+			"http://example.com/query?q=%27+or+%271%27%3D%271": 200,
+		},
+	}
+	target := ScanTarget{EndpointURL: "http://example.com/query", Method: "GET", Parameter: "q", Location: "query"}
+	findings := groupDRunner(t, c).runXPathInjection(context.Background(), target)
+	if len(findings) == 0 {
+		t.Fatal("expected XPath injection finding")
+	}
+	if findings[0].VulnClass != "xpath" {
+		t.Fatalf("expected vulnClass 'xpath', got %s", findings[0].VulnClass)
+	}
+}
+
+func TestHTTPPutFindingRequiresVerifiedCleanup(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		cleanupFails bool
+		wantFinding  bool
+	}{
+		{name: "cleanup succeeds", wantFinding: true},
+		{name: "cleanup fails", cleanupFails: true, wantFinding: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &putCleanupClient{cleanupFails: tc.cleanupFails}
+			cfg := config.DefaultScanConfig()
+			r := NewRunner("http-methods", client, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+				func(string, string, map[string]interface{}) error { return nil }, cfg)
+			findings := r.runHTTPMethods(context.Background(), ScanTarget{EndpointURL: "http://example.com/uploads", Method: "GET"})
+			if client.deleteAttempt != true {
+				t.Fatal("PUT canary cleanup was not attempted")
+			}
+			if got := len(findings) == 1; got != tc.wantFinding {
+				t.Fatalf("finding=%v want %v", got, tc.wantFinding)
+			}
+		})
 	}
 }
 

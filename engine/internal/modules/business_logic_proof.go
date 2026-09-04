@@ -18,11 +18,13 @@ func (r *Runner) runBusinessLogic(ctx context.Context, target ScanTarget) []Modu
 	}
 	policy, ok := r.businessLogicPolicy(target)
 	if !ok {
-		r.emitSkip("business_logic", target, "recorded native/manipulated/control/state/cleanup workflow is required")
+		r.emitStatefulProofGap("business_logic", target, "recorded invariant, state, transaction-ID, and cleanup policy is required")
+		r.emitSkip("business_logic", target, "recorded invariant, state, transaction-ID, and cleanup policy is required")
 		return nil
 	}
 	client, ok := r.client.(profiledHTTPDoer)
 	if !ok {
+		r.emitStatefulProofGap("business_logic", target, "isolated recorded requests are unavailable")
 		return nil
 	}
 	profile, ok := r.resolveAuthProfile(policy.AuthProfileID)
@@ -127,7 +129,7 @@ func (r *Runner) runBusinessLogic(ctx context.Context, target ScanTarget) []Modu
 	finding.Title = "Business invariant violation persisted in server state"
 	finding.Description = policy.ExpectedInvariant + "; the manipulated transaction created a real transaction ID and the forbidden value persisted in an independent state read before cleanup restored the snapshot."
 	var out []ModuleFinding
-	r.recordFinding(&out, finding, "business_logic", "forbidden_state_persisted")
+	r.recordFinding(ctx, &out, finding, "business_logic", "forbidden_state_persisted")
 	return out
 }
 

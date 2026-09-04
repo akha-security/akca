@@ -8,7 +8,7 @@ import (
 
 const ReportSchemaVersion = "1.0"
 
-// ValidateJSONSchema enforces the stable, machine-consumable contract of Akca
+// ValidateJSONSchema enforces the stable, machine-consumable contract of AKCA
 // JSON reports. It intentionally validates required public fields rather than
 // Go implementation details so additive fields remain backwards compatible.
 func ValidateJSONSchema(raw []byte) error {

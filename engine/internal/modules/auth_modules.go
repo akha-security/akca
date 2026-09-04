@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/config"
@@ -22,16 +23,39 @@ func (r *Runner) runBrokenAuth(ctx context.Context, target ScanTarget) []ModuleF
 		return nil
 	}
 	var out []ModuleFinding
+	if !hasAmbientAuthentication(r.cfg) {
+		r.emitSkip("broken_auth", target, "an authenticated session is required for anonymous-access comparison")
+		return nil
+	}
+	method := strings.ToUpper(strings.TrimSpace(target.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+	if method != http.MethodGet {
+		r.emitSkip("broken_auth", target, "automatic anonymous-access proof is limited to safe GET requests")
+		return nil
+	}
 	client, ok := r.client.(sessionlessHTTPDoer)
 	if !ok {
 		r.emitSkip("broken_auth", target, "HTTP client cannot create an anonymous control request")
 		return nil
 	}
-	baseline, err := r.cachedEmptyProbe(ctx, target)
-	if err != nil {
+	baseline, stable, reason := r.stableNativeBaselineForModule(ctx, "broken_auth", target)
+	if !stable {
+		r.emitSkip("broken_auth", target, reason)
 		return nil
 	}
-	rr, err := client.DoWithoutSession(ctx, baseline.Request.Method, baseline.Request.URL, []byte(baseline.Request.Body), nil)
+	if !requestCarriesAuthentication(baseline.Request.Headers) {
+		r.emitSkip("broken_auth", target, "authenticated baseline request did not carry session credentials")
+		return nil
+	}
+	if !likelyProtectedResource(target.EndpointURL) || !privateAuthResourceEvidence(baseline.Response.Body) {
+		r.emitSkip("broken_auth", target, "no strong protected-route and private-resource evidence")
+		return nil
+	}
+	anonymousHeaders := withoutAuthenticationHeaders(baseline.Request.Headers)
+	rr, err := client.DoWithoutSession(ctx, baseline.Request.Method, baseline.Request.URL,
+		[]byte(baseline.Request.Body), anonymousHeaders)
 	if err != nil {
 		return nil
 	}
@@ -39,13 +63,16 @@ func (r *Runner) runBrokenAuth(ctx context.Context, target ScanTarget) []ModuleF
 		return nil
 	}
 	replay, err := client.DoWithoutSession(ctx, baseline.Request.Method, baseline.Request.URL,
-		[]byte(baseline.Request.Body), nil)
+		[]byte(baseline.Request.Body), anonymousHeaders)
 	if err != nil || !brokenAuthSignal(replay.Response, baseline.Response) ||
-		resourceFingerprint(rr.Response.Body) != resourceFingerprint(replay.Response.Body) {
+		!sameBrokenAuthResource(rr.Response.Body, replay.Response.Body) {
 		return nil
 	}
+	proofTarget := target
+	proofTarget.Parameter = ""
+	proofTarget.Location = ""
 	p := defaultPayload("broken_auth", "missing_auth_access", target.EndpointURL, "missing_auth_access")
-	f := r.verifyAndBuildWithCandidate(ctx, "broken_auth", target, p, baseline, rr,
+	f := r.verifyAndBuildWithCandidate(ctx, "broken_auth", proofTarget, p, baseline, rr,
 		"missing_auth_access", false, false, "", "", func(candidate *verification.Candidate) {
 			candidate.RequestedProofType = verification.ProofAnonymousAccess
 			// Anonymous access is proven by equivalence with the authenticated
@@ -53,17 +80,21 @@ func (r *Runner) runBrokenAuth(ctx context.Context, target ScanTarget) []ModuleF
 			// reason for the generic differential guard to suppress the result.
 			candidate.ExpectedEquivalent = true
 			candidate.Observations = append(candidate.Observations,
-				r.identityObservation("broken_auth", target, verification.RoleIdentityA, 1, "authenticated", baseline),
-				r.identityObservation("broken_auth", target, verification.RoleAnonymousProbe, 1, "anonymous", rr),
-				r.identityObservation("broken_auth", target, verification.RoleAnonymousProbe, 2, "anonymous", replay),
+				r.identityObservation("broken_auth", proofTarget, verification.RoleIdentityA, 1, "authenticated", baseline),
+				r.identityObservation("broken_auth", proofTarget, verification.RoleAnonymousProbe, 1, "anonymous", rr),
+				r.identityObservation("broken_auth", proofTarget, verification.RoleAnonymousProbe, 2, "anonymous", replay),
 			)
 		})
-	r.recordFinding(&out, f, "broken_auth", "missing_auth_access")
+	if f != nil {
+		f.Title = "Broken Authentication: Private Resource Accessible Without Session"
+		f.Description = "A stable authenticated GET response containing private account data was reproduced twice without any session credentials on a protected route."
+	}
+	r.recordFinding(ctx, &out, f, "broken_auth", "missing_auth_access")
 	return out
 }
 
 func brokenAuthSignal(probe, baseline httpclient.ResponseRecord) bool {
-	if baseline.StatusCode < 200 || baseline.StatusCode >= 400 || probe.StatusCode < 200 || probe.StatusCode >= 400 {
+	if !successfulResourceResponse(baseline) || !successfulResourceResponse(probe) {
 		return false
 	}
 	probeLower := strings.ToLower(probe.Body)
@@ -71,17 +102,15 @@ func brokenAuthSignal(probe, baseline httpclient.ResponseRecord) bool {
 	if authDeniedBody(probeLower) || authDeniedBody(baseLower) {
 		return false
 	}
-	sensitive := []string{"dashboard", "admin", "profile", "account", "access_token", "session", "billing", "orders"}
-	for _, kw := range sensitive {
-		if strings.Contains(baseLower, kw) && strings.Contains(probeLower, kw) {
-			return true
-		}
-	}
-	return len(strings.TrimSpace(baseline.Body)) >= 80 && bodyDiffRatio(normalizeVolatileFields(baseline.Body), normalizeVolatileFields(probe.Body)) < 0.08
+	return privateAuthResourceEvidence(baseline.Body) && sameBrokenAuthResource(probe.Body, baseline.Body)
 }
 
 func authDeniedBody(lower string) bool {
-	for _, marker := range []string{"unauthorized", "forbidden", "please log in", "please login", "sign in", "authentication required", "invalid session"} {
+	for _, marker := range []string{
+		"unauthorized", "forbidden", "access denied", "not authorized", "authentication failed",
+		"please log in", "please login", "login required", "sign in", "authentication required",
+		"invalid session", "session expired", "giriş yap", "oturum aç", "yetkisiz", "erişim reddedildi",
+	} {
 		if strings.Contains(lower, marker) {
 			return true
 		}
@@ -89,65 +118,220 @@ func authDeniedBody(lower string) bool {
 	return false
 }
 
+func requestCarriesAuthentication(headers map[string]string) bool {
+	for name, value := range headers {
+		if strings.TrimSpace(value) == "" || value == "[REDACTED]" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "authorization", "cookie", "proxy-authorization", "x-api-key", "x-auth-token", "x-token":
+			return true
+		}
+	}
+	return false
+}
+
+func withoutAuthenticationHeaders(headers map[string]string) map[string]string {
+	out := make(map[string]string, len(headers))
+	for name, value := range headers {
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "authorization", "cookie", "proxy-authorization", "x-api-key", "x-auth-token", "x-token":
+			continue
+		}
+		out[name] = value
+	}
+	return out
+}
+
+func likelyProtectedResource(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	path := "/" + strings.Trim(strings.ToLower(parsed.Path), "/") + "/"
+	for _, public := range []string{
+		"/public/", "/docs/", "/swagger/", "/openapi/", "/login/", "/signin/", "/register/",
+		"/health/", "/status/", "/assets/", "/static/",
+	} {
+		if strings.Contains(path, public) {
+			return false
+		}
+	}
+	for _, protected := range []string{
+		"/admin/", "/auth/profile/", "/account/", "/accounts/", "/dashboard/", "/billing/",
+		"/invoice/", "/invoices/", "/order/", "/orders/", "/settings/", "/me/",
+	} {
+		if strings.Contains(path, protected) {
+			return true
+		}
+	}
+	return false
+}
+
+var privateAuthEmailRE = regexp.MustCompile(`(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b`)
+
+func privateAuthResourceEvidence(body string) bool {
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" {
+		return false
+	}
+	var document interface{}
+	if json.Unmarshal([]byte(trimmed), &document) == nil {
+		strong, identity := privateJSONEvidence(document)
+		return strong > 0 || identity >= 2
+	}
+	lower := strings.ToLower(trimmed)
+	hasSessionUI := strings.Contains(lower, "logout") || strings.Contains(lower, "log out") ||
+		strings.Contains(lower, "sign out") || strings.Contains(lower, "çıkış yap")
+	hasPrivateContext := strings.Contains(lower, "my account") || strings.Contains(lower, "account settings") ||
+		strings.Contains(lower, "billing") || strings.Contains(lower, "invoice") ||
+		strings.Contains(lower, "order history") || strings.Contains(lower, "admin dashboard")
+	return hasSessionUI && hasPrivateContext && privateAuthEmailRE.MatchString(trimmed)
+}
+
+func sameBrokenAuthResource(left, right string) bool {
+	if resourceFingerprint(left) != resourceFingerprint(right) {
+		return false
+	}
+	leftIdentity := stablePrivateJSONIdentity(left)
+	rightIdentity := stablePrivateJSONIdentity(right)
+	if len(leftIdentity) == 0 || len(rightIdentity) == 0 {
+		leftEmails := privateAuthEmailRE.FindAllString(strings.ToLower(left), -1)
+		rightLower := strings.ToLower(right)
+		if len(leftEmails) > 0 {
+			for _, email := range leftEmails {
+				if strings.Contains(rightLower, email) {
+					return true
+				}
+			}
+			return false
+		}
+		// Secret-only JSON responses have no stable identity marker. Require
+		// byte-for-byte semantic equality rather than letting UUID/token
+		// normalization collapse two different users into the same resource.
+		return canonicalJSONBody(left) == canonicalJSONBody(right)
+	}
+	for key, leftValues := range leftIdentity {
+		rightValues := rightIdentity[key]
+		for value := range leftValues {
+			if _, exists := rightValues[value]; exists {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func stablePrivateJSONIdentity(body string) map[string]map[string]struct{} {
+	var document interface{}
+	if json.Unmarshal([]byte(body), &document) != nil {
+		return nil
+	}
+	out := map[string]map[string]struct{}{}
+	var visit func(interface{})
+	visit = func(current interface{}) {
+		switch typed := current.(type) {
+		case map[string]interface{}:
+			for key, child := range typed {
+				name := strings.ToLower(strings.TrimSpace(key))
+				switch name {
+				case "email", "phone", "account_id", "user_id", "username", "customer_id":
+					if value := scalarIdentityValue(child); value != "" {
+						if out[name] == nil {
+							out[name] = map[string]struct{}{}
+						}
+						out[name][value] = struct{}{}
+					}
+				}
+				visit(child)
+			}
+		case []interface{}:
+			for _, child := range typed {
+				visit(child)
+			}
+		}
+	}
+	visit(document)
+	return out
+}
+
+func scalarIdentityValue(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.ToLower(strings.TrimSpace(typed))
+	case float64, bool, json.Number:
+		raw, _ := json.Marshal(typed)
+		return string(raw)
+	default:
+		return ""
+	}
+}
+
+func canonicalJSONBody(body string) string {
+	var document interface{}
+	if json.Unmarshal([]byte(body), &document) != nil {
+		return strings.TrimSpace(body)
+	}
+	raw, _ := json.Marshal(document)
+	return string(raw)
+}
+
+func privateJSONEvidence(value interface{}) (strong, identity int) {
+	seenStrong := map[string]struct{}{}
+	seenIdentity := map[string]struct{}{}
+	var visit func(interface{})
+	visit = func(current interface{}) {
+		switch typed := current.(type) {
+		case map[string]interface{}:
+			for key, child := range typed {
+				name := strings.ToLower(strings.TrimSpace(key))
+				if meaningfulJSONValue(child) {
+					switch name {
+					case "password", "secret", "api_key", "apikey", "access_token", "refresh_token", "session_id", "ssn", "credit_card":
+						seenStrong[name] = struct{}{}
+					case "email", "phone", "address", "account_id", "user_id", "username", "role", "permissions", "balance", "billing", "orders", "invoices", "organization_id", "tenant_id", "workspace_id", "company_id", "team_id", "project_id":
+						seenIdentity[name] = struct{}{}
+					}
+				}
+				visit(child)
+			}
+		case []interface{}:
+			for _, child := range typed {
+				visit(child)
+			}
+		}
+	}
+	visit(value)
+	return len(seenStrong), len(seenIdentity)
+}
+
+func meaningfulJSONValue(value interface{}) bool {
+	switch typed := value.(type) {
+	case nil:
+		return false
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		return trimmed != "" && trimmed != "null" && trimmed != "***" && trimmed != "[redacted]"
+	case []interface{}:
+		return len(typed) > 0
+	case map[string]interface{}:
+		return len(typed) > 0
+	default:
+		return true
+	}
+}
+
 func (r *Runner) runCSRF(ctx context.Context, target ScanTarget) []ModuleFinding {
 	if ok, reason := r.shouldRunModule("csrf", target); !ok {
 		r.emitSkip("csrf", target, reason)
 		return nil
 	}
-	return r.runClassicCSRF(ctx, target)
-}
-
-func (r *Runner) runClassicCSRF(ctx context.Context, target ScanTarget) []ModuleFinding {
-	var out []ModuleFinding
-	method := strings.ToUpper(strings.TrimSpace(target.Method))
-	if method != http.MethodPost && method != http.MethodPut && method != http.MethodPatch && method != http.MethodDelete {
-		r.emitSkip("csrf", target, "CSRF requires a state-changing HTTP method")
-		return nil
-	}
-	if !hasAmbientAuthentication(r.cfg) || strings.TrimSpace(target.BodyTemplate) == "" {
-		r.emitSkip("csrf", target, "CSRF proof requires an authenticated session and the original request body")
-		return nil
-	}
-	missingBody, invalidBody, contentType, ok := csrfBodyVariants(target.BodyTemplate, target.Profile.ContentType)
-	if !ok {
-		r.emitSkip("csrf", target, "no anti-CSRF token was identified in the original request body")
-		return nil
-	}
-	headers := map[string]string{
-		"Content-Type": contentType, "Origin": "https://akca.invalid", "Referer": "https://akca.invalid/csrf-proof",
-	}
-	baseline, err := r.client.Do(ctx, method, target.EndpointURL, []byte(target.BodyTemplate), map[string]string{"Content-Type": contentType})
-	if err != nil || baseline.Response.StatusCode >= 400 {
-		return nil
-	}
-	missing, err := r.client.Do(ctx, method, target.EndpointURL, []byte(missingBody), headers)
-	if err != nil || !csrfAccepted(missing.Response) {
-		return nil
-	}
-	invalid, err := r.client.Do(ctx, method, target.EndpointURL, []byte(invalidBody), headers)
-	if err != nil || !csrfRejected(invalid.Response) {
-		return nil
-	}
-	if bodyDiffRatio(normalizeVolatileFields(baseline.Response.Body), normalizeVolatileFields(missing.Response.Body)) > 0.25 {
-		return nil
-	}
-	p := defaultPayload("csrf", "missing_token", target.EndpointURL, "missing_csrf_token")
-	f := r.verifyAndBuildWithCandidate(ctx, "csrf", target, p, invalid, missing,
-		"missing_csrf_token", false, false, "", "", func(candidate *verification.Candidate) {
-			candidate.RequestedProofType = verification.ProofRequestPolicy
-			candidate.NegativeControlSet = true
-			candidate.NegativeControlOK = true
-			candidate.Observations = append(candidate.Observations,
-				r.observation("csrf", target, verification.RoleBaselineReplay, 1, baseline),
-				r.observation("csrf", target, verification.RoleNegativeControl, 1, invalid),
-			)
-		})
-	if f != nil {
-		f.Description = "The original authenticated request succeeded, the same cross-site request without the anti-CSRF token succeeded, and an invalid-token negative control was rejected."
-		f.Evidence.ResponseMarkers = append(f.Evidence.ResponseMarkers, "invalid_token_control_rejected")
-	}
-	r.recordFinding(&out, f, "csrf", "missing_csrf_token")
-	return out
+	return r.runStatefulSecurityProof(ctx, "csrf", target, r.cfg.CSRFProofPolicies, statefulSecurityFinding{
+		Signal: "cross_site_state_mutation", Variant: "recorded_cross_site_action",
+		Title:       "Cross-site request changed protected server state",
+		Description: "the cross-site action changed independently observed state, the invalid-token negative control did not, and cleanup restored the original snapshot.",
+		Severity:    "High",
+	})
 }
 
 func hasAmbientAuthentication(cfg config.ScanConfig) bool {
@@ -155,8 +339,20 @@ func hasAmbientAuthentication(cfg config.ScanConfig) bool {
 		return true
 	}
 	for name := range cfg.CustomHeaders {
-		if strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "X-API-Key") || strings.EqualFold(name, "X-Auth-Token") {
+		if strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "Cookie") ||
+			strings.EqualFold(name, "X-API-Key") || strings.EqualFold(name, "X-Auth-Token") || strings.EqualFold(name, "X-Token") {
 			return true
+		}
+	}
+	for _, profile := range cfg.AuthProfiles {
+		if len(profile.Cookies) > 0 {
+			return true
+		}
+		for name := range profile.Headers {
+			if strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "X-API-Key") ||
+				strings.EqualFold(name, "X-Auth-Token") || strings.EqualFold(name, "X-Token") {
+				return true
+			}
 		}
 	}
 	return false
@@ -274,7 +470,7 @@ func (r *Runner) runWordPressFuzz(ctx context.Context, target ScanTarget) []Modu
 				f.Severity = "low"
 			}
 		}
-		r.recordFinding(&out, f, "wordpress_fuzz", pr.signal)
+		r.recordFinding(ctx, &out, f, "wordpress_fuzz", pr.signal)
 	}
 	return out
 }
@@ -316,4 +512,90 @@ func wordpressSignal(status int, body, signal string) bool {
 	default:
 		return status >= 200 && status < 400
 	}
+}
+
+func (r *Runner) runImproperAuthentication(ctx context.Context, target ScanTarget) []ModuleFinding {
+	if ok, reason := r.shouldRunModule("improper_auth", target); !ok {
+		r.emitSkip("improper_auth", target, reason)
+		return nil
+	}
+	var out []ModuleFinding
+	client, ok := r.client.(sessionlessHTTPDoer)
+	if !ok {
+		r.emitSkip("improper_auth", target, "HTTP client cannot create an unauthenticated probe")
+		return nil
+	}
+
+	// 1. Check if unauthenticated access to a protected/sensitive endpoint returns 200 OK with sensitive data schema
+	baseline, err := r.cachedEmptyProbe(ctx, target)
+	if err == nil && baseline.Response.StatusCode == 200 {
+		lowerBody := strings.ToLower(baseline.Response.Body)
+		if strings.Contains(target.EndpointURL, "/admin") || strings.Contains(target.EndpointURL, "/api/admin") ||
+			strings.Contains(target.EndpointURL, "/api/v1/config") || strings.Contains(target.EndpointURL, "/api/users") {
+			if strings.Contains(lowerBody, `"users"`) || strings.Contains(lowerBody, `"admin":true`) ||
+				strings.Contains(lowerBody, `"api_key"`) || strings.Contains(lowerBody, `"db_password"`) {
+				p := defaultPayload("improper_auth", "missing_authentication", target.EndpointURL, "unauthenticated_sensitive_api")
+				f := r.verifyAndBuildWithCandidate(ctx, "improper_auth", target, p, baseline, baseline,
+					"unauthenticated_sensitive_api", false, false, "", "", func(candidate *verification.Candidate) {
+						candidate.RequestedProofType = verification.ProofAnonymousAccess
+						candidate.ExpectedEquivalent = true
+						candidate.Observations = append(candidate.Observations,
+							r.identityObservation("improper_auth", target, verification.RoleAnonymousProbe, 1, "anonymous", baseline),
+						)
+					})
+				if f != nil {
+					f.Title = "Improper Authentication: Sensitive Endpoint Accessible Without Auth"
+					f.Severity = "high"
+					f.Description = "The endpoint " + target.EndpointURL + " returned sensitive application data (HTTP 200 OK) without requiring any authentication."
+					r.recordFinding(ctx, &out, f, "improper_auth", "unauthenticated_sensitive_api")
+				}
+			}
+		}
+	}
+
+	// 2. Test common default auth header bypasses (e.g. Basic admin:admin, Bearer null, X-Admin-Access)
+	bypasses := []struct {
+		headerKey   string
+		headerVal   string
+		variantName string
+	}{
+		{"Authorization", "Basic YWRtaW46YWRtaW4=", "basic_default_credentials"}, // admin:admin
+		{"Authorization", "Bearer null", "bearer_null_bypass"},
+		{"X-Admin-Access", "true", "custom_header_admin_bypass"},
+		{"X-Bypass-Auth", "1", "custom_header_bypass_auth"},
+	}
+
+	for _, b := range bypasses {
+		if ctx.Err() != nil {
+			break
+		}
+		headers := map[string]string{b.headerKey: b.headerVal}
+		rr, err := client.DoWithoutSession(ctx, target.Method, target.EndpointURL, []byte(target.BodyTemplate), headers)
+		if err != nil || rr.Response.StatusCode != 200 {
+			continue
+		}
+		respBody := strings.ToLower(rr.Response.Body)
+		if authDeniedBody(respBody) {
+			continue
+		}
+		if strings.Contains(respBody, "admin") || strings.Contains(respBody, "success") || strings.Contains(respBody, "user") {
+			p := defaultPayload("improper_auth", b.variantName, b.headerVal, b.variantName)
+			f := r.verifyAndBuildWithCandidate(ctx, "improper_auth", target, p, baseline, rr,
+				b.variantName, false, false, "", "", func(candidate *verification.Candidate) {
+					candidate.RequestedProofType = verification.ProofAnonymousAccess
+					candidate.Observations = append(candidate.Observations,
+						r.identityObservation("improper_auth", target, verification.RoleAnonymousProbe, 1, b.variantName, rr),
+					)
+				})
+			if f != nil {
+				f.Title = "Improper Authentication Bypass via " + b.headerKey
+				f.Severity = "critical"
+				f.Description = "The endpoint accepted an unauthenticated/default authorization header (" + b.headerKey + ": " + b.headerVal + ") and granted access to protected resources."
+				r.recordFinding(ctx, &out, f, "improper_auth", b.variantName)
+				break
+			}
+		}
+	}
+
+	return out
 }

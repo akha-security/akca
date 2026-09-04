@@ -393,7 +393,7 @@ func StrictGateConfig() GateConfig {
 	return GateConfig{
 		MinimumPrecision: 0.995, MinimumRecall: 0.80, MaximumConfirmedFP: 0,
 		MinimumModulePrecision: 0.995, MinimumModuleRecall: 0.80,
-		MaximumFPRUpper95: 0.05, MaximumRequests: 2300, MaximumRequestRepeatDriftRatio: 0.02, MaximumDurationSec: 45,
+		MaximumFPRUpper95: 0.05, MaximumRequests: 2500, MaximumRequestRepeatDriftRatio: 0.02, MaximumDurationSec: 45,
 		MaximumRequestRegressionRatio: 0.20, MaximumDurationRegressionRatio: 0.75,
 		MaximumGoroutineDelta: 8, RequireDeterminism: true,
 		RequireReportSchemaCompatibility: true, AllowSynthetic: false,

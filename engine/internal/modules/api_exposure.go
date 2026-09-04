@@ -2,6 +2,7 @@ package modules
 
 import (
 	"context"
+	"encoding/json"
 	"regexp"
 	"strings"
 
@@ -22,6 +23,9 @@ func (r *Runner) runAPIExposure(ctx context.Context, target ScanTarget) []Module
 		r.emitSkip("api_exposure", target, reason)
 		return nil
 	}
+	if !r.endpointModuleOnce("api_exposure", target) {
+		return nil
+	}
 	var out []ModuleFinding
 	rr, err := r.cachedEmptyProbe(ctx, target)
 	if err != nil {
@@ -31,13 +35,40 @@ func (r *Runner) runAPIExposure(ctx context.Context, target ScanTarget) []Module
 	if signal == "" {
 		return nil
 	}
+	if !apiExposureResponseSurface(target.EndpointURL, rr.Response) {
+		r.emitOnce("api-exposure-surface:"+target.EndpointURL, "module_notice",
+			"API exposure content marker ignored because response does not look like an API payload",
+			map[string]interface{}{
+				"module":   "api_exposure",
+				"endpoint": target.EndpointURL,
+				"status":   rr.Response.StatusCode,
+			})
+		return nil
+	}
 	baseline := httpclient.RequestResponse{
 		Response: httpclient.ResponseRecord{StatusCode: 200, Body: "{}", Headers: map[string]string{"Content-Type": "application/json"}},
 	}
 	p := defaultPayload("api_exposure", signal, field, signal)
 	f := r.verifyAndBuild(ctx, "api_exposure", target, p, baseline, rr, signal, false, false, "", "")
-	r.recordFinding(&out, f, "api_exposure", signal)
+	r.recordFinding(ctx, &out, f, "api_exposure", signal)
 	return out
+}
+
+func apiExposureResponseSurface(endpointURL string, response httpclient.ResponseRecord) bool {
+	contentType := strings.ToLower(response.Headers["Content-Type"])
+	body := strings.TrimSpace(response.Body)
+	if body == "" || strings.Contains(strings.ToLower(body), "<html") || strings.Contains(strings.ToLower(body), "<!doctype") {
+		return false
+	}
+	if strings.Contains(contentType, "json") || strings.Contains(contentType, "graphql") ||
+		strings.Contains(contentType, "problem+") {
+		return true
+	}
+	if strings.HasPrefix(body, "{") || strings.HasPrefix(body, "[") {
+		var decoded interface{}
+		return json.Unmarshal([]byte(body), &decoded) == nil
+	}
+	return strings.Contains(strings.ToLower(endpointURL), "/api/")
 }
 
 func apiExposureSignal(body string) (signal, field string) {

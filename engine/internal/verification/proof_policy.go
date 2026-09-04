@@ -40,7 +40,7 @@ var proofPolicies = map[string]ModuleProofPolicy{
 	"file_upload":            statePolicy("file_upload", ProofFileRetrieval),
 	"idor":                   identityPolicy("idor"),
 	"bfla":                   identityPolicy("bfla"),
-	"mass_assignment":        statePolicy("mass_assignment", ProofStateMutation),
+	"mass_assignment":        statePolicy("mass_assignment", ProofStateMutation, ProofDifferentialReplay),
 	"race_condition":         statePolicy("race_condition", ProofStateMutation),
 	"business_logic":         statePolicy("business_logic", ProofStateMutation),
 	"jwt":                    identityPolicy("jwt"),
@@ -51,7 +51,14 @@ var proofPolicies = map[string]ModuleProofPolicy{
 	"cache_deception":        replayPolicy("cache_deception", ProofDifferentialReplay),
 	"hpp":                    statePolicy("hpp", ProofStateMutation),
 	"broken_auth":            anonymousPolicy("broken_auth"),
-	"csrf":                   requestPolicy("csrf"),
+	"improper_auth":          anonymousPolicy("improper_auth"),
+	"route_auth_bypass":      contentPolicy("route_auth_bypass"),
+	"tenant_isolation":       identityPolicy("tenant_isolation"),
+	"account_recovery":       statePolicy("account_recovery", ProofStateMutation),
+	"webhook_security":       statePolicy("webhook_security", ProofStateMutation),
+	"session_lifecycle":      requestPolicy("session_lifecycle"),
+	"parser_differential":    contentPolicy("parser_differential"),
+	"csrf":                   statePolicy("csrf", ProofStateMutation),
 	"smuggling":              protocolPolicy("smuggling"),
 	"graphql":                schemaPolicy("graphql"),
 	"websocket":              replayPolicy("websocket", ProofDifferentialReplay),
@@ -71,12 +78,50 @@ var proofPolicies = map[string]ModuleProofPolicy{
 	// Version/banner matching is inventory, not exploitability proof. A CVE
 	// finding therefore needs the same replay/control discipline as an active
 	// differential probe.
-	"known_cve":        replayPolicy("known_cve", ProofDifferentialReplay, ProofOAST, ProofRuntimeTrace),
-	"security_headers": configurationPolicy("security_headers"),
-	"tls_misconfig":    configurationPolicy("tls_misconfig"),
-	"auth_bypass":      identityPolicy("auth_bypass"),
-	"deserialization":  replayPolicy("deserialization", ProofDifferentialReplay, ProofOAST, ProofRuntimeTrace),
-	"rce":              replayPolicy("rce", ProofDifferentialReplay, ProofOAST, ProofRuntimeTrace),
+	"known_cve":                replayPolicy("known_cve", ProofDifferentialReplay, ProofOAST, ProofRuntimeTrace),
+	"security_headers":         configurationPolicy("security_headers"),
+	"cookie_security":          configurationPolicy("cookie_security"),
+	"tls_misconfig":            configurationPolicy("tls_misconfig"),
+	"auth_bypass":              identityPolicy("auth_bypass"),
+	"deserialization":          replayPolicy("deserialization", ProofDifferentialReplay, ProofOAST, ProofRuntimeTrace),
+	"insecure_deserialization": replayPolicy("insecure_deserialization", ProofDifferentialReplay, ProofOAST, ProofRuntimeTrace),
+	"rce":                      replayPolicy("rce", ProofDifferentialReplay, ProofOAST, ProofRuntimeTrace),
+	"actuator":                 contentPolicy("actuator"),
+	"backup_archives":          contentPolicy("backup_archives"),
+	"nginx_alias":              contentPolicy("nginx_alias"),
+	"nextjs_bypass":            contentPolicy("nextjs_bypass"),
+	"framework_debug":          contentPolicy("framework_debug"),
+	"iis_discovery":            contentPolicy("iis_discovery"),
+	"firebase_misconfig":       contentPolicy("firebase_misconfig"),
+	"spring_cloud_jolokia":     contentPolicy("spring_cloud_jolokia"),
+	"saas_exposure":            contentPolicy("saas_exposure"),
+	"cpdos":                    contentPolicy("cpdos"),
+	"proxy_path_confusion":     contentPolicy("proxy_path_confusion"),
+	"ws_cswsh":                 contentPolicy("ws_cswsh"),
+	"pdf_injection":            contentPolicy("pdf_injection"),
+	"jsonp_callback":           contentPolicy("jsonp_callback"),
+	"react_rsc_rce":            replayPolicy("react_rsc_rce", ProofRuntimeTrace),
+	"server_side_js_injection": contentPolicy("server_side_js_injection"),
+	"csti_detection":           contentPolicy("csti_detection"),
+	"swagger_exposure":         contentPolicy("swagger_exposure"),
+	"sensitive_file_discovery": contentPolicy("sensitive_file_discovery"),
+	"http_smuggling":           contentPolicy("http_smuggling"),
+	"race_condition_sync":      statePolicy("race_condition_sync", ProofStateMutation),
+	"oauth_flow_audit":         contentPolicy("oauth_flow_audit"),
+	"cloud_native_exposure":    contentPolicy("cloud_native_exposure"),
+	"grpc_scan":                contentPolicy("grpc_scan"),
+	"cloud_takeover":           contentPolicy("cloud_takeover"),
+	"devops_exposure":          contentPolicy("devops_exposure"),
+	"host_poisoning":           headerPolicy("host_poisoning"),
+	"ldap":                     replayPolicy("ldap", ProofDifferentialReplay),
+	"xpath":                    replayPolicy("xpath", ProofDifferentialReplay),
+	"llm_injection":            contentPolicy("llm_injection"),
+	"http_methods": {
+		Module: "http_methods", Version: CurrentProofPolicyVersion, MinimumIndependentRuns: 1,
+		RequiresNativeBaseline: true, RequiresNegativeControl: true,
+		AllowedProofTypes: []ProofType{ProofFileRetrieval, ProofHeaderEvidence},
+		EvidenceClass:     "method_policy", RequiresTypedSignal: true,
+	},
 }
 
 func replayPolicy(module string, allowed ...ProofType) ModuleProofPolicy {
@@ -117,7 +162,7 @@ func contentPolicy(module string) ModuleProofPolicy {
 	return ModuleProofPolicy{
 		Module: module, Version: CurrentProofPolicyVersion, MinimumIndependentRuns: 1,
 		AllowedProofTypes: []ProofType{ProofContentEvidence},
-		EvidenceClass:     "typed_content", RequiresTypedSignal: true,
+		EvidenceClass:     "typed_content", RequiresTypedSignal: false,
 	}
 }
 
@@ -125,15 +170,15 @@ func configurationPolicy(module string) ModuleProofPolicy {
 	return ModuleProofPolicy{
 		Module: module, Version: CurrentProofPolicyVersion, MinimumIndependentRuns: 1,
 		AllowedProofTypes: []ProofType{ProofConfiguration},
-		EvidenceClass:     "configuration", RequiresTypedSignal: true,
+		EvidenceClass:     "configuration", RequiresTypedSignal: false,
 	}
 }
 
 func schemaPolicy(module string) ModuleProofPolicy {
 	return ModuleProofPolicy{
-		Module: module, Version: CurrentProofPolicyVersion, MinimumIndependentRuns: 2,
-		AllowedProofTypes: []ProofType{ProofSchemaExposure},
-		EvidenceClass:     "schema", RequiresTypedSignal: true,
+		Module: module, Version: CurrentProofPolicyVersion, MinimumIndependentRuns: 1,
+		AllowedProofTypes: []ProofType{ProofSchemaExposure, ProofContentEvidence, ProofDifferentialReplay},
+		EvidenceClass:     "schema", RequiresTypedSignal: false,
 	}
 }
 

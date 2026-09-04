@@ -19,17 +19,21 @@ func ExtractEmbeddedEvidence(description string) string {
 }
 
 func (db *DB) ListScriptEndpoints(scanID string, limit int) ([]string, error) {
-	if limit <= 0 {
-		limit = 500
-	}
-	rows, err := db.conn.Query(`
+	query := `
 SELECT DISTINCT url FROM endpoints
 WHERE scan_id = ? AND (
   url LIKE '%.js' OR url LIKE '%.mjs' OR url LIKE '%.cjs' OR
   discovery_source IN ('script', 'js_bundle', 'js_analyzer', 'inline_js')
 )
 AND COALESCE(json_extract(discovery_trail_json, '$.request_template.response_status'), 0) NOT IN (404, 410)
-LIMIT ?`, scanID, limit)
+`
+	var rows *sql.Rows
+	var err error
+	if limit > 0 {
+		rows, err = db.conn.Query(query+` LIMIT ?`, scanID, limit)
+	} else {
+		rows, err = db.conn.Query(query, scanID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -71,15 +75,19 @@ func (db *DB) ListJSDiscoveredAPIURLs(scanID string, limit int) ([]string, error
 
 // ListJSDiscoveredAPIEndpoints returns JS-discovered endpoints with HTTP methods.
 func (db *DB) ListJSDiscoveredAPIEndpoints(scanID string, limit int) ([]JSDiscoveredEndpoint, error) {
-	if limit <= 0 {
-		limit = 400
-	}
-	rows, err := db.conn.Query(`
+	query := `
 SELECT url, method, COALESCE(discovery_trail_json,'') FROM endpoints
 WHERE scan_id = ? AND discovery_source IN ('js_analyzer', 'js_bundle', 'inline_js', 'js_ast')
 AND url NOT LIKE '%.js' AND url NOT LIKE '%.mjs' AND url NOT LIKE '%.cjs'
 AND url NOT LIKE '%.js?%'
-LIMIT ?`, scanID, limit)
+`
+	var rows *sql.Rows
+	var err error
+	if limit > 0 {
+		rows, err = db.conn.Query(query+` LIMIT ?`, scanID, limit)
+	} else {
+		rows, err = db.conn.Query(query, scanID)
+	}
 	if err != nil {
 		return nil, err
 	}

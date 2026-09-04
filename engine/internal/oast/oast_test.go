@@ -2,6 +2,8 @@ package oast
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +11,55 @@ import (
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/storage"
 )
+
+func TestInteractshFallbackUsesConfiguredOrderAndReportsSelection(t *testing.T) {
+	var firstAttempts, secondAttempts int
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		firstAttempts++
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/register" {
+			secondAttempts++
+			_, _ = w.Write([]byte(`{"message":"registration successful"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer second.Close()
+
+	var started map[string]interface{}
+	listener, err := NewListener(nil, func(eventType, _ string, payload map[string]interface{}) error {
+		if eventType == "oast_started" {
+			started = payload
+		}
+		return nil
+	}, Config{ServerURL: first.URL + "," + second.URL, PollInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Stop()
+
+	if firstAttempts != 1 || secondAttempts != 1 {
+		t.Fatalf("registration attempts = first:%d second:%d, want 1 each", firstAttempts, secondAttempts)
+	}
+	if got := started["active_server"]; got != second.URL {
+		t.Fatalf("active server = %v, want %s", got, second.URL)
+	}
+	if got := started["selected_priority"]; got != 2 {
+		t.Fatalf("selected priority = %v, want 2", got)
+	}
+	if got := started["fallback_used"]; got != true {
+		t.Fatalf("fallback used = %v, want true", got)
+	}
+	if got := started["runtime_failover"]; got != false {
+		t.Fatalf("runtime failover = %v, want false", got)
+	}
+}
 
 func TestGenerateURLUniqueAndCorrelatable(t *testing.T) {
 	p := NewLocalProvider()
@@ -294,7 +345,39 @@ func TestDrainHonorsShortDeadline(t *testing.T) {
 	}
 }
 
-func TestCallbackSanitizationRedactsRequestMetadata(t *testing.T) {
+func TestRemainingDrainDurationUsesNewestProbeTime(t *testing.T) {
+	listener, _ := NewListener(nil, func(string, string, map[string]interface{}) error { return nil },
+		Config{PollInterval: 150 * time.Millisecond})
+	now := time.Now().UTC()
+	if got := listener.RemainingDrainDuration(time.Minute); got != 0 {
+		t.Fatalf("empty listener should not drain, got %s", got)
+	}
+
+	listener.RegisterCorrelation(Correlation{
+		CorrelationToken: "recent",
+		RegisteredAt:     now.Add(-55 * time.Second),
+		ProbeSentAt:      now.Add(-50 * time.Second),
+	})
+	remaining := listener.RemainingDrainDuration(time.Minute)
+	if remaining < 9*time.Second || remaining > 11*time.Second {
+		t.Fatalf("remaining drain = %s, want about 10s", remaining)
+	}
+
+	listener.RegisterCorrelation(Correlation{
+		CorrelationToken: "expired",
+		RegisteredAt:     now.Add(-2 * time.Minute),
+		ProbeSentAt:      now.Add(-90 * time.Second),
+	})
+	listener.mu.Lock()
+	delete(listener.correlations, "recent")
+	listener.mu.Unlock()
+	remaining = listener.RemainingDrainDuration(time.Minute)
+	if remaining <= 0 || remaining > 150*time.Millisecond {
+		t.Fatalf("expired window should keep only one short final poll, got %s", remaining)
+	}
+}
+
+func TestCallbackSanitizationPreservesRequestMetadata(t *testing.T) {
 	correlation := sanitizeCorrelation(Correlation{
 		EndpointURL: "https://target.test/fetch?token=endpoint-secret&view=1",
 		Request: httpclient.RequestRecord{
@@ -308,8 +391,29 @@ func TestCallbackSanitizationRedactsRequestMetadata(t *testing.T) {
 	serialized := correlation.EndpointURL + correlation.Request.URL +
 		correlation.Request.Headers["Cookie"] + correlation.Request.Body
 	for _, secret := range []string{"endpoint-secret", "url-secret", "header-secret", "body-secret"} {
-		if strings.Contains(serialized, secret) {
-			t.Fatalf("callback correlation leaked %q", secret)
+		if !strings.Contains(serialized, secret) {
+			t.Fatalf("callback correlation did not preserve %q", secret)
 		}
+	}
+}
+
+func TestInteractshSubdomainCorrelationMatching(t *testing.T) {
+	correlations := map[string]Correlation{
+		"ssrf-a1b2c3-nonce123": {PayloadID: "ssrf-a1b2c3", EndpointURL: "https://example.com/ssrf"},
+		"ssrf-a1b2c3":          {PayloadID: "ssrf-a1b2c3", EndpointURL: "https://example.com/ssrf"},
+	}
+
+	interaction := Interaction{
+		UniqueID: "c123456789",
+		FullID:   "ssrf-a1b2c3-nonce123.c123456789",
+		Protocol: "http",
+	}
+
+	c, ok := MatchInteraction(interaction, "c123456789.oast.fun", correlations)
+	if !ok {
+		t.Fatalf("MatchInteraction failed to match Interactsh subdomain callback")
+	}
+	if c.PayloadID != "ssrf-a1b2c3" {
+		t.Fatalf("expected payload ID ssrf-a1b2c3, got %s", c.PayloadID)
 	}
 }

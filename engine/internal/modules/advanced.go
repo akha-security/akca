@@ -2,10 +2,12 @@ package modules
 
 import (
 	"context"
+	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
-	"github.com/akha-security/akca/engine/internal/businesslogic"
+	"github.com/akha-security/akca/engine/internal/deserialization"
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/sspp"
 	"github.com/akha-security/akca/engine/internal/verification"
@@ -17,10 +19,12 @@ func (r *Runner) runClientSSTI(ctx context.Context, target ScanTarget) []ModuleF
 		return nil
 	}
 	if r.browser == nil {
+		r.runClientSSTICoverage(ctx, target, "browser execution is unavailable")
 		r.emitSkip("client_ssti", target, "browser execution is unavailable; reflection alone is not proof")
 		return nil
 	}
 	if strings.ToUpper(target.Method) != "" && strings.ToUpper(target.Method) != "GET" {
+		r.emitClientSSTIGap(target, "browser confirmation currently requires a GET/query surface", false, false)
 		r.emitSkip("client_ssti", target, "browser confirmation currently requires a GET/query surface")
 		return nil
 	}
@@ -48,9 +52,43 @@ func (r *Runner) runClientSSTI(ctx context.Context, target ScanTarget) []ModuleF
 		if f != nil {
 			f.Description = "Browser execution set the unique DOM marker " + marker + "; reflection-only responses are not reported."
 		}
-		r.recordFinding(&out, f, "client_ssti", pr.signal)
+		r.recordFinding(ctx, &out, f, "client_ssti", pr.signal)
 	}
 	return out
+}
+
+func (r *Runner) runClientSSTICoverage(ctx context.Context, target ScanTarget, reason string) {
+	if strings.ToUpper(target.Method) != "" && strings.ToUpper(target.Method) != "GET" {
+		r.emitClientSSTIGap(target, reason, false, false)
+		return
+	}
+	baseline, err := r.probe(ctx, target, "akca-base")
+	if err != nil {
+		r.emitClientSSTIGap(target, reason, false, false)
+		return
+	}
+	probe, err := r.probe(ctx, target, "{{7*7}}")
+	if err != nil {
+		r.emitClientSSTIGap(target, reason, false, false)
+		return
+	}
+	r.emitClientSSTIGap(target, reason, true,
+		clientSSTISignal(probe.Response.Body, baseline.Response.Body, "client_template_eval"))
+}
+
+func (r *Runner) emitClientSSTIGap(target ScanTarget, reason string, probesDelivered, contentSignal bool) {
+	r.emitOnce("client-ssti-coverage:"+target.EndpointURL, "coverage_gap",
+		"Client-SSTI coverage requires browser DOM execution before reporting",
+		map[string]interface{}{
+			"module":                  "client_ssti",
+			"endpoint":                target.EndpointURL,
+			"method":                  target.Method,
+			"parameter":               target.Parameter,
+			"reason":                  reason,
+			"probes_delivered":        probesDelivered,
+			"content_signal_observed": contentSignal,
+			"finding_requires_dom":    true,
+		})
 }
 
 func clientSSTISignal(body, baseline, signal string) bool {
@@ -94,14 +132,22 @@ func (r *Runner) runSmuggling(ctx context.Context, target ScanTarget) []ModuleFi
 	if r.smuggling == nil {
 		return nil
 	}
+	probeURL := smugglingProbeURL(target.EndpointURL)
+	probeTarget := target
+	probeTarget.EndpointURL = probeURL
+	probeTarget.Parameter = ""
+	probeTarget.Location = "raw_http"
 	var out []ModuleFinding
-	for _, signal := range []string{"cl_te", "te_cl"} {
-		result, err := r.smuggling.Probe(ctx, target.EndpointURL, signal)
+	for _, signal := range []string{
+		"cl_te", "te_cl", "te_te_space", "te_te_prefix", "te_te_duplicate", "cl_cl_conflict",
+		"cl_te_crlf", "te_cl_tab", "te_newline", "cl_zero", "h2_cl", "h2_te", "h2_crlf", "h2_pseudo", "h2c_upgrade_confusion",
+	} {
+		result, err := r.smuggling.Probe(ctx, probeURL, signal)
 		if err != nil || !result.Confirmed || len(result.Attempts) < 2 {
 			continue
 		}
 		p := defaultPayload("smuggling", signal, result.Exchange.Request.Body, signal)
-		targetForObservation := target
+		targetForObservation := probeTarget
 		observations := []verification.Observation{
 			r.observation("smuggling", targetForObservation, verification.RoleNativeBaseline, 1, result.Control),
 			r.observation("smuggling", targetForObservation, verification.RoleNegativeControl, 1, result.Control),
@@ -115,8 +161,8 @@ func (r *Runner) runSmuggling(ctx context.Context, target ScanTarget) []ModuleFi
 				r.observation("smuggling", targetForObservation, role, attempt+1, exchange))
 		}
 		candidate := verification.Candidate{
-			ScanID: r.scanID, Title: "smuggling on " + target.Parameter, VulnClass: "smuggling",
-			EndpointURL: target.EndpointURL, Method: target.Method, Parameter: target.Parameter,
+			ScanID: r.scanID, Title: "smuggling on raw HTTP route", VulnClass: "smuggling",
+			EndpointURL: probeTarget.EndpointURL, Method: probeTarget.Method, Parameter: probeTarget.Parameter,
 			Payload: p.Value, Module: "smuggling", Signal: signal,
 			Baseline: snapshot(result.Control.Response), Probe: snapshot(result.Attempts[0].Response),
 			DirectTypedSignal: true, NegativeControlSet: true, NegativeControlOK: true,
@@ -132,19 +178,29 @@ func (r *Runner) runSmuggling(ctx context.Context, target ScanTarget) []ModuleFi
 			Title:     "HTTP request smuggling (" + strings.ToUpper(strings.ReplaceAll(signal, "_", ".")) + ")",
 			VulnClass: "smuggling", Severity: "high",
 			Description: "Two independent raw HTTP/1.1 probes produced the same response-queue desynchronization: " + result.Reason,
-			Endpoint:    target.EndpointURL, Parameter: target.Parameter, Location: target.Location,
+			Endpoint:    probeTarget.EndpointURL, Parameter: probeTarget.Parameter, Location: probeTarget.Location,
 			Confidence: verified.Confidence,
 			Evidence: Evidence{
 				Module: "smuggling", Signal: signal, Payload: p,
-				Parameter: target.Parameter, Location: target.Location,
+				Parameter: probeTarget.Parameter, Location: probeTarget.Location,
 				Request: result.Exchange.Request, Response: result.Exchange.Response,
 				Verification: verified,
 				DetectedAt:   time.Now().UTC(),
 			},
 		}
-		r.recordFinding(&out, f, "smuggling", signal)
+		r.recordFinding(ctx, &out, f, "smuggling", signal)
 	}
 	return out
+}
+
+func smugglingProbeURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func smugglingSignal(headers map[string]string, body, baseline string) bool {
@@ -178,10 +234,34 @@ func (r *Runner) runPrototypePollution(ctx context.Context, target ScanTarget) [
 		f := r.verifyAndBuild(ctx, "prototype_pollution", target, p, baseline, rr, signal, false, false, "", "")
 		if f != nil {
 			f.Title = "Server-side prototype pollution (" + signal + ")"
-			r.recordFinding(&out, f, "prototype_pollution", signal)
+			r.recordFinding(ctx, &out, f, "prototype_pollution", signal)
 		}
 		if len(out) >= 3 {
 			break
+		}
+	}
+
+	// Client-side prototype pollution probe on parameters
+	if len(out) == 0 && target.Parameter != "" {
+		for _, pr := range sspp.ClientSideProbes() {
+			if ctx.Err() != nil {
+				break
+			}
+			rr, err := r.probe(ctx, target, pr.Body)
+			if err != nil {
+				continue
+			}
+			if ok, signal := sspp.Analyze(baseline.Response.Body, baseline.Response.StatusCode, rr.Response.Body, rr.Response.StatusCode, pr); ok {
+				p := defaultPayload("prototype_pollution", pr.Name, pr.Body, signal)
+				f := r.verifyAndBuild(ctx, "prototype_pollution", target, p, baseline, rr, signal, false, false, "", "")
+				if f != nil {
+					f.Title = "Client-Side Prototype Pollution (" + signal + ")"
+					f.Severity = "high"
+					f.Description = "Client-side prototype pollution vulnerability detected via DOM property / gadget injection."
+					r.recordFinding(ctx, &out, f, "prototype_pollution", signal)
+					break
+				}
+			}
 		}
 	}
 	return out
@@ -210,7 +290,7 @@ func (r *Runner) runLDAPXPathInjection(ctx context.Context, target ScanTarget) [
 			}
 			p := defaultPayload("ldap_xpath_injection", pr.signal, pr.value, pr.signal)
 			f := r.verifyAndBuild(ctx, "ldap_xpath_injection", target, p, baseline, rr, pr.signal, false, false, "", "")
-			r.recordFinding(&out, f, "ldap_xpath_injection", pr.signal)
+			r.recordFinding(ctx, &out, f, "ldap_xpath_injection", pr.signal)
 			continue
 		}
 		rr, err := r.probe(ctx, target, pr.value)
@@ -222,7 +302,7 @@ func (r *Runner) runLDAPXPathInjection(ctx context.Context, target ScanTarget) [
 			ctx, "ldap_xpath_injection", target, p, baseline, rr,
 		); handled {
 			if runtimeFinding != nil {
-				r.recordFinding(&out, runtimeFinding, "ldap_xpath_injection", runtimeFinding.Evidence.Signal)
+				r.recordFinding(ctx, &out, runtimeFinding, "ldap_xpath_injection", runtimeFinding.Evidence.Signal)
 				return out
 			}
 			continue
@@ -231,7 +311,7 @@ func (r *Runner) runLDAPXPathInjection(ctx context.Context, target ScanTarget) [
 			continue
 		}
 		f := r.verifyAndBuild(ctx, "ldap_xpath_injection", target, p, baseline, rr, pr.signal, false, false, "", "")
-		r.recordFinding(&out, f, "ldap_xpath_injection", pr.signal)
+		r.recordFinding(ctx, &out, f, "ldap_xpath_injection", pr.signal)
 	}
 	return out
 }
@@ -278,7 +358,7 @@ func (r *Runner) runDebugAdmin(ctx context.Context, target ScanTarget) []ModuleF
 	p := defaultPayload("debug_admin", "debug_exposure", target.EndpointURL, "debug_exposure")
 	f := r.verifyAndBuild(ctx, "debug_admin", target, p, baseline, rr, "debug_exposure", false, false, "", "")
 	var out []ModuleFinding
-	r.recordFinding(&out, f, "debug_admin", "debug_exposure")
+	r.recordFinding(ctx, &out, f, "debug_admin", "debug_exposure")
 	return out
 }
 
@@ -289,43 +369,6 @@ func debugAdminSignal(body string, status int) bool {
 	lower := strings.ToLower(body)
 	return strings.Contains(lower, "stack trace") || strings.Contains(lower, "phpinfo()") ||
 		strings.Contains(lower, `"_links"`) && strings.Contains(lower, "actuator")
-}
-
-func (r *Runner) runBusinessLogicHeuristicDisabled(ctx context.Context, target ScanTarget) []ModuleFinding {
-	if ok, reason := r.shouldRunModule("business_logic", target); !ok {
-		r.emitSkip("business_logic", target, reason)
-		return nil
-	}
-	baseline, err := r.probe(ctx, target, "100")
-	if err != nil {
-		return nil
-	}
-	var out []ModuleFinding
-	probes := businesslogic.AllProbes(target.Parameter)
-	for _, probe := range probes {
-		if ctx.Err() != nil {
-			break
-		}
-		rr, err := r.probe(ctx, target, probe.Value)
-		if err != nil {
-			continue
-		}
-		ok, signal := businesslogic.Analyze(baseline.Response.Body, rr.Response.Body, probe)
-		if !ok {
-			continue
-		}
-		p := defaultPayload("business_logic", probe.Name, probe.Value, signal)
-		f := r.verifyAndBuild(ctx, "business_logic", target, p, baseline, rr, signal, false, false, "", "")
-		if f != nil {
-			f.Title = "Business logic (" + signal + ") on " + target.Parameter
-			f.Description = probe.Name + " (" + probe.Value + ") — " + signal
-			r.recordFinding(&out, f, "business_logic", signal)
-		}
-		if len(out) >= 3 {
-			break
-		}
-	}
-	return out
 }
 
 func (r *Runner) runRaceCondition(ctx context.Context, target ScanTarget) []ModuleFinding {
@@ -350,7 +393,42 @@ func (r *Runner) runAPIVersioning(ctx context.Context, target ScanTarget) []Modu
 		}
 		p := defaultPayload("api_versioning", "version_discovered", version, "version_discovered")
 		f := r.verifyAndBuild(ctx, "api_versioning", target, p, baseline, rr, "version_discovered", false, false, "", "")
-		r.recordFinding(&out, f, "api_versioning", "version_discovered")
+		r.recordFinding(ctx, &out, f, "api_versioning", "version_discovered")
+	}
+	return out
+}
+
+func (r *Runner) runInsecureDeserialization(ctx context.Context, target ScanTarget) []ModuleFinding {
+	if ok, reason := r.shouldRunModule("insecure_deserialization", target); !ok {
+		r.emitSkip("insecure_deserialization", target, reason)
+		return nil
+	}
+	baseline, err := r.cachedEmptyProbe(ctx, target)
+	if err != nil {
+		return nil
+	}
+	var out []ModuleFinding
+	for _, pr := range deserialization.Probes() {
+		if ctx.Err() != nil {
+			break
+		}
+		rr, err := r.probe(ctx, target, pr.Payload)
+		if err != nil {
+			continue
+		}
+		ok, signal := deserialization.AnalyzeResponse(baseline.Response.Body, baseline.Response.StatusCode, rr.Response.Body, rr.Response.StatusCode, pr)
+		if !ok {
+			continue
+		}
+		p := defaultPayload("insecure_deserialization", pr.Name, pr.Payload, signal)
+		f := r.verifyAndBuild(ctx, "insecure_deserialization", target, p, baseline, rr, signal, false, false, "", "")
+		if f != nil {
+			f.Title = fmt.Sprintf("Insecure Deserialization (%s - %s)", strings.ToUpper(pr.Language), pr.Name)
+			f.Severity = pr.Severity
+			f.Description = fmt.Sprintf("Insecure deserialization vulnerability or diagnostic indicator detected via %s payload.", strings.ToUpper(pr.Language))
+			r.recordFinding(ctx, &out, f, "insecure_deserialization", signal)
+			break
+		}
 	}
 	return out
 }

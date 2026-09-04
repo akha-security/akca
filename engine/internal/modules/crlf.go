@@ -18,8 +18,9 @@ func (r *Runner) runCRLF(ctx context.Context, target ScanTarget) []ModuleFinding
 		r.emitSkip("crlf", target, reason)
 		return nil
 	}
-	baseline, ok := r.stableNativeBaseline(ctx, target)
+	baseline, ok, baselineReason := r.stableNativeBaselineForModule(ctx, "crlf", target)
 	if !ok {
+		r.emitSkip("crlf", target, baselineReason)
 		return nil
 	}
 	tokenSeed := strings.NewReplacer(":", "-", "/", "-", "?", "-", "&", "-").Replace(target.Parameter)
@@ -29,26 +30,32 @@ func (r *Runner) runCRLF(ctx context.Context, target ScanTarget) []ModuleFinding
 	token := "akca-crlf-" + tokenSeed
 	probes := []payloadgen.Payload{
 		defaultPayload("crlf", "raw_header_split", "\r\nX-Akca-CRLF: "+token, "crlf_header_injection"),
-		defaultPayload("crlf", "encoded_header_split", "%0d%0aX-Akca-CRLF:%20"+token, "crlf_header_injection"),
+		defaultPayload("crlf", "raw_set_cookie_split", "\r\nSet-Cookie: akca_crlf="+token+"; Path=/", "crlf_header_injection"),
+		defaultPayload("crlf", "response_splitting_body", "\r\n\r\nAKCA_CRLF_BODY_"+token, "crlf_body_injection"),
+		defaultPayload("crlf", "double_decoded_header_split", "%0d%0aX-Akca-CRLF:%20"+token, "crlf_header_injection"),
 	}
 	var out []ModuleFinding
 	for _, p := range probes {
 		if ctx.Err() != nil {
 			break
 		}
-		rr, err := r.probe(ctx, target, p.Value)
+		rr, err := r.probeForModule(ctx, "crlf", target, p.Value)
 		if err != nil {
 			continue
 		}
-		if !crlfHeaderConfirmed(baseline.Response.Headers, rr.Response.Headers, p.Value) {
+		confirmed := crlfHeaderConfirmed(baseline.Response.Headers, rr.Response.Headers, p.Value)
+		if !confirmed && p.ExpectedSignal == "crlf_body_injection" {
+			confirmed = crlfBodyConfirmed(baseline.Response.Body, rr.Response.Body, p.Value)
+		}
+		if !confirmed {
 			continue
 		}
 		f := r.verifyAndBuild(ctx, "crlf", target, p, baseline, rr, p.ExpectedSignal, false, false, "", "")
 		if f != nil {
-			f.Title = "CRLF Injection"
-			f.Description += fmt.Sprintf(" Confirmed injected response header X-Akca-CRLF with token %q.", crlfToken(p.Value))
+			f.Title = "CRLF Injection / HTTP Response Splitting"
+			f.Description += fmt.Sprintf(" Confirmed injected response header or body token %q.", crlfToken(p.Value))
 		}
-		r.recordFinding(&out, f, "crlf", p.ExpectedSignal)
+		r.recordFinding(ctx, &out, f, "crlf", p.ExpectedSignal)
 	}
 	return out
 }
@@ -58,9 +65,28 @@ func crlfHeaderConfirmed(baseHeaders, probeHeaders map[string]string, payload st
 	if token == "" {
 		return false
 	}
-	base := strings.ToLower(headerValue(baseHeaders, "X-Akca-CRLF"))
-	probe := strings.ToLower(headerValue(probeHeaders, "X-Akca-CRLF"))
-	return probe != "" && strings.Contains(probe, token) && !strings.Contains(base, token)
+	base := strings.ToLower(headerValue(baseHeaders, "X-Akca-CRLF") + " " + headerValue(baseHeaders, "Set-Cookie"))
+	probe := strings.ToLower(headerValue(probeHeaders, "X-Akca-CRLF") + " " + headerValue(probeHeaders, "Set-Cookie"))
+	return (strings.Contains(probe, token) || strings.Contains(probe, "akca_crlf="+token)) && !strings.Contains(base, token)
+}
+
+func crlfBodyConfirmed(baseBody, probeBody, payload string) bool {
+	token := strings.ToLower(crlfToken(payload))
+	if token == "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(probeBody), "akca_crlf_body_"+token) &&
+		!strings.Contains(strings.ToLower(baseBody), "akca_crlf_body_"+token)
+}
+
+func crlfSignalConfirmed(baseHeaders, probeHeaders map[string]string, baseBody, probeBody, payload, signal string) bool {
+	if crlfHeaderConfirmed(baseHeaders, probeHeaders, payload) {
+		return true
+	}
+	if signal == "crlf_body_injection" {
+		return crlfBodyConfirmed(baseBody, probeBody, payload)
+	}
+	return false
 }
 
 func crlfToken(payload string) string {

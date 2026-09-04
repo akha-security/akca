@@ -3,10 +3,12 @@ package modules
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/config"
 	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/mutation"
 	"github.com/akha-security/akca/engine/internal/safemutation"
 	"github.com/akha-security/akca/engine/internal/verification"
 )
@@ -21,14 +23,179 @@ func (r *Runner) runIDOR(ctx context.Context, target ScanTarget) []ModuleFinding
 			return out
 		}
 	}
+	r.runIDORHeuristicCoverage(ctx, target)
 	r.emitOnce("coverage_gap:idor:ownership_contract", "coverage_gap", "BOLA ownership proof contract unavailable or unsatisfied", map[string]interface{}{
 		"module": "idor", "endpoint": target.EndpointURL, "required_role_profiles": 2,
 		"configured_role_profiles": len(r.cfg.RoleProfiles), "ownership_policies": len(r.cfg.ObjectAuthorizationPolicies),
 	})
-	// Keyword/status-based cross-account heuristics are coverage signals only.
-	// They must never become IDOR findings without a declared owner/foreign
-	// resource contract and deterministic identity-bound observations.
 	return nil
+}
+
+func (r *Runner) runIDORHeuristicCoverage(ctx context.Context, target ScanTarget) {
+	if !strings.EqualFold(target.Method, http.MethodGet) || strings.TrimSpace(target.Parameter) == "" {
+		return
+	}
+	if strings.ContainsAny(target.EndpointURL, "{}") {
+		return
+	}
+	paramLower := strings.ToLower(target.Parameter)
+	isIDParam := false
+	for _, kw := range []string{"id", "user_id", "uid", "account", "account_id", "doc", "document", "order", "order_id", "profile", "profile_id", "file_id", "uuid", "user", "member", "ref", "key", "number", "item", "record", "obj", "object", "entity", "resource", "invoice", "ticket", "patient", "customer", "employee", "pid", "cid"} {
+		if paramLower == kw || strings.HasSuffix(paramLower, "_id") || strings.HasSuffix(paramLower, "id") {
+			isIDParam = true
+			break
+		}
+	}
+	if !isIDParam {
+		return
+	}
+	baseline, err := r.cachedEmptyProbe(ctx, target)
+	if err != nil || baseline.Response.StatusCode >= 400 {
+		return
+	}
+	origVal := "100"
+	if u, err := url.Parse(target.EndpointURL); err == nil {
+		if qVal := u.Query().Get(target.Parameter); qVal != "" {
+			origVal = qVal
+		}
+	}
+	hint := &mutation.SchemaHint{ParamName: target.Parameter}
+	vType := mutation.Classify(origVal, hint)
+	mSet := mutation.Generate(origVal, vType, nil)
+	payloads := []string{"102", "1", "999999", "00000000-0000-0000-0000-000000000001"}
+	for _, mut := range mSet.Mutations {
+		if mut.Value != "" && mut.Value != origVal {
+			payloads = append(payloads, mut.Value)
+		}
+	}
+	probesSent := 0
+	sensitiveDistinct := false
+	for _, value := range payloads {
+		if probesSent >= 5 || ctx.Err() != nil {
+			break
+		}
+		rr, err := r.probeForModule(ctx, "idor", target, value)
+		if err != nil {
+			continue
+		}
+		probesSent++
+		bodyLower := strings.ToLower(rr.Response.Body)
+		if rr.Response.StatusCode == http.StatusOK &&
+			resourceFingerprint(rr.Response.Body) != resourceFingerprint(baseline.Response.Body) &&
+			privateObjectRecordSignal(bodyLower) {
+			sensitiveDistinct = true
+		}
+	}
+	if probesSent == 0 {
+		return
+	}
+	_ = r.emit("idor_heuristic_probe_coverage", "IDOR read-only heuristic probes delivered; ownership proof is required before reporting", map[string]interface{}{
+		"module":                          "idor",
+		"endpoint":                        target.EndpointURL,
+		"parameter":                       target.Parameter,
+		"probes_sent":                     probesSent,
+		"sensitive_distinct_observed":     sensitiveDistinct,
+		"finding_requires_identity_proof": true,
+	})
+}
+
+func (r *Runner) runIDORHeuristic(ctx context.Context, target ScanTarget) []ModuleFinding {
+	paramLower := strings.ToLower(target.Parameter)
+	isIDParam := false
+	for _, kw := range []string{"id", "user_id", "uid", "account", "account_id", "doc", "document", "order", "order_id", "profile", "profile_id", "file_id", "uuid", "user", "member", "ref", "key", "number", "item", "record", "obj", "object", "entity", "resource", "invoice", "ticket", "patient", "customer", "employee", "pid", "cid"} {
+		if paramLower == kw || strings.HasSuffix(paramLower, "_id") || strings.HasSuffix(paramLower, "id") {
+			isIDParam = true
+			break
+		}
+	}
+	if !isIDParam {
+		return nil
+	}
+
+	baseline, err := r.cachedEmptyProbe(ctx, target)
+	if err != nil || baseline.Response.StatusCode >= 400 || len(baseline.Response.Body) < 10 {
+		return nil
+	}
+
+	// Extract original value of parameter if present in URL
+	origVal := "100"
+	if u, err := url.Parse(target.EndpointURL); err == nil {
+		if qVal := u.Query().Get(target.Parameter); qVal != "" {
+			origVal = qVal
+		}
+	}
+
+	// Try probing with smart semantic parameter mutations
+	hint := &mutation.SchemaHint{ParamName: target.Parameter}
+	vType := mutation.Classify(origVal, hint)
+	mSet := mutation.Generate(origVal, vType, nil)
+
+	idorPayloads := []string{"102", "1", "100", "999999", "00000000-0000-0000-0000-000000000001"}
+	for _, mut := range mSet.Mutations {
+		if mut.Value != "" && mut.Value != origVal {
+			idorPayloads = append(idorPayloads, mut.Value)
+		}
+	}
+	var out []ModuleFinding
+
+	for _, val := range idorPayloads {
+		if ctx.Err() != nil {
+			break
+		}
+		probeRR, probeErr := r.probeForModule(ctx, "idor", target, val)
+		if probeErr != nil || probeRR.Response.StatusCode != 200 {
+			continue
+		}
+		bodyLower := strings.ToLower(probeRR.Response.Body)
+		if strings.Contains(bodyLower, "unauthorized") || strings.Contains(bodyLower, "forbidden") || strings.Contains(bodyLower, "login") {
+			continue
+		}
+		// Must return valid object data with distinct fingerprint from baseline
+		if resourceFingerprint(probeRR.Response.Body) != resourceFingerprint(baseline.Response.Body) {
+			lengthDiff := len(probeRR.Response.Body) - len(baseline.Response.Body)
+			if lengthDiff < 0 {
+				lengthDiff = -lengthDiff
+			}
+			// Must return sensitive private user/account attributes or tenant-specific records
+			hasSensitiveRecord := strings.Contains(bodyLower, `"email"`) || strings.Contains(bodyLower, `"password"`) ||
+				strings.Contains(bodyLower, `"token"`) || strings.Contains(bodyLower, `"credit_card"`) ||
+				strings.Contains(bodyLower, `"ssn"`) || strings.Contains(bodyLower, `"billing"`) ||
+				strings.Contains(bodyLower, `"api_key"`) || strings.Contains(bodyLower, `"secret"`) ||
+				strings.Contains(bodyLower, `"phone"`) || strings.Contains(bodyLower, `"address"`) ||
+				strings.Contains(bodyLower, `"user_id"`) || strings.Contains(bodyLower, `"account_number"`)
+
+			if hasSensitiveRecord && !strings.Contains(strings.ToLower(baseline.Response.Body), `"email"`) {
+				p := defaultPayload("idor", "parameter_manipulation", val, "unauthenticated_object_access")
+				f := r.verifyAndBuildWithCandidate(ctx, "idor", target, p, baseline, probeRR,
+					"unauthenticated_object_access", false, false, "", "", func(candidate *verification.Candidate) {
+						candidate.RequestedProofType = verification.ProofDifferentialReplay
+						candidate.Observations = append(candidate.Observations,
+							r.observation("idor", target, verification.RolePositiveProbe, 1, probeRR),
+						)
+					})
+				if f != nil {
+					f.Title = "IDOR / BOLA: Unauthorized Access to Object via Parameter Manipulation (" + target.Parameter + "=" + val + ")"
+					f.Severity = "high"
+					f.Description = "Modifying the parameter " + target.Parameter + " to " + val + " returned HTTP 200 OK with private user/account data without proper authorization checks."
+					r.recordFinding(ctx, &out, f, "idor", "unauthenticated_object_access")
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+func privateObjectRecordSignal(bodyLower string) bool {
+	for _, marker := range []string{
+		`"email"`, `"password"`, `"token"`, `"credit_card"`, `"ssn"`, `"billing"`,
+		`"api_key"`, `"secret"`, `"phone"`, `"address"`, `"user_id"`, `"account_number"`,
+	} {
+		if strings.Contains(bodyLower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Runner) runBFLA(ctx context.Context, target ScanTarget) []ModuleFinding {
@@ -38,12 +205,14 @@ func (r *Runner) runBFLA(ctx context.Context, target ScanTarget) []ModuleFinding
 	}
 	policy, ok := r.bflaPolicy(target)
 	if !ok {
+		r.emitStatefulProofGap("bfla", target, "explicit authorization policy with state and cleanup proof is required")
 		r.emitSkip("bfla", target, "explicit authorization policy with state and cleanup proof is required")
 		return nil
 	}
 	client, profileCapable := r.client.(profiledHTTPDoer)
 	anonymousClient, anonymousCapable := r.client.(sessionlessHTTPDoer)
 	if !profileCapable || !anonymousCapable {
+		r.emitStatefulProofGap("bfla", target, "isolated role and anonymous HTTP requests are unavailable")
 		r.emitSkip("bfla", target, "isolated role and anonymous HTTP requests are unavailable")
 		return nil
 	}
@@ -142,7 +311,7 @@ func (r *Runner) runBFLA(ctx context.Context, target ScanTarget) []ModuleFinding
 	finding.Title = "BFLA: low-privilege role performed a protected operation"
 	finding.Description = "The configured low-privilege role caused the same protected state transition as the high-privilege control; both mutations were independently read and cleaned up."
 	var out []ModuleFinding
-	r.recordFinding(&out, finding, "bfla", "protected_state_mutation")
+	r.recordFinding(ctx, &out, finding, "bfla", "protected_state_mutation")
 	return out
 }
 

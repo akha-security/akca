@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ type Config struct {
 	PollInterval       time.Duration
 	AllowLocalFallback bool
 	SelfHosted         *SelfHostedConfig
+	HTTPClient         *http.Client
 }
 
 type Listener struct {
@@ -30,6 +32,7 @@ type Listener struct {
 	correlations map[string]Correlation
 	strengths    map[string]int
 	stopCh       chan struct{}
+	stopOnce     sync.Once
 	wg           sync.WaitGroup
 }
 
@@ -41,7 +44,7 @@ func NewListener(db *storage.DB, emit EventSink, cfg Config) (*Listener, error) 
 	if cfg.SelfHosted != nil {
 		provider = NewSelfHostedProvider(*cfg.SelfHosted)
 	} else if cfg.ServerURL != "" {
-		provider = NewInteractshProvider(cfg.ServerURL)
+		provider = NewInteractshProviderWithClient(cfg.ServerURL, cfg.HTTPClient)
 	} else {
 		provider = NewLocalProvider()
 	}
@@ -66,10 +69,26 @@ func (l *Listener) Start(ctx context.Context) error {
 	if err := l.startProvider(); err != nil {
 		return err
 	}
-	_ = l.emit("oast_started", "oast listener started", map[string]interface{}{
+	payload := map[string]interface{}{
 		"domain": l.provider.Domain(),
 		"mode":   l.providerMode(),
-	})
+	}
+	if provider, ok := l.provider.(*InteractshProvider); ok {
+		active, order, priority := provider.ServerSelection()
+		payload["active_server"] = active
+		payload["server_order"] = order
+		payload["selected_priority"] = priority
+		payload["fallback_used"] = priority > 1
+		payload["fallback_stage"] = "startup_registration"
+		payload["runtime_failover"] = false
+	} else {
+		// Self-hosted and local providers are exclusive; silently switching a
+		// callback domain would break correlation and violate operator intent.
+		payload["fallback_used"] = false
+		payload["fallback_stage"] = "disabled"
+		payload["runtime_failover"] = false
+	}
+	_ = l.emit("oast_started", "oast listener started", payload)
 	l.wg.Add(1)
 	go l.pollLoop(ctx)
 	return nil
@@ -100,6 +119,7 @@ func (l *Listener) startProvider() error {
 func (l *Listener) RecordProbe(payload, location string, request httpclient.RequestRecord) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	now := time.Now().UTC()
 	for token, correlation := range l.correlations {
 		host := strings.TrimSuffix(strings.TrimPrefix(correlation.CallbackURL, "http://"), "/")
 		host = strings.TrimSuffix(strings.TrimPrefix(host, "https://"), "/")
@@ -110,6 +130,7 @@ func (l *Listener) RecordProbe(payload, location string, request httpclient.Requ
 		correlation.Location = location
 		correlation.Method = request.Method
 		correlation.Request = request
+		correlation.ProbeSentAt = now
 		l.correlations[token] = correlation
 		return
 	}
@@ -126,10 +147,12 @@ func (l *Listener) providerMode() string {
 }
 
 func (l *Listener) Stop() {
-	close(l.stopCh)
-	l.wg.Wait()
-	_ = l.provider.Stop()
-	_ = l.emit("oast_stopped", "oast listener stopped", nil)
+	l.stopOnce.Do(func() {
+		close(l.stopCh)
+		l.wg.Wait()
+		_ = l.provider.Stop()
+		_ = l.emit("oast_stopped", "oast listener stopped", nil)
+	})
 }
 
 func (l *Listener) SetScanID(scanID string) {
@@ -206,6 +229,13 @@ func (l *Listener) Provider() Provider {
 
 func (l *Listener) pollLoop(ctx context.Context) {
 	defer l.wg.Done()
+	defer func() {
+		if recovered := recover(); recovered != nil && l.emit != nil {
+			_ = l.emit("oast_failed", fmt.Sprintf("OAST polling worker recovered from panic: %v", recovered), map[string]interface{}{
+				"worker": "oast_poll", "runtime_failover": false,
+			})
+		}
+	}()
 	ticker := time.NewTicker(l.cfg.PollInterval)
 	defer ticker.Stop()
 	for {
@@ -295,7 +325,6 @@ func (l *Listener) handleInteraction(interaction Interaction, domain string, cor
 }
 
 func sanitizeInteraction(interaction Interaction) Interaction {
-	interaction.RawRequest = redactCallbackRaw(interaction.RawRequest)
 	interaction.RemoteAddress = redactSourceAddress(interaction.RemoteAddress)
 	if len(interaction.RawRequest) > 8<<10 {
 		interaction.RawRequest = interaction.RawRequest[:8<<10]
@@ -304,11 +333,6 @@ func sanitizeInteraction(interaction Interaction) Interaction {
 }
 
 func sanitizeCorrelation(correlation Correlation) Correlation {
-	redacted := httpclient.Redact(httpclient.RequestResponse{Request: correlation.Request})
-	correlation.Request = redacted.Request
-	correlation.Request.URL = redactCallbackURL(correlation.Request.URL)
-	correlation.Request.Body = redactCallbackRaw(correlation.Request.Body)
-	correlation.EndpointURL = redactCallbackURL(correlation.EndpointURL)
 	return correlation
 }
 
@@ -322,6 +346,42 @@ func (l *Listener) CorrelationCount() int {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return len(l.correlations)
+}
+
+// RemainingDrainDuration keeps the configured callback window relative to the
+// newest delivered probe instead of adding the full window again at scan end.
+func (l *Listener) RemainingDrainDuration(window time.Duration) time.Duration {
+	if l == nil || window <= 0 {
+		return 0
+	}
+	l.mu.RLock()
+	var newest time.Time
+	for _, correlation := range l.correlations {
+		probeTime := correlation.ProbeSentAt
+		if probeTime.IsZero() {
+			probeTime = correlation.RegisteredAt
+		}
+		if !probeTime.IsZero() && probeTime.After(newest) {
+			newest = probeTime
+		}
+	}
+	count := len(l.correlations)
+	l.mu.RUnlock()
+	if count == 0 || newest.IsZero() {
+		return 0
+	}
+	remaining := window - time.Since(newest)
+	if remaining > 0 {
+		return remaining
+	}
+	interval := l.cfg.PollInterval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	if interval > 2*time.Second {
+		interval = 2 * time.Second
+	}
+	return interval
 }
 
 // Drain actively polls for OAST interactions until duration elapses or ctx is cancelled.

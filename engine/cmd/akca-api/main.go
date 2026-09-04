@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/akha-security/akca/engine/internal/app"
+	"github.com/akha-security/akca/engine/internal/branding"
 	"github.com/akha-security/akca/engine/internal/events"
 	"github.com/akha-security/akca/engine/internal/scanapi"
 )
@@ -54,7 +55,7 @@ func main() {
 		defer cancel()
 		_ = server.Shutdown(ctx)
 	}()
-	fmt.Fprintf(os.Stderr, "Akca JSON API listening on http://%s\n", address)
+	fmt.Fprintf(os.Stderr, "%s JSON API listening on http://%s\n", branding.ProductName, address)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		exitf("API server failed: %v", err)
 	}

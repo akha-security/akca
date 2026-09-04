@@ -2,6 +2,7 @@ package modules
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -22,7 +23,11 @@ func (r *Runner) runNoSQLi(ctx context.Context, target ScanTarget) []ModuleFindi
 
 	baseline, err := r.probeForModule(ctx, "nosql", target, "akca-nosql-base")
 	if err != nil {
-		return nil
+		baseline, err = r.cachedEmptyProbe(ctx, target)
+		if err != nil {
+			r.emitSkip("nosql", target, "baseline and empty-request fallback failed: "+err.Error())
+			return nil
+		}
 	}
 
 	var controlRR httpclient.RequestResponse
@@ -87,7 +92,7 @@ func (r *Runner) runNoSQLi(ctx context.Context, target ScanTarget) []ModuleFindi
 			continue
 		}
 		if f != nil {
-			r.recordFinding(&out, f, "nosql", signal)
+			r.recordFinding(ctx, &out, f, "nosql", signal)
 		}
 	}
 	return out
@@ -108,23 +113,22 @@ func nosqlReprobeConfirmed(first nosql.ResponseContext, repeated httpclient.Resp
 }
 
 func nosqlSurface(target ScanTarget) bool {
+	if strings.TrimSpace(target.Parameter) != "" {
+		return true
+	}
 	ct := strings.ToLower(target.Profile.ContentType)
 	if strings.Contains(ct, "json") {
 		return true
 	}
-	lower := strings.ToLower(target.EndpointURL)
 	if nosql.IsLoginLikeEndpoint(target.EndpointURL) {
 		return true
 	}
+	lower := strings.ToLower(target.EndpointURL)
 	if strings.Contains(lower, "/api") || strings.Contains(lower, "/graphql") ||
+		strings.Contains(lower, "/search") || strings.Contains(lower, "/filter") || strings.Contains(lower, "/products") ||
 		strings.Contains(lower, "/v1/") || strings.Contains(lower, "/v2/") ||
 		strings.Contains(lower, "/v3/") {
 		return true
-	}
-	m := strings.ToUpper(target.Method)
-	if m == "POST" || m == "PUT" || m == "PATCH" {
-		return strings.Contains(lower, "/api") || strings.Contains(lower, "/graphql") ||
-			strings.Contains(lower, "/v1/") || strings.Contains(lower, "/v2/")
 	}
 	return false
 }
@@ -138,8 +142,8 @@ func (r *Runner) nosqlProbe(ctx context.Context, target ScanTarget, probe nosql.
 	switch probe.Mode {
 	case "json_body":
 		method := strings.ToUpper(target.Method)
-		if method == "" || method == http.MethodGet {
-			method = http.MethodPost
+		if method != http.MethodPost && method != http.MethodPut && method != http.MethodPatch {
+			return httpclient.RequestResponse{}, fmt.Errorf("JSON body NoSQL probe requires a discovered state-changing JSON request")
 		}
 		ct := probe.ContentType
 		if ct == "" {

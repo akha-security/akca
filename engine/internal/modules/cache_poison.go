@@ -22,29 +22,30 @@ func (r *Runner) runCachePoisoning(ctx context.Context, target ScanTarget) []Mod
 	}
 	var out []ModuleFinding
 	probes := []struct {
-		headers map[string]string
-		signal  string
+		headerKey string
+		headerVal func(marker string) string
+		signal    string
 	}{
-		{map[string]string{}, "unkeyed_header_host"},
-		{map[string]string{}, "unkeyed_original_url"},
-		{map[string]string{}, "unkeyed_custom_header"},
+		{"X-Forwarded-Host", func(m string) string { return m }, "unkeyed_forwarded_host"},
+		{"X-Host", func(m string) string { return m }, "unkeyed_host"},
+		{"X-Forwarded-Server", func(m string) string { return m }, "unkeyed_forwarded_server"},
+		{"X-HTTP-Host-Override", func(m string) string { return m }, "unkeyed_host_override"},
+		{"X-Original-URL", func(m string) string { return "/" + m }, "unkeyed_original_url"},
+		{"X-Rewrite-URL", func(m string) string { return "/" + m }, "unkeyed_rewrite_url"},
+		{"X-Forwarded-Proto", func(m string) string { return "http" }, "unkeyed_forwarded_proto"},
+		{"X-Forwarded-Scheme", func(m string) string { return "nothttps" }, "unkeyed_forwarded_scheme"},
+		{"X-Custom-IP-Authorization", func(m string) string { return m }, "unkeyed_custom_ip"},
+		{"X-Akca-Poison", func(m string) string { return m }, "unkeyed_custom_header"},
 	}
-	for index, pr := range probes {
+	for _, pr := range probes {
 		marker := "akca-cache-" + randomToken(10) + ".invalid"
-		switch index {
-		case 0:
-			pr.headers["X-Forwarded-Host"] = marker
-		case 1:
-			pr.headers["X-Original-URL"] = "/" + marker
-		default:
-			pr.headers["X-Akca-Poison"] = marker
-		}
+		headers := map[string]string{pr.headerKey: pr.headerVal(marker)}
 		cacheURL := cacheCanaryURL(target.EndpointURL, randomToken(12))
 		baseline, err := anonymous.DoWithoutSession(ctx, "GET", cacheURL, nil, nil)
 		if err != nil || strings.Contains(baseline.Response.Body, marker) {
 			continue
 		}
-		rr, err := r.client.Do(ctx, "GET", cacheURL, nil, pr.headers)
+		rr, err := r.client.Do(ctx, "GET", cacheURL, nil, headers)
 		if err != nil {
 			continue
 		}
@@ -81,7 +82,15 @@ func (r *Runner) runCachePoisoning(ctx context.Context, target ScanTarget) []Mod
 					r.observation("cache_poisoning", target, verification.RoleNegativeControl, 1, cold),
 				)
 			})
-		r.recordFinding(&out, f, "cache_poisoning", pr.signal)
+		if f != nil {
+			f.Title = "Web Cache Poisoning via " + pr.headerKey
+			f.Severity = "high"
+			f.Description = "An unkeyed HTTP header was reflected into the response and persisted in intermediate cache layers for anonymous clients."
+			r.recordFinding(ctx, &out, f, "cache_poisoning", pr.signal)
+		}
+		if len(out) >= 3 {
+			break
+		}
 	}
 	return out
 }
@@ -102,11 +111,14 @@ func cachePoisonCandidate(baseline, body, marker string) bool {
 }
 
 func cachePoisonPersisted(baseline, body string, headers map[string]string, marker string) bool {
-	return cachePoisonCandidate(baseline, body, marker) && cacheEvidence(headers)
+	return cachePoisonCandidate(baseline, body, marker) && !isUncacheableResponse(headers) && cacheEvidence(headers)
 }
 
 func cacheEvidence(headers map[string]string) bool {
-	for _, name := range []string{"X-Cache", "CF-Cache-Status", "X-Proxy-Cache"} {
+	for _, name := range []string{
+		"X-Cache", "CF-Cache-Status", "X-Proxy-Cache", "Fastly-Cache-Status",
+		"X-Cache-Hits", "X-Varnish", "X-Drupal-Cache", "X-Rack-Cache", "X-Cache-Lookup",
+	} {
 		value := strings.ToLower(headerValue(headers, name))
 		if strings.Contains(value, "hit") || strings.Contains(value, "cached") {
 			return true

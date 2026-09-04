@@ -18,7 +18,7 @@ func (e *Engine) runReportPhase(ctx context.Context, scanID string, partial bool
 		Template: report.TemplateInternal,
 		Format:   report.FormatJSON,
 		Partial:  partial,
-		Redact:   true,
+		Redact:   false,
 	}
 	if err := e.generateReport(opts); err != nil {
 		return err

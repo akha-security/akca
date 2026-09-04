@@ -50,6 +50,16 @@ func (d *publicFallbackDoer) Do(_ context.Context, method, rawURL string, _ []by
 	}, nil
 }
 
+type infrastructureChallengeDoer struct{}
+
+func (d *infrastructureChallengeDoer) Do(_ context.Context, method, rawURL string, _ []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	body := `<!DOCTYPE html><html><head><title>Attention Required! | Cloudflare</title></head><body><p>Cloudflare Ray ID: test</p><script>window._cf_chl_opt={}</script></body></html>`
+	return httpclient.RequestResponse{
+		Request:  httpclient.RequestRecord{Method: method, URL: rawURL, Headers: headers},
+		Response: httpclient.ResponseRecord{StatusCode: 403, Body: body, Headers: map[string]string{"Content-Type": "text/html"}},
+	}, nil
+}
+
 type seqDoer struct {
 	responses map[string]httpclient.ResponseRecord
 }
@@ -148,6 +158,43 @@ func TestEngineScopeBlocksBypass(t *testing.T) {
 	}
 	if blocked == 0 {
 		t.Fatal("expected scope_blocked event")
+	}
+}
+
+func TestEngineSkipsInfrastructureChallengeBaseline(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"127.0.0.1"}
+	scopeEngine := scope.NewEngine(cfg)
+
+	db, err := storage.Open(t.TempDir() + "/bypass-challenge.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_ = db.Migrate()
+
+	q := fuzzing.NewQueue403(10)
+	q.Enqueue("http://127.0.0.1/admin", "GET")
+
+	var attempted, skipped int
+	be := NewEngine("scan-challenge", &infrastructureChallengeDoer{}, scopeEngine, db, q, func(eventType, _ string, _ map[string]interface{}) error {
+		switch eventType {
+		case "four_oh_three_bypass_attempted":
+			attempted++
+		case "auth_bypass_skipped":
+			skipped++
+		}
+		return nil
+	}, 1)
+
+	if err := be.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if attempted != 0 {
+		t.Fatalf("infrastructure challenge baseline should not receive bypass attempts, got %d", attempted)
+	}
+	if skipped != 1 {
+		t.Fatalf("expected one challenge skip event, got %d", skipped)
 	}
 }
 

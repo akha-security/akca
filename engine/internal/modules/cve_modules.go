@@ -36,6 +36,12 @@ func (r *Runner) runVulnerableComponents(ctx context.Context, target ScanTarget)
 		r.emitSkip("vulnerable_components", target, reason)
 		return nil
 	}
+	if !r.endpointModuleOnce("vulnerable_components", target) {
+		return nil
+	}
+	if orig, ok := originScanTarget(target); ok {
+		target = orig
+	}
 	rr, err := r.cachedEmptyProbe(ctx, target)
 	if err != nil {
 		return nil
@@ -53,6 +59,12 @@ func (r *Runner) runKnownCVE(ctx context.Context, target ScanTarget) []ModuleFin
 	if ok, reason := r.shouldRunModule("known_cve", target); !ok {
 		r.emitSkip("known_cve", target, reason)
 		return nil
+	}
+	if !r.endpointModuleOnce("known_cve", target) {
+		return nil
+	}
+	if orig, ok := originScanTarget(target); ok {
+		target = orig
 	}
 	rr, err := r.cachedEmptyProbe(ctx, target)
 	if err != nil {
@@ -81,7 +93,7 @@ func (r *Runner) componentFindings(ctx context.Context, target ScanTarget, rr ht
 			if f != nil {
 				f.Description = m.CVEID + " affects " + c.Product + " " + c.Version
 				f.Severity = strings.ToLower(m.Severity)
-				r.recordFinding(&out, f, module, m.CVEID)
+				r.recordFinding(ctx, &out, f, module, m.CVEID)
 				r.persistComponentMatch(c, m)
 			}
 		}

@@ -72,9 +72,6 @@ func (q *Queue403) lowestPriorityIndex() int {
 }
 
 func NewQueue403(maxSize int) *Queue403 {
-	if maxSize <= 0 {
-		maxSize = 10000
-	}
 	q := &Queue403{
 		maxSize: maxSize,
 		seen:    make(map[string]struct{}),
@@ -92,7 +89,7 @@ func (q *Queue403) Enqueue(url, method string) bool {
 		q.totalDeduplicated++
 		return false
 	}
-	if len(q.heap) >= q.maxSize {
+	if q.maxSize > 0 && len(q.heap) >= q.maxSize {
 		// Queue is full: only admit the new URL if it outranks the current
 		// lowest-priority entry, evicting that entry. This prevents
 		// high-value targets (e.g. /admin, /actuator) from being dropped just

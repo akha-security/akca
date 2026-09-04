@@ -77,6 +77,62 @@ func TestInjectionProbeKeepsHeaderOnOriginalMethod(t *testing.T) {
 	}
 }
 
+func TestHeaderOnlyModuleProbePreservesMethodAndURL(t *testing.T) {
+	client := &recordingProbeClient{}
+	runner := testRunner(t, client)
+	target := ScanTarget{EndpointURL: "http://example.com/account?view=full", Method: http.MethodGet}
+	if _, err := runner.probeHeadersOnlyForModule(context.Background(), "host_poisoning", target,
+		map[string]string{"X-Forwarded-Host": "canary.invalid"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.calls) != 1 {
+		t.Fatalf("calls=%d, want 1", len(client.calls))
+	}
+	call := client.calls[0]
+	if call.method != http.MethodGet || call.rawURL != target.EndpointURL || len(call.body) != 0 {
+		t.Fatalf("header-only probe changed request shape: %+v", call)
+	}
+	if call.headers["X-Forwarded-Host"] != "canary.invalid" {
+		t.Fatalf("host poisoning header missing: %+v", call.headers)
+	}
+}
+
+func TestOriginScopedModulesUseOneOriginKey(t *testing.T) {
+	runner := &Runner{moduleSeen: make(map[string]struct{})}
+	first := ScanTarget{EndpointURL: "https://example.com/products?q=one", Method: "GET"}
+	second := ScanTarget{EndpointURL: "https://example.com/account?id=2", Method: "GET"}
+	if !runner.endpointModuleOnce("actuator", first) || runner.endpointModuleOnce("actuator", second) {
+		t.Fatal("actuator must run once per origin")
+	}
+	if !runner.endpointModuleOnce("http_methods", first) || !runner.endpointModuleOnce("http_methods", second) {
+		t.Fatal("route-scoped modules must remain independent per path")
+	}
+	origin, ok := originScanTarget(first)
+	if !ok || origin.EndpointURL != "https://example.com" || origin.Method != "GET" || origin.Parameter != "" {
+		t.Fatalf("origin target = %+v, ok=%v", origin, ok)
+	}
+}
+
+func TestActuatorProbesFromOriginInsteadOfCurrentPath(t *testing.T) {
+	client := &recordingProbeClient{}
+	runner := testRunner(t, client)
+	target := ScanTarget{EndpointURL: "http://example.com/products/list?q=gifts", Method: http.MethodGet, Parameter: "q"}
+	_ = runner.runSpringActuator(context.Background(), target)
+	want := "http://example.com/actuator/env"
+	found := false
+	for _, call := range client.calls {
+		if call.rawURL == want {
+			found = true
+		}
+		if strings.Contains(call.rawURL, "/products/list/actuator/") {
+			t.Fatalf("actuator path was appended to current route: %s", call.rawURL)
+		}
+	}
+	if !found {
+		t.Fatalf("origin actuator probe %q was not sent: %+v", want, client.calls)
+	}
+}
+
 func TestInjectionProbeUsesProfileHeaderLocationWithoutFanout(t *testing.T) {
 	client := &recordingProbeClient{}
 	runner := testRunner(t, client)

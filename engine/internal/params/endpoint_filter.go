@@ -45,14 +45,19 @@ func PassiveEnoughForSkip(passive []DiscoveredParameter, method string) bool {
 	if m := strings.ToUpper(method); m == http.MethodPost || m == http.MethodPut || m == http.MethodPatch {
 		return false
 	}
-	if len(passive) >= 8 {
-		return true
-	}
 	high := 0
+	nonHeaderCount := 0
 	for _, p := range passive {
-		if p.Priority >= 90 || p.Source == "passive" && p.Confidence >= 0.85 {
+		if p.Source == "synthetic_header" || p.Location == LocationHeader {
+			continue
+		}
+		nonHeaderCount++
+		if p.Priority >= 90 || (p.Source == "passive" && p.Confidence >= 0.85) {
 			high++
 		}
+	}
+	if nonHeaderCount >= 8 {
+		return true
 	}
 	return high >= 3
 }

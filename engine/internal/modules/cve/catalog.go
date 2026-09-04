@@ -22,6 +22,16 @@ var EmbeddedSnapshot = []CatalogEntry{
 	{CVEID: "CVE-2014-0160", Vendor: "openssl", Product: "openssl", CPE: "cpe:2.3:a:openssl:openssl", AffectedVersions: []string{"1.0.1-1.0.1f"}, Severity: "High"},
 	{CVEID: "CVE-2023-44487", Vendor: "nghttp2", Product: "nghttp2", CPE: "cpe:2.3:a:nghttp2:nghttp2", AffectedVersions: []string{"<1.57.0"}, Severity: "High"},
 	{CVEID: "CVE-2019-11043", Vendor: "php", Product: "php-fpm", CPE: "cpe:2.3:a:php:php", AffectedVersions: []string{"7.1.0-7.1.32", "7.2.0-7.2.23", "7.3.0-7.3.10"}, Severity: "Critical"},
+	{CVEID: "CVE-2025-55182", Vendor: "vercel", Product: "nextjs", CPE: "cpe:2.3:a:vercel:next.js", AffectedVersions: []string{"14.0.0-14.2.24", "15.0.0-15.1.4"}, Severity: "Critical"},
+	{CVEID: "CVE-2025-66478", Vendor: "facebook", Product: "react", CPE: "cpe:2.3:a:facebook:react", AffectedVersions: []string{"19.0.0"}, Severity: "Critical"},
+	{CVEID: "CVE-2025-54068", Vendor: "laravel", Product: "livewire", CPE: "cpe:2.3:a:laravel:livewire", AffectedVersions: []string{"3.0.0-3.5.18"}, Severity: "Critical"},
+	{CVEID: "CVE-2026-22750", Vendor: "spring", Product: "spring_cloud_gateway", CPE: "cpe:2.3:a:vmware:spring_cloud_gateway", AffectedVersions: []string{"4.0.0-4.1.5"}, Severity: "High"},
+	{CVEID: "CVE-2025-68645", Vendor: "zimbra", Product: "collaboration_suite", CPE: "cpe:2.3:a:zimbra:collaboration", AffectedVersions: []string{"9.0.0-10.1.2"}, Severity: "High"},
+	{CVEID: "CVE-2024-21887", Vendor: "ivanti", Product: "connect_secure", CPE: "cpe:2.3:a:ivanti:connect_secure", AffectedVersions: []string{"9.x-22.x"}, Severity: "Critical"},
+	{CVEID: "CVE-2026-49975", Vendor: "apache", Product: "http_server", CPE: "cpe:2.3:a:apache:http_server", AffectedVersions: []string{"<=2.4.62"}, Severity: "High"},
+	{CVEID: "CVE-2026-49975", Vendor: "f5", Product: "nginx", CPE: "cpe:2.3:a:f5:nginx", AffectedVersions: []string{"<=1.27.0"}, Severity: "High"},
+	{CVEID: "CVE-2026-49975", Vendor: "microsoft", Product: "iis", CPE: "cpe:2.3:a:microsoft:internet_information_services", AffectedVersions: []string{"<=10.0"}, Severity: "High"},
+	{CVEID: "CVE-2026-49975", Vendor: "envoyproxy", Product: "envoy", CPE: "cpe:2.3:a:envoyproxy:envoy", AffectedVersions: []string{"<=1.30.0"}, Severity: "High"},
 }
 
 func MatchComponent(vendor, product, version string) []CatalogEntry {

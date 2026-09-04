@@ -29,6 +29,7 @@ type Correlation struct {
 	FindingID        int64                    `json:"finding_id,omitempty"`
 	CallbackURL      string                   `json:"callback_url"`
 	RegisteredAt     time.Time                `json:"registered_at"`
+	ProbeSentAt      time.Time                `json:"probe_sent_at,omitempty"`
 	Payload          string                   `json:"payload,omitempty"`
 	Request          httpclient.RequestRecord `json:"request,omitempty"`
 }

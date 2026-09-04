@@ -8,7 +8,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/httpclient"
 )
 
-func TestSaveRequestResponsePreservesFullRedactedTraffic(t *testing.T) {
+func TestSaveRequestResponsePreservesFullRawTraffic(t *testing.T) {
 	db, err := Open(t.TempDir() + "/traffic.db")
 	if err != nil {
 		t.Fatal(err)
@@ -22,9 +22,9 @@ func TestSaveRequestResponsePreservesFullRedactedTraffic(t *testing.T) {
 	}
 	rr := httpclient.RequestResponse{
 		Request: httpclient.RequestRecord{Method: "POST", URL: "https://example.com/api", Headers: map[string]string{
-			"Accept": "application/json", "Content-Type": "application/json", "Authorization": "[REDACTED]",
+			"Accept": "application/json", "Content-Type": "application/json", "Authorization": "Bearer raw-token",
 		}, Body: `{"name":"akca"}`},
-		Response: httpclient.ResponseRecord{StatusCode: 201, Headers: map[string]string{"Content-Type": "application/json", "Set-Cookie": "[REDACTED]"}, Body: `{"ok":true}`, Duration: 125 * time.Millisecond},
+		Response: httpclient.ResponseRecord{StatusCode: 201, Headers: map[string]string{"Content-Type": "application/json", "Set-Cookie": "sid=raw-cookie"}, Body: `{"ok":true}`, Duration: 125 * time.Millisecond},
 	}
 	if _, err := db.SaveRequestResponse("scan-traffic", nil, rr); err != nil {
 		t.Fatal(err)
@@ -34,12 +34,12 @@ func TestSaveRequestResponsePreservesFullRedactedTraffic(t *testing.T) {
 		t.Fatalf("records=%d err=%v", len(records), err)
 	}
 	rawRequest, rawResponse := RawHTTPFromRecord(records[0])
-	for _, want := range []string{"POST /api HTTP/1.1", "Host: example.com", "Accept: application/json", "Content-Type: application/json", `{"name":"akca"}`} {
+	for _, want := range []string{"POST /api HTTP/1.1", "Host: example.com", "Accept: application/json", "Content-Type: application/json", "Authorization: Bearer raw-token", `{"name":"akca"}`} {
 		if !strings.Contains(rawRequest, want) {
 			t.Fatalf("raw request missing %q:\n%s", want, rawRequest)
 		}
 	}
-	if !strings.Contains(rawResponse, "HTTP/1.1 201") || !strings.Contains(rawResponse, `{"ok":true}`) {
+	if !strings.Contains(rawResponse, "HTTP/1.1 201") || !strings.Contains(rawResponse, "Set-Cookie: sid=raw-cookie") || !strings.Contains(rawResponse, `{"ok":true}`) {
 		t.Fatalf("unexpected raw response:\n%s", rawResponse)
 	}
 }

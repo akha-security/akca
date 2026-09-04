@@ -1,105 +1,85 @@
 package config
 
-// ApplyScanProfile merges smart scan profile defaults into cfg without overwriting
-// explicit user-provided limits from Settings.
+const (
+	// A zero global request budget means vulnerability modules may run every
+	// payload against every discovered target. Discovery itself stays bounded.
+	FullScanRequestBudget        = 0
+	FullScanCrawlerRequestBudget = 1_000
+	FullScanMaxPages             = 1_000
+	FullScanMaxEndpoints         = 1_000
+)
+
+// ApplyScanProfile normalizes every scan to AKCA's single exhaustive Full Scan
+// mode. Legacy profile names are accepted through stored configs, but no longer
+// reduce coverage or silently switch modules off.
 func ApplyScanProfile(cfg ScanConfig) ScanConfig {
-	switch cfg.SmartScanProfile {
-	case "QuickRecon":
-		setIfZero(&cfg.MaxDepth, 2)
-		setIfZero(&cfg.MaxPages, 150)
-		if !cfg.Explicit.EnableFuzzing {
-			cfg.EnableFuzzing = false
-		}
-		if !cfg.Explicit.EnableOAST {
-			cfg.EnableOAST = false
-		}
-		if cfg.PayloadBudget == "" {
-			cfg.PayloadBudget = PayloadBudgetLow
-		}
-		setIfZero(&cfg.PerHostConcurrency, 2)
-	case "FullBugBounty":
-		setIfZero(&cfg.MaxDepth, 4)
-		setIfZero(&cfg.MaxPages, 500)
-		if !cfg.Explicit.EnableFuzzing {
-			cfg.EnableFuzzing = true
-		}
-		if !cfg.Explicit.EnableOAST {
-			cfg.EnableOAST = true
-		}
-		if !cfg.Explicit.EnableJSAnalysis {
-			cfg.EnableJSAnalysis = true
-		}
+	if len(cfg.AllowedVulnerabilityClasses) == 0 {
+		cfg.SmartScanProfile = "Full Scan"
+	}
+	if !cfg.Explicit.RequestBudget {
+		cfg.RequestBudget = FullScanRequestBudget
+	}
+	if !cfg.Explicit.CrawlerRequestBudget {
+		cfg.CrawlerRequestBudget = FullScanCrawlerRequestBudget
+	}
+	if !cfg.Explicit.MaxPages {
+		cfg.MaxPages = FullScanMaxPages
+	}
+	if !cfg.Explicit.MaxEndpoints {
+		cfg.MaxEndpoints = cfg.MaxPages
+	}
+	if !cfg.Explicit.MaxDepth {
+		cfg.MaxDepth = 0
+	}
+	if !cfg.Explicit.TimeBudget {
+		cfg.TimeBudget = 0
+	}
+	if !cfg.Explicit.EnableFuzzing {
+		cfg.EnableFuzzing = true
+	}
+	if !cfg.Explicit.EnableOAST {
+		cfg.EnableOAST = true
+	}
+	if !cfg.Explicit.EnableJSAnalysis {
+		cfg.EnableJSAnalysis = true
+	}
+	if !cfg.Explicit.EnableWAFDetection {
 		cfg.EnableWAFDetection = true
+	}
+	if !cfg.Explicit.Enable403BypassChecks {
 		cfg.Enable403BypassChecks = true
-		if !cfg.Explicit.EnableWAFBypassHeaders {
-			cfg.EnableWAFBypassHeaders = true
-		}
-		if cfg.PayloadBudget == "" {
-			cfg.PayloadBudget = PayloadBudgetMedium
-		}
-		setIfZero(&cfg.PerHostConcurrency, 16)
-	case "APIDeepScan":
-		setIfZero(&cfg.MaxDepth, 3)
-		setIfZero(&cfg.MaxPages, 800)
-		if !cfg.Explicit.EnableFuzzing {
-			cfg.EnableFuzzing = true
-		}
-		if cfg.PayloadBudget == "" {
-			cfg.PayloadBudget = PayloadBudgetHigh
-		}
-		setIfZero(&cfg.PerHostConcurrency, 4)
-	case "AuthenticatedAppScan":
-		setIfZero(&cfg.MaxDepth, 5)
-		setIfZero(&cfg.MaxPages, 600)
-		if !cfg.Explicit.EnableFuzzing {
-			cfg.EnableFuzzing = true
-		}
-		setIfZero(&cfg.PerHostConcurrency, 3)
-	case "LowNoiseWAFFriendly":
-		if !cfg.Explicit.GlobalRateLimit && (cfg.GlobalRateLimit <= 0 || cfg.GlobalRateLimit > 1) {
-			cfg.GlobalRateLimit = 1
-		}
-		if !cfg.Explicit.PerHostRateLimit && (cfg.PerHostRateLimit <= 0 || cfg.PerHostRateLimit > 0.5) {
-			cfg.PerHostRateLimit = 0.5
-		}
-		if !cfg.Explicit.PerHostConcurrency {
-			setIfZero(&cfg.PerHostConcurrency, 1)
-		}
-		if cfg.PayloadBudget == "" {
-			cfg.PayloadBudget = PayloadBudgetLow
-		}
-		if !cfg.Explicit.EnableFuzzing {
-			cfg.EnableFuzzing = false
-		}
-	case "JavaScriptHeavySPA":
-		setIfZero(&cfg.MaxDepth, 5)
-		setIfZero(&cfg.MaxPages, 900)
-		if !cfg.Explicit.PerHostConcurrency {
-			setIfZero(&cfg.PerHostConcurrency, 4)
-		}
-		if !cfg.Explicit.EnableFuzzing {
-			cfg.EnableFuzzing = true
-		}
-		cfg.EnableHeadlessCrawler = true
-		if !cfg.Explicit.EnableJSAnalysis {
-			cfg.EnableJSAnalysis = true
-		}
-	case "OASTBlindTesting":
-		if !cfg.Explicit.EnableOAST {
-			cfg.EnableOAST = true
-		}
-		if !cfg.Explicit.EnableFuzzing {
-			cfg.EnableFuzzing = true
-		}
-		if cfg.PayloadBudget == "" {
-			cfg.PayloadBudget = PayloadBudgetMedium
-		}
+	}
+	if !cfg.Explicit.EnableBusinessLogicChecks {
+		cfg.EnableBusinessLogicChecks = true
+	}
+	if !cfg.Explicit.EnableRaceConditionTesting {
+		cfg.EnableRaceConditionTesting = true
+	}
+	if !cfg.Explicit.EnableSecondOrderTracking {
+		cfg.EnableSecondOrderTracking = true
+	}
+	if !cfg.Explicit.EnableWAFBypassHeaders {
+		cfg.EnableWAFBypassHeaders = false
+	}
+	if cfg.PayloadBudget == "" {
+		cfg.PayloadBudget = PayloadBudgetUnlimited
+	}
+	if cfg.PerHostConcurrency <= 0 {
+		cfg.PerHostConcurrency = 16
+	}
+	// Passive mode is enforced last. CLI/UI defaults are commonly applied after
+	// mode selection; without this final clamp they could silently reactivate
+	// mutation-capable phases while the scan was still labelled "passive".
+	if cfg.PassiveMode {
+		cfg.EnableFuzzing = false
+		cfg.EnableOAST = false
+		cfg.EnableWAFDetection = false
+		cfg.Enable403BypassChecks = false
+		cfg.EnableBusinessLogicChecks = false
+		cfg.EnableRaceConditionTesting = false
+		cfg.EnableSecondOrderTracking = false
+		cfg.EnableHeadlessCrawler = false
+		cfg.EnableWAFBypassHeaders = false
 	}
 	return cfg
-}
-
-func setIfZero(field *int, value int) {
-	if *field <= 0 {
-		*field = value
-	}
 }

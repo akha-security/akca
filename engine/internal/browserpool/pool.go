@@ -154,7 +154,15 @@ func (p *Pool) execute(ctx context.Context, id string, task Task) {
 	}
 	p.mu.Unlock()
 
-	err := p.executeTask(taskCtx, task)
+	var err error
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				err = fmt.Errorf("browser task panic: %v", recovered)
+			}
+		}()
+		err = p.executeTask(taskCtx, task)
+	}()
 
 	p.mu.Lock()
 	w := p.workers[id]

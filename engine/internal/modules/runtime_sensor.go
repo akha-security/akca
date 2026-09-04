@@ -150,7 +150,7 @@ func runtimeSinkMatchesModule(module, sinkType string) bool {
 		return sinkType == "file"
 	case "ldap_xpath_injection":
 		return sinkType == "ldap" || sinkType == "xpath"
-	case "deserialization":
+	case "deserialization", "react_rsc_rce":
 		return sinkType == "deserialization"
 	default:
 		return false

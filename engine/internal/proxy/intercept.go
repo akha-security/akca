@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -18,13 +19,14 @@ import (
 )
 
 type InterceptServer struct {
-	mu        sync.Mutex
-	db        *storage.DB
-	scope     *scope.Engine
-	sessionID string
-	listener  net.Listener
-	enabled   bool
-	onCapture func(TrafficRecord)
+	mu            sync.Mutex
+	db            *storage.DB
+	scope         *scope.Engine
+	sessionID     string
+	listener      net.Listener
+	enabled       bool
+	onCapture     func(TrafficRecord)
+	forwardClient *http.Client
 }
 
 type TrafficRecord struct {
@@ -37,7 +39,10 @@ type TrafficRecord struct {
 }
 
 func NewInterceptServer(db *storage.DB, scopeEngine *scope.Engine, sessionID string) *InterceptServer {
-	return &InterceptServer{db: db, scope: scopeEngine, sessionID: sessionID}
+	return &InterceptServer{
+		db: db, scope: scopeEngine, sessionID: sessionID,
+		forwardClient: &http.Client{Timeout: 30 * time.Second},
+	}
 }
 
 func (s *InterceptServer) Start(addr string) error {
@@ -45,8 +50,10 @@ func (s *InterceptServer) Start(addr string) error {
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
 	s.listener = ln
 	s.enabled = true
+	s.mu.Unlock()
 	go func() {
 		_ = http.Serve(ln, http.HandlerFunc(s.handle))
 	}()
@@ -55,15 +62,22 @@ func (s *InterceptServer) Start(addr string) error {
 }
 
 func (s *InterceptServer) Stop() error {
+	s.mu.Lock()
 	s.enabled = false
-	if s.listener != nil {
-		return s.listener.Close()
+	listener := s.listener
+	s.listener = nil
+	s.mu.Unlock()
+	if listener != nil {
+		return listener.Close()
 	}
 	return nil
 }
 
 func (s *InterceptServer) handle(w http.ResponseWriter, r *http.Request) {
-	if !s.enabled {
+	s.mu.Lock()
+	enabled := s.enabled
+	s.mu.Unlock()
+	if !enabled {
 		http.Error(w, "proxy disabled", http.StatusServiceUnavailable)
 		return
 	}
@@ -80,7 +94,7 @@ func (s *InterceptServer) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid target format: url parse failed or host is empty", http.StatusBadRequest)
 		return
 	}
-	if !s.scope.IsInScope(target) {
+	if s.scope == nil || !s.scope.IsInScope(target) {
 		http.Error(w, "out of scope", http.StatusForbidden)
 		return
 	}
@@ -89,7 +103,10 @@ func (s *InterceptServer) handle(w http.ResponseWriter, r *http.Request) {
 	rec.ReqBody = string(body)
 	r.Body = io.NopCloser(bytes.NewReader(body))
 
-	proxy := httputil.NewSingleHostReverseProxy(u)
+	// NewSingleHostReverseProxy joins the target path to the incoming request
+	// path. An explicit proxy request already contains the destination path, so
+	// use only the destination origin here to avoid forwarding /x as /x/x.
+	proxy := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: u.Scheme, Host: u.Host})
 	proxy.ErrorHandler = func(rw http.ResponseWriter, _ *http.Request, err error) {
 		http.Error(rw, err.Error(), http.StatusBadGateway)
 	}
@@ -103,7 +120,7 @@ func (s *InterceptServer) handle(w http.ResponseWriter, r *http.Request) {
 
 func (s *InterceptServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// TLS MITM requires generated certs; tunnel pass-through for in-scope hosts.
-	if !s.scope.IsInScope("https://" + r.Host) {
+	if s.scope == nil || !s.scope.IsInScope("https://"+r.Host) {
 		http.Error(w, "out of scope", http.StatusForbidden)
 		return
 	}
@@ -156,6 +173,12 @@ func (s *InterceptServer) persist(rec TrafficRecord) {
 }
 
 func (s *InterceptServer) Forward(ctx context.Context, method, rawURL string, body string, headers map[string]string) (TrafficRecord, error) {
+	if s.scope == nil || !s.scope.IsInScope(rawURL) {
+		return TrafficRecord{}, fmt.Errorf("out of scope: %s", rawURL)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, strings.NewReader(body))
 	if err != nil {
 		return TrafficRecord{}, err
@@ -163,7 +186,7 @@ func (s *InterceptServer) Forward(ctx context.Context, method, rawURL string, bo
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.forwardClient.Do(req)
 	if err != nil {
 		return TrafficRecord{}, err
 	}

@@ -465,3 +465,13 @@ func TestConfidenceScoreIsClampedToOne(t *testing.T) {
 		t.Fatalf("confidence must be normalized: level=%s score=%f", level, score)
 	}
 }
+
+func TestTypedContentSignalAloneCannotBecomeConfirmed(t *testing.T) {
+	level, score := ScoreConfidence(Candidate{DirectTypedSignal: true}, Result{
+		SemanticDiff: true,
+		ProofType:    ProofContentEvidence,
+	})
+	if level != Potential || score >= 0.75 {
+		t.Fatalf("single typed signal must remain a potential lead: level=%s score=%f", level, score)
+	}
+}

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -20,19 +22,14 @@ import (
 )
 
 func TestAllCatalogModulesAreCoveredByRunner(t *testing.T) {
+	source, err := os.ReadFile("module_runner.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	caseRE := regexp.MustCompile(`case\s+"([^"]+)"\s*:`)
 	covered := map[string]struct{}{}
-	for _, name := range []string{
-		"xss", "blind_xss", "sqli", "nosql", "ssti", "command_injection",
-		"ssrf", "xxe", "lfi", "file_upload", "idor", "bfla", "open_redirect", "host_header", "second_order",
-		"cors", "jwt", "oauth", "cache_poisoning", "cache_deception", "mass_assignment", "api_exposure",
-		"rate_limit", "account_enum", "hpp", "broken_auth", "csrf", "wordpress_fuzz",
-		"security_headers", "tls_misconfig", "vulnerable_components", "sensitive_data", "secret_exposure",
-		"cicd_exposure", "git_recovery", "source_code_disclosure", "graphql", "script_source", "websocket",
-		"cloud_storage", "cloud_posture", "client_ssti", "smuggling",
-		"prototype_pollution", "ldap_xpath_injection", "crlf", "debug_admin", "business_logic", "race_condition",
-		"api_versioning", "known_cve",
-	} {
-		covered[name] = struct{}{}
+	for _, match := range caseRE.FindAllStringSubmatch(string(source), -1) {
+		covered[match[1]] = struct{}{}
 	}
 
 	var missing []string
@@ -486,4 +483,32 @@ func TestFindingPersistenceWithEvidence(t *testing.T) {
 	runner := NewRunner("scan-p", client, scope.NewEngine(cfg), db, verification.NewEngine(db, nil), nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
 	payloads := []payloadgen.Payload{{Value: `"><svg/onload=alert(1)>`, VulnClass: "xss", Variant: "html_breakout"}}
 	_ = runner.runXSS(context.Background(), testTarget(payloads))
+}
+
+func TestCoreInjectionModuleParameterRestrictions(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	runner := &Runner{cfg: cfg}
+
+	paramTarget := ScanTarget{EndpointURL: "https://example.com/api", Parameter: "id"}
+	noParamTarget := ScanTarget{EndpointURL: "https://example.com/api", Parameter: ""}
+
+	// Non-injection modules should work on parameterless endpoints
+	for _, mod := range []string{"cors", "jwt", "oauth", "rate_limit", "broken_auth", "host_header", "bfla"} {
+		shouldRun, reason := runner.shouldRunModule(mod, noParamTarget)
+		if !shouldRun {
+			t.Fatalf("expected module %s to run on parameterless target, got skipped: %s", mod, reason)
+		}
+	}
+
+	// Injection mutation modules should require parameter
+	for _, mod := range []string{"sqli", "nosql", "command_injection", "ssti", "xss"} {
+		shouldRunNoParam, _ := runner.shouldRunModule(mod, noParamTarget)
+		if shouldRunNoParam {
+			t.Fatalf("expected injection module %s to be skipped on parameterless target", mod)
+		}
+		shouldRunParam, _ := runner.shouldRunModule(mod, paramTarget)
+		if !shouldRunParam {
+			t.Fatalf("expected injection module %s to run on target with parameter", mod)
+		}
+	}
 }

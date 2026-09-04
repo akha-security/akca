@@ -37,6 +37,13 @@ var services = []struct {
 	ScopeFn func(*http.Response, string) []string
 }{
 	{Name: "github", Prefix: "ghp_", URL: "https://api.github.com/user"},
+	{Name: "github_pat", Prefix: "github_pat_", URL: "https://api.github.com/user"},
+	{Name: "gitlab", Prefix: "glpat-", URL: "https://gitlab.com/api/v4/user"},
+	{Name: "openai", Prefix: "sk-", URL: "https://api.openai.com/v1/models"},
+	{Name: "anthropic", Prefix: "sk-ant-", URL: "https://api.anthropic.com/v1/models"},
+	{Name: "huggingface", Prefix: "hf_", URL: "https://huggingface.co/api/whoami-v2"},
+	{Name: "postman", Prefix: "PMAK-", URL: "https://api.getpostman.com/me"},
+	{Name: "doppler", Prefix: "dp.st.", URL: "https://api.doppler.com/v3/me"},
 	{Name: "aws", Prefix: "AKIA", URL: "https://sts.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15"},
 	{Name: "slack", Prefix: "xox", URL: "https://slack.com/api/auth.test"},
 	{Name: "stripe", Prefix: "sk_", URL: "https://api.stripe.com/v1/balance"},
@@ -67,10 +74,20 @@ func (v *Validator) Validate(ctx context.Context, scanID, token string) (Result,
 		return res, nil
 	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, serviceURL(svc), nil)
-	req.Header.Set("Authorization", authHeader(svc, token))
+	switch svc {
+	case "anthropic":
+		req.Header.Set("x-api-key", token)
+		req.Header.Set("anthropic-version", "2023-06-01")
+	case "postman":
+		req.Header.Set("X-API-Key", token)
+	case "gitlab":
+		req.Header.Set("PRIVATE-TOKEN", token)
+	default:
+		req.Header.Set("Authorization", authHeader(svc, token))
+	}
 	resp, err := v.client.Do(req)
 	if err != nil {
-		res.Status = "rate-limited"
+		res.Status = "network-error"
 		_ = v.db.SaveAPIKeyValidation(scanID, svc, res.Status, res)
 		return res, err
 	}
@@ -115,7 +132,7 @@ func authHeader(svc, token string) string {
 	switch svc {
 	case "stripe":
 		return "Bearer " + token
-	case "github":
+	case "github", "github_pat":
 		return "token " + token
 	default:
 		return "Bearer " + token
@@ -123,8 +140,5 @@ func authHeader(svc, token string) string {
 }
 
 func hint(token string) string {
-	if len(token) <= 8 {
-		return "****"
-	}
-	return token[:4] + "..." + token[len(token)-4:]
+	return token
 }

@@ -3,8 +3,11 @@ package report
 import (
 	"time"
 
+	"github.com/akha-security/akca/engine/internal/branding"
 	"github.com/akha-security/akca/engine/internal/storage"
 )
+
+const ProductName = branding.ProductName
 
 type TemplateKind string
 
@@ -104,6 +107,8 @@ type FindingEntry struct {
 	ConfidenceScore   float64      `json:"confidence_score"`
 	ConfidenceExplain string       `json:"confidence_explanation"`
 	VulnClass         string       `json:"vuln_class"`
+	CWE               []string     `json:"cwe,omitempty"`
+	OWASPTop102025    []string     `json:"owasp_top_10_2025,omitempty"`
 	EndpointURL       string       `json:"endpoint_url"`
 	Parameter         string       `json:"parameter"`
 	ReproductionSteps []string     `json:"reproduction_steps"`
@@ -140,6 +145,16 @@ type TrafficEntry struct {
 	RawResponse string `json:"raw_response"`
 }
 
+type PathDiscoveryEntry struct {
+	Method     string `json:"method"`
+	URL        string `json:"url"`
+	StatusCode int    `json:"status_code"`
+	Category   string `json:"category,omitempty"`
+	Signal     string `json:"signal,omitempty"`
+	BodyLength int    `json:"body_length,omitempty"`
+	IsArchive  bool   `json:"is_archive,omitempty"`
+}
+
 type Document struct {
 	SchemaVersion     string                       `json:"schema_version"`
 	GeneratedAt       time.Time                    `json:"generated_at"`
@@ -155,5 +170,6 @@ type Document struct {
 	RootCauseGroups   []storage.FindingGroupRecord `json:"root_cause_groups,omitempty"`
 	APIKeyValidations []APIKeySection              `json:"api_key_validations,omitempty"`
 	TrafficEvidence   []TrafficEntry               `json:"traffic_evidence,omitempty"`
+	PathDiscoveries   []PathDiscoveryEntry         `json:"path_discoveries,omitempty"`
 	AppendixNotes     string                       `json:"appendix_notes,omitempty"`
 }

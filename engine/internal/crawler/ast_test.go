@@ -63,8 +63,8 @@ func TestASTTemplateLiteralPrefix(t *testing.T) {
 	if len(eps) == 0 {
 		t.Fatal("expected template-literal endpoint to be extracted")
 	}
-	if !strings.Contains(eps[0].URL, "/api/v1/users/") {
-		t.Fatalf("expected static prefix from template literal, got %s", eps[0].URL)
+	if !strings.HasSuffix(eps[0].URL, "/api/v1/users/%7Bparam%7D/profile") && !strings.HasSuffix(eps[0].URL, "/api/v1/users/{param}/profile") {
+		t.Fatalf("expected preserved template literal route, got %s", eps[0].URL)
 	}
 }
 

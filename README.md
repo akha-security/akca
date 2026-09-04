@@ -1,362 +1,327 @@
-# Akca - Demo Version
+# AKCA Advanced Web Security Scanner
 
-[![Status: Demo](https://img.shields.io/badge/status-demo%20%2F%20experimental-f59e0b)](https://github.com/akha-security/akca)
-[![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](https://go.dev/)
-[![Quality](https://github.com/akha-security/akca/actions/workflows/quality.yml/badge.svg)](https://github.com/akha-security/akca/actions/workflows/quality.yml)
+<p align="center">
+  <strong>Evidence-driven dynamic application security testing, built in Go.</strong><br>
+  Discover the real attack surface. Verify the behavior. Report the evidence.
+</p>
 
-**Akca is an experimental, proof-oriented DAST and bug bounty scanner written in Go.**
+<p align="center">
+  <a href="https://github.com/akha-security/akca/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/akha-security/akca/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/akha-security/akca/releases"><img alt="Version" src="https://img.shields.io/badge/version-v0.1.0-6f42c1"></a>
+  <a href="https://go.dev/"><img alt="Go" src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
+</p>
 
-It combines crawling, active and passive checks, browser-assisted analysis, out-of-band verification, API discovery, and evidence-aware reporting in one CLI workflow.
+AKCA is an open-source DAST engine focused on a problem security teams know too
+well: a scanner result is only useful when engineers can trust and reproduce it.
+Instead of promoting every response anomaly to a vulnerability, AKCA records a
+baseline, exercises a targeted probe, applies vulnerability-specific controls,
+and stores the evidence used to reach its decision.
 
 > [!IMPORTANT]
-> **Akca is currently a demo release.**
->
-> The main version is still under active development. This repository may contain bugs, incomplete checks, unstable behavior, breaking changes, false positives, and false negatives. Do not treat a clean Akca report as proof that a target is secure, and manually verify every finding before submitting a bug bounty report or making a security decision.
+> AKCA is currently an early `v0.1.0` release. Use it on systems you own or are
+> explicitly authorized to test, validate findings before acting on them, and
+> avoid production-impacting scan profiles without an agreed test window.
 
-## Why this repository is public
+## Why AKCA?
 
-Akca is being released early so that real-world feedback can shape the main version. Testing, reproducible bug reports, false-positive samples, missed-vulnerability reports, and feature suggestions are especially valuable.
+- **Evidence contracts instead of signature-only alerts.** Findings can require
+  negative controls, deterministic replay, identity boundaries, state changes,
+  DOM execution, runtime traces, or correlated OAST callbacks.
+- **Discovery that understands modern applications.** A concurrent HTTP crawler,
+  Chromium DOM execution, browser Network/Console capture, JavaScript analysis,
+  source maps, forms, WebSockets, and service workers feed one normalized inventory.
+- **API-native scanning.** Import OpenAPI 3.0/3.1, RAML bundles, Postman, HAR,
+  WSDL, GraphQL, protobuf, and AsyncAPI definitions—including POST request bodies.
+- **False-positive resistance without disabling capabilities.** WAF awareness
+  changes pacing and payload ordering; it does not silently remove scan modules.
+- **Operationally useful output.** SQLite checkpoints, scan resume, finding replay,
+  root-cause grouping, redaction, and HTML/JSON/Markdown/CSV/SARIF reports.
+- **A broad security surface.** The current module catalog registers 80+ checks
+  across injection, authorization, authentication, API, browser, cloud, protocol,
+  exposure, and business-logic categories.
 
-Please open an issue if you encounter:
+Read [FEATURES.md](FEATURES.md) for the complete capability tour and the design
+choices that distinguish AKCA.
 
-- an installation, startup, scan, browser, OAST, database, or reporting error;
-- a finding that cannot be reproduced manually;
-- a vulnerability that Akca failed to detect;
-- a module, payload family, workflow, or report section that needs improvement;
-- a protocol, vulnerability class, integration, or feature that should be added.
+## How verification works
 
-Use the [GitHub issue tracker](https://github.com/akha-security/akca/issues/new) and prefix the title with `[Bug]`, `[False Positive]`, `[False Negative]`, or `[Feature]`.
+```text
+Target / API definition
+        │
+        ▼
+Preflight ──► fingerprint and WAF calibration
+        │
+        ▼
+HTTP + browser + JavaScript + API discovery
+        │
+        ▼
+Parameter and reflection analysis
+        │
+        ▼
+Targeted probe ──► negative control ──► replay / identity / state / OAST proof
+        │
+        ▼
+Evidence ledger ──► report gate ──► HTML · JSON · Markdown · CSV · SARIF
+```
 
-## Responsible use
-
-Only scan systems that you own or are explicitly authorized to test. You are responsible for respecting the target's scope, rate limits, data-handling rules, and applicable laws.
-
-Active security testing can modify application state, trigger alerts, create records, consume resources, or interact with third-party infrastructure. Start with a test environment whenever possible.
+A response difference is a lead, not automatically a finding. AKCA's proof
+policy engine can suppress candidates caused by generic error pages, WAF block
+pages, unstable baselines, timing noise, honeypot parameters, failed controls,
+or non-reproducible behavior. Passive configuration and content findings follow
+their own direct-evidence policies.
 
 ## Installation
 
-### Requirements
+### Install with Go
 
-- Go 1.25 or newer
-- Internet access during installation
-- Internet access on the first browser-assisted scan when no compatible local browser exists
-
-### Install with one command
+The fastest way to install AKCA from GitHub is:
 
 ```bash
 go install -v github.com/akha-security/akca/engine/cmd/akca@latest
 ```
 
-This is the standard installation method. It does not require cloning the
-repository, running `go build`, or manually downloading Go dependencies.
-The Go toolchain resolves, downloads, builds, and installs Akca and its Go
-dependencies in a single command.
-
-Verify the installation:
+Make sure your Go binary directory is on `PATH`:
 
 ```bash
-akca --version
-```
+# Linux/macOS
+export PATH="$(go env GOPATH)/bin:$PATH"
 
-If the command is not found, add Go's binary directory to your `PATH`:
-
-**Linux and macOS**
-
-```bash
-export PATH="$PATH:$(go env GOPATH)/bin"
-```
-
-**Windows PowerShell**
-
-```powershell
+# Windows PowerShell
 $env:Path += ";$(go env GOPATH)\bin"
 ```
 
-> [!NOTE]
-> `@latest` installs the newest published Akca engine version. Demo releases
-> may introduce breaking changes until the first stable release.
-
-## Automatic browser setup
-
-Akca does not require a separate ChromeDriver or Playwright installation.
-
-At scan startup it:
-
-1. uses an available Chrome, Chromium, or Microsoft Edge installation;
-2. checks the local managed-browser cache;
-3. downloads a compatible portable Chromium build automatically when no browser is available.
-
-The downloaded browser is cached and reused by later scans. Browser preparation happens only when a scan needs to start; commands such as `akca --help` and `akca --version` do not trigger a download.
-
-If browser provisioning fails, Akca continues with HTTP-based coverage and clearly warns that DOM execution and browser-assisted checks may be incomplete.
-
-On minimal Linux distributions, Chromium may still require operating-system shared libraries supplied by the distribution. Akca cannot safely install system packages without administrator approval.
-
-## Quick start
-
-Run an authorized scan and generate an HTML report:
+Then verify the install:
 
 ```bash
-akca -u https://target.example -o akca-report.html
+akca --version
+akca --help
 ```
 
-Use authentication headers:
+### Build from source
 
-```bash
-akca -u https://target.example \
-  -H "Authorization: Bearer REDACTED" \
-  -H "X-API-Key: REDACTED" \
-  -o authenticated-scan.html
-```
+Requirements:
 
-Use a session cookie:
+- Go `1.25` or newer
+- Git
+- Optional: Chrome, Chromium, or Edge for browser-backed SPA discovery
 
-```bash
-akca -u https://target.example \
-  -c "session=REDACTED" \
-  -o authenticated-scan.html
-```
-
-Send traffic through an intercepting proxy:
-
-```bash
-akca -u https://target.example \
-  -p http://127.0.0.1:8080 \
-  -k \
-  -o proxied-scan.html
-```
-
-Seed the scan from an OpenAPI document:
-
-```bash
-akca -u https://api.target.example \
-  --api-spec ./openapi.json \
-  -o api-scan.html
-```
-
-Tune request pressure:
-
-```bash
-akca -u https://target.example \
-  --rate-limit 20 \
-  --concurrency 5 \
-  -o controlled-scan.html
-```
-
-## What Akca currently covers
-
-Akca's demo build includes multiple discovery and verification paths. Module maturity varies, so this list describes intended coverage rather than a guarantee of detection.
-
-### Discovery and attack-surface mapping
-
-- HTML links, forms, parameters, scripts, and redirects
-- JavaScript and source-map assisted endpoint discovery
-- OpenAPI/API route seeding
-- parameterless and API-style endpoints
-- technology and passive response analysis
-- browser-assisted DOM and reflection analysis
-- selected request-header injection points, including `User-Agent`, `Referer`, `Origin`, and forwarding headers
-
-### Active vulnerability checks
-
-- SQL injection, including error, boolean, time, and out-of-band evidence paths
-- NoSQL injection, including operator-style and backend-specific probes
-- reflected, stored-signal, DOM, and blind XSS paths
-- server-side template injection
-- command injection
-- server-side request forgery
-- XML external entity injection
-- path traversal and file-oriented checks
-- open redirect
-- selected authentication, authorization, CORS, header, exposure, and misconfiguration checks
-
-### Verification and evidence
-
-- baseline-versus-probe comparison
-- positive and negative controls where supported
-- repeated timing samples for timing-sensitive checks
-- browser execution evidence for relevant client-side checks
-- OAST correlation for blind or asynchronous behavior
-- proof-aware confidence classification
-- request, response, payload, parameter, and reproduction context in reports
-
-## Confidence levels
-
-Akca separates signal strength from severity:
-
-| Confidence | Meaning |
-|---|---|
-| `Confirmed` | The configured proof contract was satisfied. Manual verification is still required. |
-| `HighConfidence` | Strong, reproducible evidence exists, but the strict confirmation contract was not fully satisfied. |
-| `Potential` | A meaningful signal exists and requires deeper manual investigation. |
-| `NeedsManualReview` | The signal is ambiguous, passive, environmental, or not safely verifiable automatically. |
-
-A high-severity label does not automatically mean a finding is confirmed. Likewise, a low-confidence result is not necessarily harmless.
-
-## Reports
-
-HTML is the recommended format for manual review:
-
-```bash
-akca -u https://target.example -f html -o report.html
-```
-
-Supported formats:
-
-- `html`
-- `json`
-- `csv`
-- `markdown`
-- `sarif`
-
-The final report is designed to preserve active, passive, confirmed, high-confidence, potential, and manual-review findings. Integration and policy outputs may apply stricter proof gates than the full evidence report.
-
-Never publish an unredacted report from a private program. Reports may contain target URLs, parameters, payloads, response fragments, tokens, cookies, internal hostnames, or personal data.
-
-## Common CLI options
-
-| Option | Description |
-|---|---|
-| `-u`, `--url` | Target URL |
-| `-c`, `--cookie` | Cookie header |
-| `-H`, `--header` | Custom header; may be repeated |
-| `-p`, `--proxy` | HTTP proxy |
-| `-k`, `--insecure` | Allow invalid TLS certificates |
-| `--rate-limit` | Maximum request rate |
-| `--concurrency` | Concurrent worker count |
-| `--api-spec` | OpenAPI/API specification path |
-| `--oast-server` | Custom OAST service |
-| `--oast-wait` | OAST callback wait duration |
-| `--no-oast` | Disable OAST checks |
-| `--no-fuzzing` | Disable active fuzzing |
-| `--no-js` | Disable JavaScript-assisted analysis |
-| `-f`, `--format` | Report format |
-| `-o`, `--output` | Report output path |
-| `--scan-id` | Explicit scan identifier |
-| `--version` | Print version information |
-
-Run `akca --help` for the current command reference.
-
-## OAST and external traffic
-
-Some SSRF, blind XSS, XXE, command injection, and similar checks may use out-of-band interaction. Review the configured OAST provider and your program's rules before enabling these checks.
-
-Disable OAST when external callbacks are not permitted:
-
-```bash
-akca -u https://target.example --no-oast -o report.html
-```
-
-OAST transport errors do not prove that a target is vulnerable or safe. They should be treated as coverage warnings.
-
-## Demo limitations
-
-The current demo can produce incomplete or incorrect results. Known risk areas include:
-
-- highly dynamic SPAs and applications with complex browser state;
-- multi-step authentication, MFA, CAPTCHA, and rotating anti-CSRF controls;
-- rate limiting, WAF normalization, caching, load balancing, and unstable responses;
-- blind and time-based vulnerabilities affected by network noise;
-- destructive business workflows that cannot be tested safely by default;
-- custom serialization, GraphQL, WebSocket, gRPC, and proprietary protocols;
-- OAST providers blocked by DNS, proxies, egress policy, or target infrastructure;
-- browser startup and rendering differences across operating systems;
-- uncommon database, template-engine, and framework fingerprints;
-- authorization issues requiring multiple users, roles, tenants, or account states;
-- vulnerabilities whose proof requires human context or a program-specific impact chain.
-
-Akca is an aid for security testing, not a replacement for manual methodology, source review, threat modeling, or professional judgment.
-
-## Reporting useful feedback
-
-Before opening an issue, remove credentials, cookies, authorization tokens, private hostnames, personal data, and bug bounty program secrets.
-
-A useful issue should include:
-
-```text
-Title: [Bug | False Positive | False Negative | Feature] Short summary
-
-Akca version:
-Operating system:
-Go version:
-Installation method:
-Target type/framework (if known):
-Command used (secrets redacted):
-
-Expected behavior:
-Actual behavior:
-
-Minimal reproduction:
-1.
-2.
-3.
-
-Relevant redacted request/response:
-Relevant report excerpt:
-Logs or error message:
-```
-
-For a false positive, explain how you manually tested the finding and why the behavior is not exploitable.
-
-For a missed vulnerability, provide the smallest safe lab reproduction, vulnerability class, injection location, expected payload behavior, and the evidence Akca should have recognized.
-
-For a requested improvement, describe the security-testing workflow it would unlock rather than only naming a tool or payload.
-
-## Build from source
+Linux and macOS:
 
 ```bash
 git clone https://github.com/akha-security/akca.git
 cd akca/engine
-go test ./...
-go build ./cmd/akca
+go build -buildvcs=false -trimpath -o ../akca ./cmd/akca
+../akca --version
 ```
 
-Run the local build:
-
-```bash
-./akca -u https://target.example -o report.html
-```
-
-On Windows:
+Windows PowerShell:
 
 ```powershell
-.\akca.exe -u https://target.example -o report.html
+git clone https://github.com/akha-security/akca.git
+Set-Location akca\engine
+go build -buildvcs=false -trimpath -o ..\akca.exe .\cmd\akca
+..\akca.exe --version
 ```
 
-## Development checks
+Release binaries, when published, are available from
+[GitHub Releases](https://github.com/akha-security/akca/releases).
 
-From the `engine` directory:
+## Quick start
 
 ```bash
-go test ./...
-go vet ./...
-go build ./cmd/akca ./cmd/akca-api ./cmd/akca-policy
+# Full scan
+./akca scan -u https://staging.example.com
+
+# Focused SQL/NoSQL injection scan
+./akca -u https://staging.example.com -m sql
+
+# Combine profiles
+./akca -u https://staging.example.com -m sql,xss,api
+
+# Authenticated scan
+./akca -u https://app.example.com \
+  -c "session=replace-me" \
+  -H "Authorization: Bearer replace-me"
+
+# API scan using a multi-file OpenAPI or RAML ZIP bundle
+./akca -u https://api.example.com \
+  --api-spec ./api-bundle.zip \
+  -m api
+
+# Passive, non-mutating inspection
+./akca -u https://staging.example.com -m passive -v
+
+# Crawl linked API/service subdomains only when you explicitly want wider scope
+./akca -u https://www.example.com \
+  --include-linked-api-subdomains
+
+# Send traffic through an inspection proxy
+./akca -u https://staging.example.com \
+  -p http://127.0.0.1:8080 -k
+
+# Generate SARIF for CI systems
+./akca -u https://staging.example.com \
+  -f sarif -o results.sarif -q
 ```
 
-Contributions should include focused tests and should not weaken proof requirements merely to increase finding counts.
+Run `akca --help` for the complete CLI reference.
 
-## Roadmap
+## Scan profiles
 
-The main version is still being developed. Current priorities include:
+Profiles are explicit user choices. They select a focused module set; AKCA does
+not remove individual capabilities merely because a WAF was detected.
 
-- broader vulnerability-class parity;
-- stronger false-positive controls and negative-control coverage;
-- more reliable browser and JavaScript analysis;
-- authenticated and multi-role workflow testing;
-- richer API, GraphQL, WebSocket, and modern application coverage;
-- safer state-changing request policies;
-- better scan recovery, observability, and large-target performance;
-- reproducible test labs and transparent quality gates;
-- improved evidence, remediation guidance, and integrations.
+| Profile | Focus |
+| --- | --- |
+| `full` | Complete active and passive assessment |
+| `sql` | SQL and NoSQL injection |
+| `xss` | Reflected, DOM, stored and blind XSS; client-side injection |
+| `api` | REST/JSON, BOLA/IDOR, BFLA, JWT, OAuth and mass assignment |
+| `graphql` | Introspection, schema and GraphQL operation security |
+| `rce` | Command injection, SSTI and unsafe deserialization |
+| `ssrf` | SSRF, XXE and correlated out-of-band checks |
+| `auth` | Authentication, authorization, CSRF, cookie and session checks |
+| `passive` | Non-mutating metadata, TLS, header, secret and exposure analysis |
+| `fuzz` | Path, archive, source disclosure and infrastructure discovery |
 
-Roadmap priorities may change based on reproducible community feedback.
+## API definition support
+
+AKCA turns imported operations into the same normalized endpoint inventory used
+by crawling. Typed query, path, header and JSON-body parameters become candidate
+injection points while preserving the operation's real HTTP method.
+
+By default, crawling stays inside the explicitly configured target hosts. Linked
+API/service subdomains such as `api.example.com`, `backend.example.com`, or
+`graphql.example.com` are not auto-added to scope unless you pass
+`--include-linked-api-subdomains` or include those hosts explicitly, for example
+with a wildcard scope.
+
+| Format | Highlights |
+| --- | --- |
+| OpenAPI / Swagger | OpenAPI 3.0/3.1 request bodies, local and bundled external `$ref` schemas |
+| RAML 1.0 | Resources, methods, typed bodies, nested routes and bundled `!include` files |
+| Postman | Collections plus environment variable expansion |
+| HAR | Captured request methods, URLs and parameters |
+| GraphQL | Typed variables and valid selection templates |
+| WSDL | SOAP service and operation discovery |
+| protobuf | gRPC service and RPC discovery |
+| AsyncAPI | Publish/subscribe channel inventory |
+
+ZIP imports enforce path traversal, entry count, per-file size, and total
+expanded-size limits before resolving bundled definitions.
+
+## Reports and evidence
+
+AKCA exports:
+
+- Interactive, standalone HTML
+- Stable JSON with an explicit schema version
+- Developer-oriented Markdown
+- Customizable CSV
+- SARIF 2.1.0 for code-scanning pipelines
+
+Reports can include raw HTTP evidence, payloads, response markers, proof-policy
+status, typed observations, reproduction commands, confidence explanations,
+CWE mappings, and OWASP Top 10:2025 categories. Credentials, cookies, tokens,
+and authorization headers can be redacted before storage or export.
+
+Replay a stored finding independently:
+
+```bash
+./akca replay --finding 42
+```
+
+## CI example
+
+```yaml
+- name: Build AKCA
+  working-directory: engine
+  run: go build -buildvcs=false -trimpath -o ../akca ./cmd/akca
+
+- name: Scan staging
+  run: |
+    ./akca -u "${{ secrets.STAGING_URL }}" \
+      -m sql,xss,api \
+      --time-budget 30m \
+      --request-budget 5000 \
+      -f sarif -o results.sarif -q
+
+- name: Upload SARIF
+  uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: results.sarif
+```
+
+Never place credentials directly in a workflow file. Use repository or
+environment secrets and scan only an approved staging target.
+
+## Architecture
+
+The engine lives under `engine/` and is split into focused internal packages:
+
+- `app`: scan lifecycle and phase orchestration
+- `crawler` and `browserpool`: HTTP/browser discovery and runtime capture
+- `apinative`: API definition import and request materialization
+- `reflection` and `payloadgen`: context analysis and payload synthesis
+- `modules`: vulnerability checks and scheduling
+- `verification`: evidence contracts and proof-policy enforcement
+- `oast`: callback registration, polling and correlation
+- `storage`: SQLite evidence, checkpoint and scan state
+- `report`: HTML, JSON, Markdown, CSV and SARIF generation
+
+See [engine/docs/ARCHITECTURE.md](engine/docs/ARCHITECTURE.md) and
+[engine/docs/FALSE_POSITIVE_AUDIT.md](engine/docs/FALSE_POSITIVE_AUDIT.md) for
+the deeper technical model.
+
+## Development
+
+```bash
+cd engine
+go test ./... -count=1
+go vet ./...
+go build -buildvcs=false ./cmd/akca
+```
+
+The repository also includes a deterministic quality benchmark:
+
+```bash
+cd engine
+go run ./cmd/akca benchmark --strict
+```
+
+Recent scanner hardening focused on preserving capability while reducing wasted
+work: request-smuggling probes are route-scoped and cache protocol controls,
+secret exposure is treated as passive content evidence, CRLF no longer skips
+common parameter names, and linked API subdomain expansion is opt-in.
+
+Before opening a pull request, read [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Project status
 
-Akca is **demo software**, not a stable production release. Interfaces, flags, storage formats, browser behavior, modules, payloads, and report schemas may change without backward compatibility until the first stable release.
+AKCA is under active development. APIs, report schemas, module behavior, and CLI
+flags may evolve before `v1.0.0`. Bug reports, test fixtures, documentation fixes,
+and carefully scoped detection improvements are welcome.
 
-- Repository: [github.com/akha-security/akca](https://github.com/akha-security/akca)
-- Issues and feedback: [github.com/akha-security/akca/issues](https://github.com/akha-security/akca/issues)
-- Maintainer: [@akha-security](https://github.com/akha-security)
+## Security and responsible use
 
-If Akca reports something wrong, misses something important, fails in your environment, or lacks a capability you need, please report it. Reproducible feedback is one of the most valuable contributions you can make to the project.
+Only scan assets you own or have explicit written permission to assess.
+Aggressive modules may change application state when an operator supplies the
+required state/cleanup policies. Start with a staging environment and an agreed
+request budget.
+
+To report a vulnerability in AKCA itself, follow [SECURITY.md](SECURITY.md).
+Do not publish target credentials, customer data, or third-party vulnerability
+details in a public GitHub issue.
+
+## License
+
+Copyright 2026 AKHA Security contributors.
+
+Licensed under the [Apache License 2.0](LICENSE).
+
+---
+
+If AKCA helps your security workflow, consider starring the repository and
+sharing reproducible test cases: [github.com/akha-security/akca](https://github.com/akha-security/akca).

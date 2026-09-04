@@ -1,6 +1,9 @@
 package storage
 
-import "testing"
+import (
+	"net/http"
+	"testing"
+)
 
 func TestSelectEndpointsBalanced(t *testing.T) {
 	all := []DiscoveryEndpoint{
@@ -28,5 +31,47 @@ func TestEndpointProbeScorePrefersAPI(t *testing.T) {
 	static := DiscoveryEndpoint{URL: "https://example.com/static/app.js", Method: "GET"}
 	if endpointProbeScore(api) <= endpointProbeScore(static) {
 		t.Fatalf("api=%d static=%d", endpointProbeScore(api), endpointProbeScore(static))
+	}
+}
+
+func TestListDiscoveryEndpointsPrioritizesWriteMethodsBeforeQueryGET(t *testing.T) {
+	db, err := Open(t.TempDir() + "/endpoint-order.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureScan("scan-order"); err != nil {
+		t.Fatal(err)
+	}
+	for _, ep := range []map[string]interface{}{
+		{
+			"url": "https://example.com/search?q=one", "method": http.MethodGet,
+			"normalized_url": "https://example.com/search?q=one", "source": "test",
+		},
+		{
+			"url": "https://example.com/api/orders", "method": http.MethodPost,
+			"normalized_url": "https://example.com/api/orders", "source": "test",
+			"request_template": map[string]interface{}{
+				"method": http.MethodPost, "url": "https://example.com/api/orders",
+				"body": `{"item_id":1}`, "content_type": "application/json",
+			},
+		},
+	} {
+		if err := db.SaveDiscoveredEndpoint("scan-order", ep); err != nil {
+			t.Fatal(err)
+		}
+	}
+	endpoints, err := db.ListDiscoveryEndpoints("scan-order", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(endpoints) != 2 {
+		t.Fatalf("endpoints=%d want 2", len(endpoints))
+	}
+	if endpoints[0].Method != http.MethodPost || endpoints[0].URL != "https://example.com/api/orders" {
+		t.Fatalf("POST API endpoint should be first, got %+v", endpoints)
 	}
 }

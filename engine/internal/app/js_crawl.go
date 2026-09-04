@@ -10,10 +10,7 @@ import (
 // runJSDiscoveredCrawlPhase crawls API/endpoint URLs extracted from JavaScript
 // bundles so authenticated and linked APIs enter the endpoint graph.
 func (e *Engine) runJSDiscoveredCrawlPhase(ctx context.Context) error {
-	limit := 400
-	if e.session.Config.MaxPages > 0 && e.session.Config.MaxPages < limit {
-		limit = e.session.Config.MaxPages
-	}
+	limit := e.session.Config.EffectiveMaxPages()
 	jsEps, err := e.db.ListJSDiscoveredAPIEndpoints(e.session.ID, limit)
 	if err != nil || len(jsEps) == 0 {
 		return err

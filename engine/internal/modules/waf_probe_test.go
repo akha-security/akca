@@ -69,6 +69,9 @@ func TestWAFHeadersAreLimitedToHighAndCriticalModules(t *testing.T) {
 	if got := client.headers[len(client.headers)-1]["X-Akca-Line-Fold"]; got != "" {
 		t.Fatalf("open_redirect is medium and must not receive WAF evasion header, got %q", got)
 	}
+	if got := r.ProbeCount(); got != 2 {
+		t.Fatalf("payload probe count = %d, want 2", got)
+	}
 }
 
 func TestModuleAllowsHeaderPayloadsUsesBaseSeverity(t *testing.T) {

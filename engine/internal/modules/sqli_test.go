@@ -19,11 +19,15 @@ import (
 
 type sqliTimingRecordClient struct {
 	durations map[string]time.Duration
+	calls     map[string]int
 }
 
 func (c *sqliTimingRecordClient) Do(_ context.Context, method, rawURL string, _ []byte, headers map[string]string) (httpclient.RequestResponse, error) {
 	u, _ := url.Parse(rawURL)
 	payload := u.Query().Get("q")
+	if c.calls != nil {
+		c.calls[payload]++
+	}
 	return httpclient.RequestResponse{
 		Request: httpclient.RequestRecord{Method: method, URL: rawURL, Headers: headers},
 		Response: httpclient.ResponseRecord{
@@ -31,6 +35,23 @@ func (c *sqliTimingRecordClient) Do(_ context.Context, method, rawURL string, _ 
 			Headers: map[string]string{"Content-Type": "text/html"},
 		},
 	}, nil
+}
+
+func TestSQLiBaselineAndTimingSharedAcrossQueryParams(t *testing.T) {
+	c := &groupBClient{responses: map[string]string{"__default__": "stable response"}}
+	r := groupBRunner(t, c)
+	first := ScanTarget{EndpointURL: "http://example.com/search?id=1&q=test", Method: "GET", Parameter: "q", Location: "query"}
+	second := first
+	second.Parameter = "id"
+	if _, timingBase, ok, reason := r.stableSQLiBaselineAndTiming(context.Background(), first); !ok || len(timingBase.Samples) != 5 {
+		t.Fatalf("first baseline failed: ok=%v samples=%d reason=%q", ok, len(timingBase.Samples), reason)
+	}
+	if _, timingBase, ok, reason := r.stableSQLiBaselineAndTiming(context.Background(), second); !ok || len(timingBase.Samples) != 5 {
+		t.Fatalf("cached baseline failed: ok=%v samples=%d reason=%q", ok, len(timingBase.Samples), reason)
+	}
+	if c.calls != 5 {
+		t.Fatalf("query params on same request shape should share SQLi baseline, got %d calls", c.calls)
+	}
 }
 
 func TestBooleanSQLiConfirmedRequiresFalseDelta(t *testing.T) {
@@ -124,7 +145,7 @@ func TestSQLiAdvancedSurfaceKeepsHeaderProbingEnabled(t *testing.T) {
 				Tech:     payloadgen.TechHints{Database: "mssql"},
 			},
 		}
-		if !sqliAdvancedSurfaceReady(target, payloads) {
+		if !sqliAdvancedSurfaceReady(target, payloads, config.DefaultScanConfig()) {
 			t.Fatalf("header %q must remain eligible for advanced SQLi probes", header)
 		}
 	}
@@ -156,17 +177,19 @@ func TestRunSQLiDoesNotReportStablePagesOnHeaderPayloads(t *testing.T) {
 
 func TestSQLiAdvancedSurfaceRequiresSemanticParameterDespiteDatabaseFingerprint(t *testing.T) {
 	payloads := []payloadgen.Payload{{VulnClass: "sqli", Value: "' OR 1=1--"}}
-	unrelated := ScanTarget{
+	target := ScanTarget{
 		Parameter: "tracking_nonce", Location: "query",
 		Payloads: payloadgen.GenerationResult{Tech: payloadgen.TechHints{Database: "postgres"}},
 	}
-	if sqliAdvancedSurfaceReady(unrelated, payloads) {
-		t.Fatal("global database fingerprint must not enable blind SQLi on an unrelated parameter")
+	cfg := config.DefaultScanConfig()
+	cfg.AllowedVulnerabilityClasses = []string{"sqli", "xss"}
+	if !sqliAdvancedSurfaceReady(target, payloads, cfg) {
+		t.Fatal("all discovered parameters must be eligible for advanced SQLi probes")
 	}
-	relevant := unrelated
-	relevant.Parameter = "product_id"
-	if !sqliAdvancedSurfaceReady(relevant, nil) {
-		t.Fatal("dynamic SQLi probes must not depend on persisted generated payloads")
+	emptyParam := target
+	emptyParam.Parameter = ""
+	if sqliAdvancedSurfaceReady(emptyParam, nil, cfg) {
+		t.Fatal("empty parameter must not be eligible for advanced SQLi probes")
 	}
 }
 
@@ -376,10 +399,37 @@ func TestSQLiOOBPendingFinding(t *testing.T) {
 		cfg,
 	)
 	target := ScanTarget{EndpointURL: "http://example.com/search", Method: "GET", Parameter: "q"}
-	baseline, _ := r.probe(context.Background(), target, "akca-sqli-base")
-	findings := r.runSQLiOOB(context.Background(), target, baseline)
+	findings := r.runSQLiOOB(context.Background(), target)
 	if len(findings) != 0 {
 		t.Fatalf("expected no OOB SQLi finding before OAST callback, got %d", len(findings))
+	}
+}
+
+func TestSQLiOOBRunsBeforeUnstableBaseline(t *testing.T) {
+	oastURL := "http://abc123.oast.test"
+	c := &dynamicBaselineClient{}
+	cfg := config.DefaultScanConfig()
+	cfg.EnableOAST = true
+	var coverageEvents int
+	r := NewRunner(
+		"scan-sqli-oob-baseline", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil),
+		&stubOASTClient{url: oastURL},
+		func(eventType, _ string, payload map[string]interface{}) error {
+			if eventType == "sqli_oast_probe_coverage" {
+				if sent, _ := payload["probes_sent"].(int); sent > 0 {
+					coverageEvents++
+				}
+			}
+			return nil
+		},
+		cfg,
+	)
+	target := ScanTarget{EndpointURL: "http://example.com/search?q=test", Method: "GET", Parameter: "q", Location: "query"}
+	if findings := r.runSQLi(context.Background(), target); len(findings) != 0 {
+		t.Fatalf("unstable baseline should not produce SQLi findings without callback, got %d", len(findings))
+	}
+	if coverageEvents != 1 {
+		t.Fatalf("expected SQLi OOB coverage before baseline skip, got %d events", coverageEvents)
 	}
 }
 
@@ -395,6 +445,104 @@ func TestSQLiTimingWithZeroControl(t *testing.T) {
 	ok, _ = timingblind.VerifyProbeWithControl(int64(b.AvgMs+200), zero, b, sleep)
 	if ok {
 		t.Fatal("expected insufficient delay to fail zero-control verification")
+	}
+}
+
+func TestSQLiDynamicTimingPayloadsIncludeCrossDBFallbacks(t *testing.T) {
+	payloads := sqliDynamicTimingPayloads(5, "")
+	joined := ""
+	for _, p := range payloads {
+		joined += strings.ToLower(p.Value) + "\n"
+	}
+	for _, want := range []string{"sleep(5)", "pg_sleep(5)", "waitfor delay"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("dynamic timing payloads missing %q in:\n%s", want, joined)
+		}
+	}
+}
+
+func TestSQLiDynamicTimingPayloadsPrioritizeOracleHint(t *testing.T) {
+	payloads := sqliDynamicTimingPayloads(5, "oracle")
+	if len(payloads) == 0 || !strings.Contains(strings.ToLower(payloads[0].Value), "dbms_lock.sleep") {
+		t.Fatalf("oracle hint should prioritize DBMS_LOCK payload, got %+v", payloads)
+	}
+}
+
+func TestSQLiClassicFallbackRunsWithoutGeneratedPayloads(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	payloads := appendSQLiClassicFallbacks(nil, cfg)
+	if len(payloads) != 1 || payloads[0].Value != `'` || payloads[0].ExpectedSignal != "sql_error" {
+		t.Fatalf("fast scan must retain a classic error-based SQLi probe, got %+v", payloads)
+	}
+
+	existing := []payloadgen.Payload{defaultPayload("sqli", "existing_error", `')`, "sql_error")}
+	got := appendSQLiClassicFallbacks(existing, cfg)
+	if len(got) != 1 || got[0].Variant != "existing_error" {
+		t.Fatalf("existing classic SQLi payload must not be duplicated, got %+v", got)
+	}
+}
+
+func TestSQLiTimingCoverageRunsBeforeUnstableBaseline(t *testing.T) {
+	c := &dynamicBaselineClient{}
+	cfg := config.DefaultScanConfig()
+	var coverageEvents int
+	var nonTimingCoverageEvents int
+	r := NewRunner("scan-sqli-time-baseline", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+		func(eventType, _ string, payload map[string]interface{}) error {
+			if eventType == "sqli_timing_probe_coverage" {
+				if delivered, _ := payload["payloads_delivered"].(int); delivered > 0 {
+					coverageEvents++
+				}
+			}
+			if eventType == "sqli_non_timing_probe_coverage" {
+				errorDelivered, _ := payload["error_delivered"].(int)
+				booleanDelivered, _ := payload["boolean_delivered"].(int)
+				unionDelivered, _ := payload["union_delivered"].(int)
+				if errorDelivered > 0 && booleanDelivered == 2 && unionDelivered > 0 {
+					nonTimingCoverageEvents++
+				}
+			}
+			return nil
+		}, cfg)
+	target := ScanTarget{EndpointURL: "http://example.com/search?q=test", Method: "GET", Parameter: "q", Location: "query"}
+	if findings := r.runSQLi(context.Background(), target); len(findings) != 0 {
+		t.Fatalf("unstable baseline should not produce SQLi findings, got %d", len(findings))
+	}
+	if coverageEvents == 0 {
+		t.Fatal("expected SQLi timing coverage event before baseline skip")
+	}
+	if nonTimingCoverageEvents == 0 {
+		t.Fatal("expected error, boolean and UNION probes before baseline skip")
+	}
+}
+
+func TestSQLiBooleanAndUnionPathsReportDeliveredRequests(t *testing.T) {
+	c := &groupBClient{responses: map[string]string{"__default__": "stable response"}}
+	cfg := config.DefaultScanConfig()
+	booleanDelivered := 0
+	unionDelivered := 0
+	r := NewRunner("scan-sqli-coverage", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+		func(eventType, _ string, payload map[string]interface{}) error {
+			switch eventType {
+			case "sqli_boolean_probe_coverage":
+				booleanDelivered, _ = payload["requests_delivered"].(int)
+			case "sqli_union_probe_coverage":
+				unionDelivered, _ = payload["requests_delivered"].(int)
+			}
+			return nil
+		}, cfg)
+	target := ScanTarget{EndpointURL: "http://example.com/search?q=test", Method: "GET", Parameter: "q", Location: "query"}
+	baseline, err := r.probeForModule(context.Background(), "sqli", target, "akca-sqli-base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r.runBooleanSQLi(context.Background(), target, baseline)
+	_ = r.discoverSQLiColumnCount(context.Background(), target, baseline)
+	if booleanDelivered == 0 || unionDelivered == 0 {
+		t.Fatalf("SQLi paths did not deliver probes: boolean=%d union=%d", booleanDelivered, unionDelivered)
+	}
+	if unionDelivered > 20 {
+		t.Fatalf("stable UNION discovery should avoid linear ORDER BY probing, delivered=%d", unionDelivered)
 	}
 }
 
@@ -419,6 +567,24 @@ func TestXORTimingRequiresMatchedZeroAndFalsePredicateControls(t *testing.T) {
 	r = groupBRunner(t, wafDelayClient)
 	if ok, _, _, _ := r.sqliTimingVerified(context.Background(), target, payload, "mysql", baseline, 6); ok {
 		t.Fatal("payload-shape/WAF delay must fail when false XOR predicate is also slow")
+	}
+}
+
+func TestSQLiTimingNegativeUsesSingleScout(t *testing.T) {
+	payload := `0'XOR(if(now()=sysdate(),sleep(6),0))XOR'Z`
+	zero := timingblind.SQLiMatchedZeroDelayPayload(payload, "mysql").Value
+	baseline := timingblind.Calibrate([]int64{110, 120, 125, 115, 130})
+	target := ScanTarget{EndpointURL: "http://example.com/search", Method: "GET", Parameter: "q", Location: "query"}
+	client := &sqliTimingRecordClient{
+		durations: map[string]time.Duration{payload: 120 * time.Millisecond, zero: 118 * time.Millisecond},
+		calls:     map[string]int{},
+	}
+	r := groupBRunner(t, client)
+	if ok, _, _, _ := r.sqliTimingVerified(context.Background(), target, payload, "mysql", baseline, 6); ok {
+		t.Fatal("non-delayed timing payload must not verify")
+	}
+	if client.calls[payload] != 1 || client.calls[zero] != 0 {
+		t.Fatalf("negative timing probe should stop after one scout, calls=%+v", client.calls)
 	}
 }
 
@@ -500,5 +666,77 @@ func TestPickSQLiAttemptPrefersDiff(t *testing.T) {
 	got := pickSQLiAttempt(attempts, base, target)
 	if got.RR.Response.Body != "changed-content-here" {
 		t.Fatalf("expected attempt with body diff, got %q", got.RR.Response.Body)
+	}
+}
+
+// dynamicBaselineClient returns a different body on every call, simulating a
+// page with CSRF tokens, timestamps or ads that change between requests.
+type dynamicBaselineClient struct {
+	callCount int
+}
+
+func (c *dynamicBaselineClient) Do(_ context.Context, method, rawURL string, _ []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	c.callCount++
+	// Produce completely distinct content per call so body diff ratio > 0.35
+	chars := []string{"A", "B", "C", "D", "E"}
+	char := chars[(c.callCount-1)%len(chars)]
+	body := strings.Repeat(char, 200) + fmt.Sprintf(" call-%d", c.callCount)
+	return httpclient.RequestResponse{
+		Request:  httpclient.RequestRecord{Method: method, URL: rawURL, Headers: headers},
+		Response: httpclient.ResponseRecord{StatusCode: 200, Body: body, Headers: map[string]string{"Content-Type": "text/html"}},
+	}, nil
+}
+
+func TestSQLiEmitsSkipOnUnstableBaseline(t *testing.T) {
+	c := &dynamicBaselineClient{}
+	cfg := config.DefaultScanConfig()
+	var emitted []map[string]interface{}
+	r := NewRunner("scan-baseline", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+		func(eventType, _ string, payload map[string]interface{}) error {
+			if eventType == "plugin_skipped" {
+				emitted = append(emitted, payload)
+			}
+			return nil
+		}, cfg)
+	target := ScanTarget{EndpointURL: "http://example.com/search?q=test", Method: "GET", Parameter: "q", Location: "query"}
+	findings := r.runSQLi(context.Background(), target)
+	if len(findings) != 0 {
+		t.Fatalf("unstable baseline should produce no findings, got %d", len(findings))
+	}
+	if len(emitted) == 0 {
+		t.Fatal("expected a plugin_skipped event when baseline is unstable, got none")
+	}
+	reason, _ := emitted[0]["reason"].(string)
+	if !strings.Contains(reason, "unstable baseline") && !strings.Contains(reason, "baseline probe failed") {
+		t.Fatalf("skip reason should mention unstable baseline, got: %q", reason)
+	}
+	module, _ := emitted[0]["module"].(string)
+	if module != "sqli" {
+		t.Fatalf("expected module=sqli in skip event, got %q", module)
+	}
+}
+
+func TestSQLiAdvancedRunsForNonAllowlistParam(t *testing.T) {
+	// A parameter named "data" (not in the original allowlist) with reflection
+	// should still trigger advanced probes (boolean blind, union, etc.)
+	target := ScanTarget{
+		EndpointURL: "http://example.com/api",
+		Parameter:   "data",
+		Location:    "query",
+		Profile:     reflection.ReflectionProfile{ReflectionKind: "body_text"},
+	}
+	cfg := config.DefaultScanConfig()
+	payloads := []payloadgen.Payload{{VulnClass: "sqli", Value: "' OR 1=1--"}}
+	if !sqliAdvancedSurfaceReady(target, payloads, cfg) {
+		t.Fatal("parameter with reflection should be allowed for advanced SQLi probes")
+	}
+	// JSON body parameter should also qualify
+	jsonTarget := ScanTarget{
+		EndpointURL: "http://example.com/api",
+		Parameter:   "custom_field",
+		Location:    "json",
+	}
+	if !sqliAdvancedSurfaceReady(jsonTarget, nil, cfg) {
+		t.Fatal("JSON body parameter should be allowed for advanced SQLi probes")
 	}
 }

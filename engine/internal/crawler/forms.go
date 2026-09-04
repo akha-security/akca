@@ -33,9 +33,10 @@ func extractForms(baseURL, rawHTML string) []DiscoveredEndpoint {
 				default:
 					method = http.MethodGet
 				}
+				enctype := strings.ToLower(strings.TrimSpace(nodeAttr(n, "enctype")))
 				fields := url.Values{}
 				collectFormControls(n, fields)
-				tmpl := buildFormRequestTemplate(resolved, method, fields)
+				tmpl := buildFormRequestTemplate(resolved, method, enctype, fields)
 				out = append(out, DiscoveredEndpoint{URL: resolved, Method: method, Source: SourceForm, Confidence: 0.98, WhyDiscovered: "parsed html form action", RequestTemplate: tmpl})
 			}
 		}
@@ -58,15 +59,19 @@ func collectFormControls(form *html.Node, values url.Values) {
 				if inputType == "" {
 					inputType = "text"
 				}
-				if name != "" && inputType != "submit" && inputType != "button" && inputType != "image" && inputType != "reset" && inputType != "file" {
+				if name != "" && inputType != "submit" && inputType != "button" && inputType != "image" && inputType != "reset" {
 					if (inputType == "checkbox" || inputType == "radio") && nodeAttr(n, "checked") == "" {
 						break
 					}
-					addFormValue(values, name, nodeAttr(n, "value"))
+					if inputType == "file" {
+						addFormValue(values, name, "test.png")
+					} else {
+						addFormValue(values, name, smartFormValue(name, inputType, nodeAttr(n, "value")))
+					}
 				}
 			case "textarea":
 				if name != "" {
-					addFormValue(values, name, nodeTextContent(n))
+					addFormValue(values, name, smartFormValue(name, "textarea", nodeTextContent(n)))
 				}
 			case "select":
 				if name != "" {
@@ -110,9 +115,39 @@ func nodeTextContent(n *html.Node) string {
 
 func addFormValue(values url.Values, name, value string) {
 	if strings.TrimSpace(value) == "" {
-		value = "akca"
+		value = smartFormValue(name, "", value)
 	}
 	values.Add(name, value)
+}
+
+func smartFormValue(name, inputType, defaultValue string) string {
+	if strings.TrimSpace(defaultValue) != "" {
+		return defaultValue
+	}
+	lowerName := strings.ToLower(name)
+	lowerType := strings.ToLower(inputType)
+
+	switch {
+	case lowerType == "email" || strings.Contains(lowerName, "email") || strings.Contains(lowerName, "mail"):
+		return "test@example.com"
+	case lowerType == "number" || lowerType == "range" || strings.Contains(lowerName, "qty") ||
+		strings.Contains(lowerName, "quantity") || strings.Contains(lowerName, "age") || lowerName == "id" || strings.HasSuffix(lowerName, "_id"):
+		return "1"
+	case lowerType == "date" || lowerType == "datetime-local" || strings.Contains(lowerName, "date") || strings.Contains(lowerName, "time"):
+		return "2026-01-01"
+	case lowerType == "tel" || strings.Contains(lowerName, "phone") || strings.Contains(lowerName, "tel") || strings.Contains(lowerName, "mobile"):
+		return "+15550199"
+	case lowerType == "url" || strings.Contains(lowerName, "url") || strings.Contains(lowerName, "site") || strings.Contains(lowerName, "link"):
+		return "http://example.com"
+	case strings.Contains(lowerName, "user") || strings.Contains(lowerName, "login") || strings.Contains(lowerName, "author"):
+		return "admin"
+	case strings.Contains(lowerName, "pass") || strings.Contains(lowerName, "secret"):
+		return "Password123!"
+	case strings.Contains(lowerName, "search") || strings.Contains(lowerName, "query") || lowerName == "q":
+		return "test"
+	default:
+		return "akca"
+	}
 }
 
 func addSelectValues(values url.Values, name string, selectNode *html.Node) {
@@ -135,7 +170,7 @@ func addSelectValues(values url.Values, name string, selectNode *html.Node) {
 	}
 }
 
-func buildFormRequestTemplate(rawURL, method string, fields url.Values) *RequestTemplate {
+func buildFormRequestTemplate(rawURL, method, enctype string, fields url.Values) *RequestTemplate {
 	tmpl := &RequestTemplate{Method: method, URL: rawURL}
 	if len(fields) == 0 {
 		return tmpl
@@ -157,7 +192,13 @@ func buildFormRequestTemplate(rawURL, method string, fields url.Values) *Request
 		return tmpl
 	}
 	tmpl.Body = encoded
-	tmpl.ContentType = "application/x-www-form-urlencoded"
+	if strings.Contains(enctype, "multipart") {
+		tmpl.ContentType = "multipart/form-data"
+	} else if strings.Contains(enctype, "json") {
+		tmpl.ContentType = "application/json"
+	} else {
+		tmpl.ContentType = "application/x-www-form-urlencoded"
+	}
 	tmpl.Headers = map[string]string{"Content-Type": tmpl.ContentType}
 	return tmpl
 }

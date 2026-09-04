@@ -33,10 +33,22 @@ const (
 	SourceEventSource DiscoverySource = "event_source"
 )
 
+type EndpointKind string
+
+const (
+	KindAPI       EndpointKind = "api"
+	KindSPARoute  EndpointKind = "spa_route"
+	KindStatic    EndpointKind = "static"
+	KindParamHint EndpointKind = "param_hint"
+	KindDocument  EndpointKind = "document"
+	KindUnknown   EndpointKind = "unknown"
+)
+
 type DiscoveredEndpoint struct {
 	URL             string           `json:"url"`
 	Method          string           `json:"method"`
 	NormalizedURL   string           `json:"normalized_url"`
+	Kind            EndpointKind     `json:"kind,omitempty"`
 	Source          DiscoverySource  `json:"source"`
 	Confidence      float64          `json:"confidence"`
 	Depth           int              `json:"depth"`

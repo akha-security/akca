@@ -2,124 +2,105 @@ package config
 
 import "time"
 
-const (
-	defaultMaxEndpointsCeiling = 50_000
-	unlimitedMaxPagesCeiling   = 10_000
-)
-
-// EffectiveMaxPages returns a safe crawl page cap (MaxPages 0 is not unlimited).
+// EffectiveMaxPages returns the explicit crawl page cap. Zero means unlimited.
 func (c ScanConfig) EffectiveMaxPages() int {
-	if c.MaxPages > 0 {
-		if c.MaxPages > unlimitedMaxPagesCeiling {
-			return unlimitedMaxPagesCeiling
-		}
-		return c.MaxPages
-	}
-	switch c.ScanIntensity {
-	case "fast":
-		return 2000
-	case "stealth":
-		return 300
-	default:
-		return 1000
-	}
+	return c.MaxPages
 }
 
-// MaxEndpointsLimit caps persisted/discovered endpoints per scan.
+// EffectiveCrawlerBudget returns the max requests the crawler may make during discovery.
+// It ensures the crawler leaves room for parameter discovery, reflection, and vuln scanning.
+func (c ScanConfig) EffectiveCrawlerBudget() int {
+	if c.CrawlerRequestBudget > 0 {
+		return c.CrawlerRequestBudget
+	}
+	if c.RequestBudget <= 0 {
+		return 0
+	}
+	budget := int(float64(c.RequestBudget) * 0.35)
+	if budget < 1000 {
+		budget = 1000
+	}
+	return budget
+}
+
+// MaxEndpointsLimit returns the explicit endpoint cap. Zero means unlimited.
 func (c ScanConfig) MaxEndpointsLimit() int {
-	if c.MaxEndpoints > 0 {
-		return c.MaxEndpoints
-	}
-	return defaultMaxEndpointsCeiling
+	return c.MaxEndpoints
 }
 
-// ModuleTargetLimit returns how many parameter targets vuln modules may load.
+// ModuleTargetLimit is deliberately unlimited. Discovery is capped separately,
+// but every URL+method+parameter surface found within that cap must reach the
+// vulnerability modules.
 func (c ScanConfig) ModuleTargetLimit() int {
-	pages := c.EffectiveMaxPages()
-	if pages > 2000 {
-		return 2000
-	}
-	if pages > 0 {
-		return pages
-	}
-	switch c.ScanIntensity {
-	case "fast":
-		return 1000
-	case "stealth":
-		return 100
-	default:
-		return 500
-	}
+	return 0
 }
 
-// ParameterDiscoveryEndpointLimit caps endpoints scanned for hidden parameters.
+// ParameterDiscoveryEndpointLimit follows the page cap so every crawled
+// endpoint participates in hidden-parameter discovery. Zero means unlimited.
 func (c ScanConfig) ParameterDiscoveryEndpointLimit() int {
-	pages := c.EffectiveMaxPages()
-	limit := 100
-	if pages > 0 {
-		limit = pages / 2
-		if limit < 80 {
-			limit = 80
-		}
-		if limit > 600 {
-			limit = 600
-		}
-	} else {
-		switch c.ScanIntensity {
-		case "fast":
-			limit = 200
-		case "stealth":
-			limit = 40
-		default:
-			limit = 100
-		}
-	}
-	return limit
+	return c.EffectiveMaxPages()
 }
 
-// ParameterMaxProbes returns differential probes per endpoint during param discovery.
+// ParameterMaxProbes returns differential probes per endpoint during parameter
+// discovery. Hidden-parameter probing is multiplicative (endpoints x names), so
+// leaving this unlimited can turn an otherwise small scan into hours of traffic.
 func (c ScanConfig) ParameterMaxProbes() int {
 	switch c.ScanIntensity {
-	case "fast":
-		return 60
 	case "stealth":
-		return 30
-	default:
-		return 80
+		return 60
+	case "normal", "":
+		return 320
+	default: // fast
+		return 96
 	}
 }
 
 // ParameterWordlistCap limits active probe names per endpoint (top-priority subset).
 func (c ScanConfig) ParameterWordlistCap() int {
 	switch c.ScanIntensity {
-	case "fast":
-		return 100
 	case "stealth":
-		return 50
-	default:
-		return 120
+		return 40
+	case "normal", "":
+		return 160
+	default: // fast
+		return 64
+	}
+}
+
+// ParameterTransferMaxProbes caps the global cross-endpoint parameter transfer
+// pass that runs before per-endpoint discovery.
+func (c ScanConfig) ParameterTransferMaxProbes() int {
+	switch c.ScanIntensity {
+	case "stealth":
+		return 100
+	case "normal", "":
+		return 1000
+	default: // fast
+		return 256
 	}
 }
 
 // ParameterDiscoveryWorkers returns concurrent endpoint workers for param discovery.
 func (c ScanConfig) ParameterDiscoveryWorkers() int {
+	workers := 8
 	switch c.ScanIntensity {
 	case "fast":
-		return 12
+		workers = 12
 	case "stealth":
-		return 2
-	default:
-		return 8
+		workers = 2
 	}
+	if c.MaxConcurrency > 0 && workers > c.MaxConcurrency {
+		workers = c.MaxConcurrency
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	return workers
 }
 
 // ReflectionProfileLimit caps baseline profiles loaded for module targeting.
 func (c ScanConfig) ReflectionProfileLimit() int {
-	limit := c.ModuleTargetLimit()
-	if limit > 1000 {
-		return 1000
-	}
-	return limit
+	return c.ModuleTargetLimit()
 }
 
 // FullModuleCoverage is true when all vulnerability modules are enabled.

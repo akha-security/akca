@@ -1,8 +1,6 @@
 package crawler
 
 import (
-	"context"
-	"net/http"
 	"strings"
 )
 
@@ -38,24 +36,3 @@ func extractLinkHeaderURLs(baseURL string, headers map[string]string) []string {
 	return out
 }
 
-// probeSecurityHeaders sends lightweight variant requests with common override
-// headers used in host-header / cache-poison testing during crawl.
-func (c *Crawler) probeSecurityHeaders(ctx context.Context, rawURL, method string) {
-	if method == "" {
-		method = http.MethodGet
-	}
-	probes := []map[string]string{
-		{"X-Forwarded-Host": "evil.akca-probe.local"},
-		{"X-Original-URL": "/admin"},
-		{"X-Rewrite-URL": "/admin"},
-	}
-	for _, hdrs := range probes {
-		if ctx.Err() != nil {
-			return
-		}
-		_, _ = c.client.Do(ctx, method, rawURL, nil, hdrs)
-		c.mu.Lock()
-		c.requestsMade++
-		c.mu.Unlock()
-	}
-}

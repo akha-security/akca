@@ -15,17 +15,19 @@ import (
 )
 
 func (r *Runner) runRaceConditionProof(ctx context.Context, target ScanTarget) []ModuleFinding {
-	if !r.cfg.AllowsModule("race_condition") {
+	if !r.cfg.AllowsModule("race_condition") && !r.cfg.AllowsModule("race_condition_sync") {
 		r.emitSkip("race_condition", target, "disabled by scan config")
 		return nil
 	}
 	policy, ok := r.racePolicy(target)
 	if !ok {
+		r.emitStatefulProofGap("race_condition", target, "recorded transaction-ID and cleanup policy is required")
 		r.emitSkip("race_condition", target, "recorded transaction-ID and cleanup policy is required")
 		return nil
 	}
 	client, ok := r.client.(profiledHTTPDoer)
 	if !ok {
+		r.emitStatefulProofGap("race_condition", target, "isolated authenticated requests are unavailable")
 		r.emitSkip("race_condition", target, "isolated authenticated requests are unavailable")
 		return nil
 	}
@@ -88,6 +90,7 @@ func (r *Runner) runRaceConditionProof(ctx context.Context, target ScanTarget) [
 	if concurrentRuns == 0 {
 		concurrentRuns = 5
 	}
+	ready := make(chan struct{}, concurrentRuns)
 	start := make(chan struct{})
 	results := make(chan httpclient.RequestResponse, concurrentRuns)
 	errors := make(chan error, concurrentRuns)
@@ -96,6 +99,7 @@ func (r *Runner) runRaceConditionProof(ctx context.Context, target ScanTarget) [
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			ready <- struct{}{}
 			select {
 			case <-start:
 			case <-ctx.Done():
@@ -110,6 +114,10 @@ func (r *Runner) runRaceConditionProof(ctx context.Context, target ScanTarget) [
 			results <- rr
 		}()
 	}
+	for i := 0; i < concurrentRuns; i++ {
+		<-ready
+	}
+	// Synchronized release to fire all concurrent stream requests together
 	close(start)
 	wg.Wait()
 	close(results)
@@ -167,7 +175,7 @@ func (r *Runner) runRaceConditionProof(ctx context.Context, target ScanTarget) [
 	finding.Title = "Race condition produced multiple unique side effects"
 	finding.Description = "Sequential control produced one transaction ID; a synchronized concurrent batch produced multiple unique transaction IDs, changed server state, and cleanup restored the snapshot."
 	var out []ModuleFinding
-	r.recordFinding(&out, finding, "race_condition", "multiple_unique_side_effects")
+	r.recordFinding(ctx, &out, finding, "race_condition", "multiple_unique_side_effects")
 	return out
 }
 
@@ -208,7 +216,17 @@ func doRecordedAsProfile(ctx context.Context, client profiledHTTPDoer, profile c
 	if strings.Contains(rawURL, "{{") || strings.Contains(body, "{{") {
 		return httpclient.RequestResponse{}, fmt.Errorf("recorded request contains unresolved workflow binding")
 	}
-	headers := contentTypeHeader(request.ContentType)
+	headers := make(map[string]string, len(request.Headers)+1)
+	for key, value := range request.Headers {
+		bound := bindRecordedValue(value, variables)
+		if strings.Contains(bound, "{{") {
+			return httpclient.RequestResponse{}, fmt.Errorf("recorded request header contains unresolved workflow binding")
+		}
+		headers[key] = bound
+	}
+	if contentType := strings.TrimSpace(request.ContentType); contentType != "" {
+		headers["Content-Type"] = contentType
+	}
 	if canary := strings.TrimSpace(variables["akca_canary"]); canary != "" {
 		if headers == nil {
 			headers = map[string]string{}

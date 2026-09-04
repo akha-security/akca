@@ -64,12 +64,29 @@ func (r *Runner) flushDelayedTimingVerifications(ctx context.Context) []ModuleFi
 		return nil
 	}
 	delay := timingblind.DelayInterval(r.cfg)
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return nil
-	case <-timer.C:
+	if delay > 0 {
+		earliest := time.Now()
+		for _, p := range pending {
+			if !p.Scheduled.IsZero() && p.Scheduled.Before(earliest) {
+				earliest = p.Scheduled
+			}
+		}
+		remaining := delay - time.Since(earliest)
+		if remaining > 0 {
+			if r.cfg.ScanIntensity != "stealth" && remaining > 5*time.Second {
+				remaining = 5 * time.Second
+			}
+			if r.emit != nil {
+				_ = r.emit("log", fmt.Sprintf("Verifying %d delayed timing probes...", len(pending)), map[string]interface{}{"scan_id": r.scanID})
+			}
+			timer := time.NewTimer(remaining)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+			case <-timer.C:
+			}
+		}
 	}
 	var out []ModuleFinding
 	for _, item := range pending {
@@ -142,7 +159,7 @@ func (r *Runner) flushDelayedTimingVerifications(ctx context.Context) []ModuleFi
 		f := r.buildTimedFinding(ctx, item.Target, item.Module, item.Payload, zeroRR, thirdRR,
 			"delayed_timing_confirmed", reason, item.Baseline, item.FirstMs, elapsed, thirdMs, zeroSamples, item.SleepSec)
 		if f != nil {
-			r.recordFinding(&out, f, item.Module, "delayed_timing_confirmed")
+			r.recordFinding(ctx, &out, f, item.Module, "delayed_timing_confirmed")
 		}
 	}
 	return out

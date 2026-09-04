@@ -1,9 +1,13 @@
 package app
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/apinative"
@@ -12,8 +16,9 @@ import (
 func (e *Engine) runAPIImportPhase(ctx context.Context, files []string, baseURL string) error {
 	var failures []string
 	type definitionFile struct {
-		name string
-		data []byte
+		name     string
+		data     []byte
+		external map[string][]byte
 	}
 	definitions := make([]definitionFile, 0, len(files))
 	for _, filename := range files {
@@ -25,6 +30,19 @@ func (e *Engine) runAPIImportPhase(ctx context.Context, files []string, baseURL 
 			failures = append(failures, filename+": "+err.Error())
 			continue
 		}
+		if strings.EqualFold(filepath.Ext(filename), ".zip") {
+			bundle, bundleErr := readAPIBundle(data)
+			if bundleErr != nil {
+				failures = append(failures, filename+": "+bundleErr.Error())
+				continue
+			}
+			for name, item := range bundle {
+				if looksLikeAPIDefinition(name, item) {
+					definitions = append(definitions, definitionFile{name: name, data: item, external: bundle})
+				}
+			}
+			continue
+		}
 		definitions = append(definitions, definitionFile{name: filename, data: data})
 	}
 
@@ -32,7 +50,7 @@ func (e *Engine) runAPIImportPhase(ctx context.Context, files []string, baseURL 
 	// order. Variable values are used only in-memory and are never emitted.
 	environment := map[string]string{}
 	for _, definition := range definitions {
-		inventory, err := apinative.Import(definition.data, apinative.ImportOptions{BaseURL: baseURL})
+		inventory, err := apinative.Import(definition.data, apinative.ImportOptions{BaseURL: baseURL, SourcePath: definition.name, ExternalFiles: definition.external})
 		if err == nil && inventory.Format == apinative.FormatPostmanEnvironment {
 			for key, value := range inventory.Variables {
 				environment[key] = value
@@ -49,7 +67,7 @@ func (e *Engine) runAPIImportPhase(ctx context.Context, files []string, baseURL 
 			return ctx.Err()
 		}
 		inventory, err := apinative.Import(definition.data, apinative.ImportOptions{
-			BaseURL: baseURL, Environment: environment,
+			BaseURL: baseURL, Environment: environment, SourcePath: definition.name, ExternalFiles: definition.external,
 		})
 		if err != nil {
 			failures = append(failures, definition.name+": "+err.Error())
@@ -156,4 +174,72 @@ func (e *Engine) runAPIImportPhase(ctx context.Context, files []string, baseURL 
 		return fmt.Errorf("API import completed with errors: %s", strings.Join(failures, "; "))
 	}
 	return nil
+}
+
+func readAPIBundle(data []byte) (map[string][]byte, error) {
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, fmt.Errorf("open API bundle: %w", err)
+	}
+	if len(reader.File) > 256 {
+		return nil, fmt.Errorf("API bundle contains too many files (%d > 256)", len(reader.File))
+	}
+	out := map[string][]byte{}
+	var total int64
+	for _, file := range reader.File {
+		if file.FileInfo().IsDir() {
+			continue
+		}
+		name := strings.ReplaceAll(filepath.ToSlash(file.Name), "\\", "/")
+		if strings.HasPrefix(name, "/") || strings.HasPrefix(name, "../") || strings.Contains(name, "/../") {
+			return nil, fmt.Errorf("unsafe API bundle entry %q", file.Name)
+		}
+		if file.UncompressedSize64 > 8<<20 {
+			return nil, fmt.Errorf("API bundle entry %q exceeds 8 MiB", file.Name)
+		}
+		rc, openErr := file.Open()
+		if openErr != nil {
+			return nil, openErr
+		}
+		item, readErr := io.ReadAll(io.LimitReader(rc, (8<<20)+1))
+		_ = rc.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if len(item) > 8<<20 {
+			return nil, fmt.Errorf("API bundle entry %q exceeds 8 MiB", file.Name)
+		}
+		total += int64(len(item))
+		if total > 64<<20 {
+			return nil, fmt.Errorf("expanded API bundle exceeds 64 MiB")
+		}
+		out[name] = item
+	}
+	return out, nil
+}
+
+func looksLikeAPIDefinition(name string, data []byte) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	trimmed := bytes.TrimSpace(data)
+	lower := bytes.ToLower(trimmed)
+	if bytes.HasPrefix(trimmed, []byte("#%RAML")) {
+		return true
+	}
+	if ext == ".wsdl" {
+		return bytes.Contains(lower, []byte("<definitions"))
+	}
+	if ext == ".graphql" || ext == ".gql" {
+		return bytes.Contains(lower, []byte("type query")) || bytes.Contains(lower, []byte("type mutation"))
+	}
+	if ext == ".proto" {
+		return bytes.Contains(lower, []byte("syntax =")) || bytes.Contains(lower, []byte("service "))
+	}
+	// A bundle commonly contains JSON/YAML schema fragments. Only root API
+	// documents become import jobs; fragments remain available for $ref/include.
+	return bytes.Contains(lower, []byte("openapi:")) || bytes.Contains(lower, []byte("\"openapi\"")) ||
+		bytes.Contains(lower, []byte("swagger:")) || bytes.Contains(lower, []byte("\"swagger\"")) ||
+		bytes.Contains(lower, []byte("asyncapi:")) || bytes.Contains(lower, []byte("\"asyncapi\"")) ||
+		(bytes.Contains(lower, []byte("\"log\"")) && bytes.Contains(lower, []byte("\"entries\""))) ||
+		(bytes.Contains(lower, []byte("\"info\"")) && bytes.Contains(lower, []byte("\"item\""))) ||
+		(bytes.Contains(lower, []byte("\"values\"")) && bytes.Contains(lower, []byte("_postman_variable_scope")))
 }

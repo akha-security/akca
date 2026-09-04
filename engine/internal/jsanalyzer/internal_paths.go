@@ -17,10 +17,12 @@ func DetectInternalPaths(js string) []InternalPath {
 		}
 		seen[p] = struct{}{}
 		kind := "module"
-		if strings.HasPrefix(p, "@/") || strings.HasPrefix(p, "./") || strings.HasPrefix(p, "../") {
+		if strings.HasPrefix(p, "@") && strings.Contains(p, "/") && !strings.HasPrefix(p, "@/") {
+			kind = "scoped_package"
+		} else if strings.HasPrefix(p, "@/") || strings.HasPrefix(p, "./") || strings.HasPrefix(p, "../") {
 			kind = "internal"
 		}
-		out = append(out, InternalPath{Path: p, Kind: kind, Confidence: 0.7})
+		out = append(out, InternalPath{Path: p, Kind: kind, Confidence: 0.8})
 	}
 	return out
 }

@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+var pathUUIDRe = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // EffectiveMethod returns the method that can actually carry the discovered
 // injection surface. Body parameters discovered from a GET-rendered form must
@@ -28,25 +31,146 @@ func EffectiveMethod(method, location string) string {
 }
 
 func BuildProbeRequestWithTemplate(endpointURL, method, param, location, value, bodyTemplate string) (string, []byte, map[string]string, error) {
-	if !strings.EqualFold(location, "json") && !strings.EqualFold(location, "graphql") || strings.TrimSpace(bodyTemplate) == "" {
-		return BuildProbeRequest(endpointURL, method, param, location, value)
-	}
-	var doc interface{}
-	if err := json.Unmarshal([]byte(bodyTemplate), &doc); err != nil {
-		return BuildProbeRequest(endpointURL, method, param, location, value)
-	}
-	if !setJSONPath(doc, strings.Split(param, "."), value) {
-		return "", nil, nil, fmt.Errorf("schema-preserving JSON mutation rejected for path %q", param)
-	}
-	body, err := json.Marshal(doc)
+	req, err := MutateRequest(RequestTemplate{
+		Method: method, URL: endpointURL, Body: bodyTemplate,
+	}, param, location, value)
 	if err != nil {
 		return "", nil, nil, err
 	}
+	return req.URL, req.Body, req.Headers, nil
+}
+
+// MutateRequest changes exactly one discovered injection surface while
+// retaining the rest of the original request.  Older call sites use
+// BuildProbeRequestWithTemplate, which is kept as a compatibility adapter.
+func MutateRequest(template RequestTemplate, param, location, value string) (MutatedRequest, error) {
+	method := strings.ToUpper(strings.TrimSpace(template.Method))
+	endpointURL := strings.TrimSpace(template.URL)
+	if endpointURL == "" {
+		return MutatedRequest{}, fmt.Errorf("request template URL is empty")
+	}
+	loc := strings.ToLower(strings.TrimSpace(location))
+	method = EffectiveMethod(method, loc)
+	headers := cloneStringMap(template.Headers)
+	if strings.TrimSpace(template.ContentType) != "" && headerValueCI(headers, "Content-Type") == "" {
+		headers["Content-Type"] = template.ContentType
+	}
+
+	body := strings.TrimSpace(template.Body)
+	switch loc {
+	case "form", "body", "post":
+		form := url.Values{}
+		if body != "" {
+			if parsed, err := url.ParseQuery(body); err == nil {
+				form = parsed
+			}
+		}
+		form.Set(param, value)
+		setHeaderCI(headers, "Content-Type", "application/x-www-form-urlencoded")
+		return materialized(method, endpointURL, []byte(form.Encode()), headers)
+	case "json", "graphql":
+		var doc interface{}
+		if body != "" {
+			_ = json.Unmarshal([]byte(body), &doc)
+		}
+		if doc == nil {
+			doc = make(map[string]interface{})
+		}
+		if setJSONPath(doc, strings.Split(param, "."), value) {
+			mutated, err := json.Marshal(doc)
+			if err == nil {
+				if headerValueCI(headers, "Content-Type") == "" {
+					headers["Content-Type"] = "application/json"
+				}
+				return materialized(method, endpointURL, mutated, headers)
+			}
+		}
+	case "header":
+		setHeaderCI(headers, param, value)
+		return materialized(method, endpointURL, []byte(template.Body), headers)
+	case "cookie":
+		setHeaderCI(headers, "Cookie", mutateCookieHeader(headerValueCI(headers, "Cookie"), param, value))
+		return materialized(method, endpointURL, []byte(template.Body), headers)
+	case "path":
+		probeURL, _, _, err := BuildProbeRequest(endpointURL, method, param, loc, value)
+		if err != nil {
+			return MutatedRequest{}, err
+		}
+		return MutatedRequest{Method: method, URL: probeURL, Body: []byte(template.Body), Headers: headers}, nil
+	case "query", "":
+		probeURL, _, _, err := BuildProbeRequest(endpointURL, method, param, "query", value)
+		if err != nil {
+			return MutatedRequest{}, err
+		}
+		return MutatedRequest{Method: method, URL: probeURL, Body: []byte(template.Body), Headers: headers}, nil
+	}
+
+	probeURL, probeBody, probeHeaders, err := BuildProbeRequest(endpointURL, method, param, loc, value)
+	if err != nil {
+		return MutatedRequest{}, err
+	}
+	for key, headerValue := range probeHeaders {
+		setHeaderCI(headers, key, headerValue)
+	}
+	return MutatedRequest{Method: method, URL: probeURL, Body: probeBody, Headers: headers}, nil
+}
+
+func mutateCookieHeader(raw, name, value string) string {
+	parts := strings.Split(raw, ";")
+	out := make([]string, 0, len(parts)+1)
+	replaced := false
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key, _, found := strings.Cut(part, "=")
+		if found && strings.EqualFold(strings.TrimSpace(key), name) {
+			out = append(out, name+"="+value)
+			replaced = true
+			continue
+		}
+		out = append(out, part)
+	}
+	if !replaced {
+		out = append(out, name+"="+value)
+	}
+	return strings.Join(out, "; ")
+}
+
+func materialized(method, endpointURL string, body []byte, headers map[string]string) (MutatedRequest, error) {
 	u, err := url.Parse(endpointURL)
 	if err != nil {
-		return "", nil, nil, err
+		return MutatedRequest{}, err
 	}
-	return u.String(), body, map[string]string{"Content-Type": "application/json"}, nil
+	return MutatedRequest{Method: method, URL: u.String(), Body: body, Headers: headers}, nil
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	out := make(map[string]string, len(values)+1)
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func headerValueCI(headers map[string]string, name string) string {
+	for key, value := range headers {
+		if strings.EqualFold(key, name) {
+			return value
+		}
+	}
+	return ""
+}
+
+func setHeaderCI(headers map[string]string, name, value string) {
+	for key := range headers {
+		if strings.EqualFold(key, name) {
+			headers[key] = value
+			return
+		}
+	}
+	headers[name] = value
 }
 
 func setJSONPath(current interface{}, path []string, value string) bool {
@@ -91,24 +215,29 @@ func setJSONPath(current interface{}, path []string, value string) bool {
 func schemaCompatibleJSONValue(current interface{}, value string) (interface{}, bool) {
 	switch current.(type) {
 	case bool:
-		parsed, err := strconv.ParseBool(value)
-		return parsed, err == nil
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			return parsed, true
+		}
+		return value, true
 	case float64:
-		parsed, err := strconv.ParseFloat(value, 64)
-		return parsed, err == nil
+		if parsed, err := strconv.ParseFloat(value, 64); err == nil {
+			return parsed, true
+		}
+		return value, true
 	case json.Number:
 		if strings.Contains(value, ".") {
-			_, err := strconv.ParseFloat(value, 64)
-			return json.Number(value), err == nil
+			if _, err := strconv.ParseFloat(value, 64); err == nil {
+				return json.Number(value), true
+			}
 		}
-		_, err := strconv.ParseInt(value, 10, 64)
-		return json.Number(value), err == nil
+		if _, err := strconv.ParseInt(value, 10, 64); err == nil {
+			return json.Number(value), true
+		}
+		return value, true
 	case string, nil:
 		return value, true
 	default:
-		// Object/array replacement would change the request schema and is not
-		// allowed through a scalar vulnerability probe.
-		return nil, false
+		return value, true
 	}
 }
 
@@ -156,6 +285,28 @@ func BuildProbeRequest(endpointURL, method, param, location, value string) (stri
 		for _, placeholder := range []string{"{" + param + "}", ":" + param, "[" + param + "]"} {
 			if strings.Contains(u.Path, placeholder) {
 				u.Path = strings.ReplaceAll(u.Path, placeholder, value)
+				u.RawPath = ""
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+			targetIdx := -1
+			for i := len(segs) - 1; i >= 0; i-- {
+				s := segs[i]
+				if len(s) > 0 && ((s[0] >= '0' && s[0] <= '9') || pathUUIDRe.MatchString(s)) {
+					targetIdx = i
+					break
+				}
+			}
+			if targetIdx >= 0 {
+				segs[targetIdx] = value
+				prefix := ""
+				if strings.HasPrefix(u.Path, "/") {
+					prefix = "/"
+				}
+				u.Path = prefix + strings.Join(segs, "/")
 				u.RawPath = ""
 				replaced = true
 			}

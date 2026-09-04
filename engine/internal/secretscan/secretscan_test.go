@@ -108,3 +108,43 @@ func TestEvidenceJSONKeepsRawSecretForCompleteReporting(t *testing.T) {
 		t.Fatalf("evidence missing fingerprint or preview: %s", ev)
 	}
 }
+
+func TestReportableFiltersPublicAndLowConfidenceIdentifiers(t *testing.T) {
+	if !IsReportable(Match{Kind: "github_token", Confidence: 0.9}) {
+		t.Fatal("provider credential should remain reportable")
+	}
+	for _, item := range []Match{
+		{Kind: "stripe_publishable_key", Confidence: 0.9},
+		{Kind: "firebase_database_url", Confidence: 0.9},
+		{Kind: "bearer_token", Confidence: 0.55},
+	} {
+		if IsReportable(item) {
+			t.Fatalf("%s must not become a passive secret finding", item.Kind)
+		}
+	}
+}
+
+func TestFalsePositiveRegressionFromClientJS(t *testing.T) {
+	jsSamples := []string{
+		`var a = s.DIRECTORY_SEARCH_ENABLED;`,
+		`var b = s.CHOOSE_ALTERNATIVE_FACTOR;`,
+		`var c = s.CONCURRENT_ALLOWED_DEVICES_COUNT;`,
+		`var d = s.IS_SERVICE_ACCOUNT_CONFIGURED;`,
+		`var e = s.SERVICE_ACCOUNT_PASSWORD;`,
+		`var f = s.IS_CACHED_CREDENTIAL_UPDATE_WITHOUT_VPN_ENABLED;`,
+		`s.setNamespaceSearchDisabled();`,
+		`s.buildFakeRegistryWithDeprecations();`,
+		`s.generateControllerFactory();`,
+		`s.normalizeControllerQueryParams();`,
+		`s.instrumentationSubscribe();`,
+		`s.addCanonicalInternalModel();`,
+		`url = "login?password=" + form.j_password.value + "&next=";`,
+		`params = "pwd=" + encodeURIComponent(t.RADIUS_PASSWORD) + "";`,
+	}
+	for _, js := range jsSamples {
+		matches := Detect(js)
+		if len(matches) > 0 {
+			t.Fatalf("false positive detected in JS sample %q: %+v", js, matches)
+		}
+	}
+}

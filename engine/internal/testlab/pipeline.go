@@ -230,9 +230,13 @@ func (p *pipeline) run(ctx context.Context) error {
 	}
 
 	d := params.NewDiscoverer(p.scanID, p.client, p.scope, p.db, p.emit)
-	if p.cfg.RequestBudget > 0 && p.cfg.RequestBudget < 100 {
-		d.SetMaxProbes(p.cfg.RequestBudget / 3)
-	}
+	// Keep the integration pipeline aligned with the production app. Leaving
+	// discovery unlimited lets it consume the global request budget before the
+	// Group B modules (SSRF/XXE/open redirect) execute.
+	d.SetMaxProbes(p.cfg.ParameterMaxProbes())
+	d.SetWordlistCap(p.cfg.ParameterWordlistCap())
+	d.SetMaxTransferProbes(p.cfg.ParameterTransferMaxProbes())
+	d.SetParallelism(p.cfg.ParameterDiscoveryWorkers())
 	_ = p.emit("phase_started", "parameter_discovery", map[string]interface{}{"phase": "parameter_discovery"})
 	if p.short {
 		p.seedLabParameters()
@@ -333,7 +337,7 @@ func (p *pipeline) run(ctx context.Context) error {
 				EndpointURL: base + "/parity/auth/login", Method: "GET", Parameter: "username", Location: "query",
 			}},
 			{"mass_assignment", modules.ScanTarget{
-				EndpointURL: base + "/parity/api/profile", Method: "POST", Parameter: "body", Location: "json",
+				EndpointURL: base + "/parity/api/profile", Method: "PATCH", Parameter: "body", Location: "json",
 				BodyTemplate: `{"name":"alice","role":"user"}`,
 				Profile:      reflection.ReflectionProfile{ContentType: "application/json"},
 			}},
@@ -395,7 +399,7 @@ func (p *pipeline) generateReports() (map[string]int, bool, error) {
 	schemaCompatible := true
 	for _, tmpl := range []report.TemplateKind{report.TemplateInternal, report.TemplateHackerOne, report.TemplateExecutive} {
 		for _, format := range []report.Format{report.FormatJSON, report.FormatHTML, report.FormatCSV, report.FormatMarkdown} {
-			opts := report.Options{ScanID: p.scanID, Template: tmpl, Format: format, Redact: true}
+			opts := report.Options{ScanID: p.scanID, Template: tmpl, Format: format, Redact: false}
 			var buf bytes.Buffer
 			if err := exporter.Export(&buf, opts); err != nil {
 				return nil, false, fmt.Errorf("%s/%s: %w", tmpl, format, err)

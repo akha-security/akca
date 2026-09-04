@@ -32,8 +32,8 @@ func TestEveryPassiveJavaScriptCategoryIsPublishedAndPersisted(t *testing.T) {
 	}
 	a.publishResult(AnalysisResult{
 		JSURL:         "https://example.test/app.js",
-		SourceMaps:    []SourceMapRef{{URL: "app.js.map", FromFile: "https://example.test/app.js", Confidence: 0.9}},
-		Secrets:       []SecretMatch{{Kind: "github_token", Value: testfixtures.GitHubToken(), Confidence: 0.9}},
+		SourceMaps:    []SourceMapRef{{URL: "app.js.map", FromFile: "https://example.test/app.js", Exposed: true, Confidence: 0.9}},
+		Secrets:       []SecretMatch{{Kind: "github_token", Value: testfixtures.GitHubToken(), Redacted: "ghp_***test", Confidence: 0.9}},
 		InternalPaths: []InternalPath{{Path: "./internal/admin-client", Kind: "internal", Confidence: 0.7}},
 	})
 

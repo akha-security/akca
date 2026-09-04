@@ -55,16 +55,16 @@ func TestEndpointIntelligenceRecommendation(t *testing.T) {
 	}
 }
 
-func TestWAFProtectedModuleFiltering(t *testing.T) {
+func TestWAFProtectedRecommendationKeepsAllCapabilities(t *testing.T) {
 	waf := &models.WAFProfile{CautiousModeRecommended: true, Vendor: "Cloudflare"}
 	intel := ClassifyEndpoint("https://example.com/page", "GET", "text/html", "<form></form>", waf, nil)
-	allowed := false
+	found := false
 	for _, m := range intel.RecommendedModules {
 		if m == "xss" {
-			allowed = true
+			found = true
 		}
 	}
-	if allowed {
-		t.Fatalf("xss should be filtered behind cautious WAF, got %v", intel.RecommendedModules)
+	if !found {
+		t.Fatalf("WAF pacing must not remove xss capability, got %v", intel.RecommendedModules)
 	}
 }

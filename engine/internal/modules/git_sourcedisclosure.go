@@ -111,7 +111,7 @@ func (r *Runner) runGitDeepRecovery(ctx context.Context, target ScanTarget) []Mo
 		f.Title = "Exposed Git repository (" + result.Branch + ")"
 		f.Severity = severity
 		f.Description = desc
-		r.recordFinding(&out, f, "git_recovery", "partial_git_exposure")
+		r.recordFinding(ctx, &out, f, "git_recovery", "partial_git_exposure")
 	}
 
 	for _, ipath := range result.IndexPaths {
@@ -191,7 +191,7 @@ func (r *Runner) sourceFindingsFromBody(ctx context.Context, target ScanTarget, 
 		if f != nil {
 			f.Title = "Source code disclosure " + rawURL
 			f.VulnClass = "source_code_disclosure"
-			r.recordFinding(&out, f, "source_code_disclosure", "source_code_disclosure")
+			r.recordFinding(ctx, &out, f, "source_code_disclosure", "source_code_disclosure")
 		}
 		return out
 	}
@@ -206,7 +206,7 @@ func (r *Runner) sourceFindingsFromBody(ctx context.Context, target ScanTarget, 
 		f.Title = "Source leak (" + fd.Kind + ") " + rawURL
 		f.Severity = fd.Severity
 		f.VulnClass = "source_code_disclosure"
-		r.recordFinding(&out, f, "source_code_disclosure", fd.Kind)
+		r.recordFinding(ctx, &out, f, "source_code_disclosure", fd.Kind)
 		if len(out) >= 3 {
 			break
 		}

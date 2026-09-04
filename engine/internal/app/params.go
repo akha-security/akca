@@ -13,6 +13,7 @@ func (e *Engine) runParameterDiscoveryPhase(ctx context.Context) error {
 	d := params.NewDiscoverer(e.session.ID, e.client, e.scope, e.db, e.Emit)
 	d.SetMaxProbes(e.session.Config.ParameterMaxProbes())
 	d.SetWordlistCap(e.session.Config.ParameterWordlistCap())
+	d.SetMaxTransferProbes(e.session.Config.ParameterTransferMaxProbes())
 	d.SetParallelism(e.session.Config.ParameterDiscoveryWorkers())
 	if err := d.Run(ctx, e.session.Config.ParameterDiscoveryEndpointLimit()); err != nil {
 		return err

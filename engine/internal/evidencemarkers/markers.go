@@ -128,12 +128,37 @@ func ForResponse(payload, signal, baselineBody, probeBody, storedMarker string) 
 		addMatch(xssExecutionRe)
 	}
 
+	if strings.Contains(signalLower, "origin") || strings.Contains(signalLower, "cors") || strings.Contains(signalLower, "pna") {
+		for _, corsHdr := range []string{
+			"Access-Control-Allow-Origin", "Access-Control-Allow-Credentials", "Access-Control-Allow-Private-Network",
+			"null", "https://evil.example", "http://127.0.0.1", "http://localhost", "http://169.254.169.254",
+		} {
+			if marker := actualCaseMarker(probeBody, corsHdr); marker != "" && actualCaseMarker(baselineBody, corsHdr) == "" {
+				add(marker)
+			}
+		}
+	}
+	if strings.Contains(signalLower, "iis") {
+		for _, iisMarker := range []string{"::$DATA", "<%@ Page", "<script runat", "The resource cannot be found."} {
+			if marker := actualCaseMarker(probeBody, iisMarker); marker != "" && actualCaseMarker(baselineBody, iisMarker) == "" {
+				add(marker)
+			}
+		}
+	}
+	if strings.Contains(signalLower, "debug") || strings.Contains(signalLower, "error") || strings.Contains(signalLower, "stack") {
+		for _, dbgMarker := range []string{
+			"Fatal error:", "Warning:", "Traceback (most recent call last):", "Exception in thread",
+			"System.NullReferenceException", "Microsoft.AspNetCore", "Django Version:", "Laravel Ignition",
+		} {
+			if marker := actualCaseMarker(probeBody, dbgMarker); marker != "" && actualCaseMarker(baselineBody, dbgMarker) == "" {
+				add(marker)
+			}
+		}
+	}
+
 	return out
 }
 
-// ForReport rebuilds safe response proof for both new and legacy findings.
-// Legacy arbitrary snippets are ignored. The only persisted markers accepted
-// directly are Akca-generated canaries that actually occur in the response.
 func ForReport(payload, signal, probeBody string, persisted []string) []string {
 	markers := ForResponse(payload, signal, "", probeBody, "")
 	seen := make(map[string]struct{}, len(markers))
@@ -142,7 +167,7 @@ func ForReport(payload, signal, probeBody string, persisted []string) []string {
 	}
 	for _, marker := range persisted {
 		marker = strings.TrimSpace(marker)
-		if !generatedTokenRe.MatchString(marker) || !containsFold(probeBody, marker) {
+		if !isValidPersistedMarker(marker) || !containsFold(probeBody, marker) {
 			continue
 		}
 		key := strings.ToLower(marker)
@@ -155,9 +180,31 @@ func ForReport(payload, signal, probeBody string, persisted []string) []string {
 	return markers
 }
 
+func isValidPersistedMarker(marker string) bool {
+	if generatedTokenRe.MatchString(marker) {
+		return true
+	}
+	lower := strings.ToLower(marker)
+	if strings.HasPrefix(lower, "access-control-") ||
+		strings.HasPrefix(lower, "location: ") ||
+		strings.HasPrefix(lower, "set-cookie: ") ||
+		strings.HasPrefix(lower, "root:") ||
+		strings.HasPrefix(lower, "uid=") ||
+		strings.Contains(lower, "error in your sql syntax") {
+		return true
+	}
+	return false
+}
+
 func isReflectionSignal(signal string) bool {
 	return signal == "reflected" || signal == "stored_tracking" ||
-		signal == "cross_endpoint_trigger" || strings.Contains(signal, "reflected_marker")
+		signal == "cross_endpoint_trigger" || strings.Contains(signal, "reflected_marker") ||
+		strings.Contains(signal, "dom_") || strings.Contains(signal, "event_handler") ||
+		strings.Contains(signal, "js_execution") || strings.Contains(signal, "script_breakout") ||
+		strings.Contains(signal, "url_scheme_execution") || strings.Contains(signal, "origin") ||
+		strings.Contains(signal, "cors") || strings.Contains(signal, "redirect") ||
+		strings.Contains(signal, "crlf") || strings.Contains(signal, "header") ||
+		strings.Contains(signal, "jsonp") || strings.Contains(signal, "template")
 }
 
 func containsFold(body, marker string) bool {

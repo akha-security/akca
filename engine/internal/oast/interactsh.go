@@ -25,24 +25,35 @@ import (
 const (
 	interactshCorrelationLength = 20
 	interactshNonceLength       = 13
+	interactshRequestTimeout    = 5 * time.Second
 )
 
 type InteractshProvider struct {
-	mu            sync.Mutex
-	serverURL     string
-	httpClient    *http.Client
-	domain        string
-	secret        string
-	correlationID string
-	token         string
-	privateKey    *rsa.PrivateKey
-	started       bool
+	mu             sync.Mutex
+	serverURL      string
+	serverOrder    []string
+	serverPriority int
+	registered     []string
+	httpClient     *http.Client
+	domain         string
+	secret         string
+	correlationID  string
+	token          string
+	privateKey     *rsa.PrivateKey
+	started        bool
 }
 
 func NewInteractshProvider(serverURL string) *InteractshProvider {
+	return NewInteractshProviderWithClient(serverURL, nil)
+}
+
+func NewInteractshProviderWithClient(serverURL string, client *http.Client) *InteractshProvider {
+	if client == nil {
+		client = &http.Client{Timeout: interactshRequestTimeout}
+	}
 	return &InteractshProvider{
 		serverURL:  strings.TrimSpace(serverURL),
-		httpClient: &http.Client{Timeout: 15 * time.Second},
+		httpClient: client,
 	}
 }
 
@@ -73,8 +84,18 @@ func (p *InteractshProvider) Start() error {
 		return err
 	}
 
+	configured := strings.Split(p.serverURL, ",")
+	p.serverOrder = p.serverOrder[:0]
+	for _, candidate := range configured {
+		if candidate = strings.TrimSpace(candidate); candidate != "" {
+			p.serverOrder = append(p.serverOrder, candidate)
+		}
+	}
+	p.serverPriority = 0
+	p.registered = p.registered[:0]
+
 	var failures []string
-	for _, candidate := range strings.Split(p.serverURL, ",") {
+	for index, candidate := range p.serverOrder {
 		serverURL, err := normalizeOASTServer(candidate)
 		if err != nil {
 			failures = append(failures, err.Error())
@@ -90,6 +111,8 @@ func (p *InteractshProvider) Start() error {
 			return err
 		}
 		p.serverURL = serverURL
+		p.serverPriority = index + 1
+		p.registered = append(p.registered, serverURL)
 		p.domain = correlationID + nonce + "." + u.Hostname()
 		p.secret = secret
 		p.correlationID = correlationID
@@ -100,7 +123,19 @@ func (p *InteractshProvider) Start() error {
 	return fmt.Errorf("oast registration failed: %s", strings.Join(failures, "; "))
 }
 
+// ServerSelection reports the deterministic startup-time fallback decision.
+// Priority is one-based and follows the comma-separated configuration order.
+func (p *InteractshProvider) ServerSelection() (active string, order []string, priority int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.serverURL, append([]string(nil), p.serverOrder...), p.serverPriority
+}
+
 func (p *InteractshProvider) register(serverURL string, payload []byte) error {
+	return p.doRegister(serverURL, payload)
+}
+
+func (p *InteractshProvider) doRegister(serverURL string, payload []byte) error {
 	req, err := http.NewRequest(http.MethodPost, serverURL+"/register", bytes.NewReader(payload))
 	if err != nil {
 		return err
@@ -135,24 +170,29 @@ func (p *InteractshProvider) register(serverURL string, payload []byte) error {
 
 func (p *InteractshProvider) Stop() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if !p.started {
+		p.mu.Unlock()
 		return nil
 	}
+	servers := append([]string(nil), p.registered...)
+	correlationID, secret, token := p.correlationID, p.secret, p.token
+	p.started = false
+	p.mu.Unlock()
 	payload, _ := json.Marshal(map[string]string{
-		"correlation-id": p.correlationID, "secret-key": p.secret,
+		"correlation-id": correlationID, "secret-key": secret,
 	})
-	req, err := http.NewRequest(http.MethodPost, p.serverURL+"/deregister", bytes.NewReader(payload))
-	if err == nil {
-		req.Header.Set("Content-Type", "application/json")
-		if p.token != "" {
-			req.Header.Set("Authorization", p.token)
-		}
-		if resp, doErr := p.httpClient.Do(req); doErr == nil {
-			_ = resp.Body.Close()
+	for _, serverURL := range servers {
+		req, err := http.NewRequest(http.MethodPost, serverURL+"/deregister", bytes.NewReader(payload))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/json")
+			if token != "" {
+				req.Header.Set("Authorization", token)
+			}
+			if resp, doErr := p.httpClient.Do(req); doErr == nil {
+				_ = resp.Body.Close()
+			}
 		}
 	}
-	p.started = false
 	return nil
 }
 
@@ -184,7 +224,53 @@ func (p *InteractshProvider) GenerateURL(payloadID string) (GeneratedURL, error)
 
 func (p *InteractshProvider) Poll() ([]Interaction, error) {
 	p.mu.Lock()
-	serverURL := p.serverURL
+	servers := append([]string(nil), p.registered...)
+	active := p.serverURL
+	started := p.started
+	p.mu.Unlock()
+	if !started || len(servers) == 0 {
+		return nil, fmt.Errorf("oast provider not started")
+	}
+	var interactions []Interaction
+	var failures []string
+	activeFailed := false
+	successfulPolls := 0
+	for _, serverURL := range servers {
+		items, err := p.pollServer(serverURL)
+		if err != nil {
+			failures = append(failures, serverURL+": "+err.Error())
+			if serverURL == active {
+				activeFailed = true
+			}
+			continue
+		}
+		successfulPolls++
+		interactions = append(interactions, items...)
+	}
+	if activeFailed {
+		if failoverErr := p.failoverAfterPollError(); failoverErr != nil {
+			failures = append(failures, "runtime failover: "+failoverErr.Error())
+		} else {
+			p.mu.Lock()
+			newActive := p.serverURL
+			p.mu.Unlock()
+			items, err := p.pollServer(newActive)
+			if err != nil {
+				failures = append(failures, newActive+": "+err.Error())
+			} else {
+				successfulPolls++
+				interactions = append(interactions, items...)
+			}
+		}
+	}
+	if successfulPolls == 0 {
+		return nil, fmt.Errorf("oast polling failed: %s", strings.Join(failures, "; "))
+	}
+	return interactions, nil
+}
+
+func (p *InteractshProvider) pollServer(serverURL string) ([]Interaction, error) {
+	p.mu.Lock()
 	secret := p.secret
 	correlationID := p.correlationID
 	privateKey := p.privateKey
@@ -246,6 +332,67 @@ func (p *InteractshProvider) Poll() ([]Interaction, error) {
 		}
 	}
 	return interactions, nil
+}
+
+// failoverAfterPollError re-registers the existing correlation credentials on
+// the next configured server. New payload URLs use the replacement domain;
+// already-issued URLs remain valid if the original service recovers.
+func (p *InteractshProvider) failoverAfterPollError() error {
+	p.mu.Lock()
+	order := append([]string(nil), p.serverOrder...)
+	start := p.serverPriority // one-based active priority == next zero-based index
+	privateKey := p.privateKey
+	secret := p.secret
+	correlationID := p.correlationID
+	p.mu.Unlock()
+	if privateKey == nil || start >= len(order) {
+		return fmt.Errorf("no remaining OAST server")
+	}
+	publicKey, err := encodeInteractshPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(map[string]string{
+		"public-key": publicKey, "secret-key": secret, "correlation-id": correlationID,
+	})
+	if err != nil {
+		return err
+	}
+	var failures []string
+	for index := start; index < len(order); index++ {
+		serverURL, normalizeErr := normalizeOASTServer(order[index])
+		if normalizeErr != nil {
+			failures = append(failures, normalizeErr.Error())
+			continue
+		}
+		if registerErr := p.register(serverURL, payload); registerErr != nil {
+			failures = append(failures, serverURL+": "+registerErr.Error())
+			continue
+		}
+		u, _ := url.Parse(serverURL)
+		nonce, nonceErr := randomZBase32(interactshNonceLength)
+		if nonceErr != nil {
+			return nonceErr
+		}
+		p.mu.Lock()
+		p.serverURL = serverURL
+		p.serverPriority = index + 1
+		p.domain = correlationID + nonce + "." + u.Hostname()
+		alreadyRegistered := false
+		for _, registered := range p.registered {
+			if registered == serverURL {
+				alreadyRegistered = true
+				break
+			}
+		}
+		if !alreadyRegistered {
+			p.registered = append(p.registered, serverURL)
+		}
+		p.started = true
+		p.mu.Unlock()
+		return nil
+	}
+	return fmt.Errorf("%s", strings.Join(failures, "; "))
 }
 
 func decodeInteraction(data []byte) (Interaction, bool) {

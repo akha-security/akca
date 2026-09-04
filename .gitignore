@@ -1,51 +1,58 @@
-# Binaries
+# Build artifacts
 /akca
 /akca.exe
-/akca-api
-/akca-api.exe
-/akca-policy
-/akca-policy.exe
+/akca.exe~
 /engine/akca
 /engine/akca.exe
+/engine/akca.exe~
+/akca-api
+/akca-api.exe
 /engine/akca-api
 /engine/akca-api.exe
+/akca-policy
+/akca-policy.exe
 /engine/akca-policy
 /engine/akca-policy.exe
-
-# Go build/test caches
-.gocache/
-.gotmp/
 *.test
-coverage.out
-coverage-*.out
 *.prof
+*.cover
+/engine/coverage
+/dist/
 
-# Local scan artifacts
+# Scan output and local state
+/output/
+**/output/
 *.db
 *.db-shm
 *.db-wal
 *.sqlite
 *.sqlite3
-akca-report-*
-akca-results.*
-benchmark-*.json
-output/
-reports/
-*.log
-*.tmp
+*.sarif
+*.sarif.json
+report.html
+report.json
+results.json
 
-# Local secrets and dependencies
+# Credentials and local configuration
 .env
 .env.*
 !.env.example
-node_modules/
+*.pem
+*.key
+*.p12
+*.pfx
+/secrets.*
+/engine/secrets.*
 
-# Local workspace metadata
-.agents/
-
-# Editor and OS files
+# Editors and operating systems
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
 Desktop.ini
+*.swp
+*.tmp
+
+# Local research/reference material and unrelated artwork
+/acunetix-netsparker.txt
+/banner.png

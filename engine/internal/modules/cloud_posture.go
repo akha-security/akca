@@ -130,7 +130,7 @@ func (r *Runner) recordCloudPostureFinding(ctx context.Context, target ScanTarge
 	f.Evidence.Request = probeRR.Request
 	f.Evidence.Response = probeRR.Response
 	var out []ModuleFinding
-	r.recordFinding(&out, f, "cloud_posture", signal)
+	r.recordFinding(ctx, &out, f, "cloud_posture", signal)
 	return out
 }
 
@@ -178,7 +178,7 @@ func (r *Runner) runTFStateExposure(ctx context.Context, target ScanTarget, base
 					f.Title = "Exposed Terraform state " + rawURL
 					f.Severity = "critical"
 					f.VulnClass = "cloud_posture"
-					r.recordFinding(&out, f, "cloud_posture", "tfstate_exposed")
+					r.recordFinding(ctx, &out, f, "cloud_posture", "tfstate_exposed")
 				}
 				continue
 			}
@@ -186,7 +186,7 @@ func (r *Runner) runTFStateExposure(ctx context.Context, target ScanTarget, base
 				if len(out) >= 5 {
 					break
 				}
-				p := defaultPayload("cloud_posture", tf.Field, tf.Redacted, "tfstate_secret")
+				p := defaultPayload("cloud_posture", tf.Field, tf.Value, "tfstate_secret")
 				subTarget := target
 				subTarget.EndpointURL = rawURL
 				f := r.verifyAndBuild(ctx, "cloud_posture", subTarget, p, baseline, rr, "tfstate_secret", false, false, "", "")
@@ -197,7 +197,7 @@ func (r *Runner) runTFStateExposure(ctx context.Context, target ScanTarget, base
 				f.Severity = tf.Severity
 				f.VulnClass = "cloud_posture"
 				f.Description = fmt.Sprintf("Cleartext %s in exposed tfstate at %s", tf.Field, rawURL)
-				r.recordFinding(&out, f, "cloud_posture", "tfstate_secret")
+				r.recordFinding(ctx, &out, f, "cloud_posture", "tfstate_secret")
 			}
 		}
 	}

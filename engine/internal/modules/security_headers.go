@@ -2,6 +2,8 @@ package modules
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -21,12 +23,19 @@ var criticalSecurityHeaders = []struct {
 	{"Strict-Transport-Security", "missing_hsts"},
 	{"Referrer-Policy", "missing_referrer_policy"},
 	{"Permissions-Policy", "missing_permissions_policy"},
+	{"Cross-Origin-Opener-Policy", "missing_coop"},
 }
 
 func (r *Runner) runSecurityHeaders(ctx context.Context, target ScanTarget) []ModuleFinding {
 	if ok, reason := r.shouldRunModule("security_headers", target); !ok {
 		r.emitSkip("security_headers", target, reason)
 		return nil
+	}
+	if !r.endpointModuleOnce("security_headers", target) {
+		return nil
+	}
+	if orig, ok := originScanTarget(target); ok {
+		target = orig
 	}
 	rr, err := r.cachedEmptyProbe(ctx, target)
 	if err != nil {
@@ -43,23 +52,141 @@ func (r *Runner) runSecurityHeaders(ctx context.Context, target ScanTarget) []Mo
 		}
 		missing++
 	}
-	if missing < 2 {
-		return out
-	}
-	for _, h := range criticalSecurityHeaders {
-		if headerValue(rr.Response.Headers, h.name) != "" {
-			continue
+	// A single omitted defence-in-depth header is noisy.  Keep the existing
+	// threshold for missing-header reports, but do not let it suppress a
+	// positively observed unsafe CSP below.
+	if missing >= 2 {
+		for _, h := range criticalSecurityHeaders {
+			if headerValue(rr.Response.Headers, h.name) != "" {
+				continue
+			}
+			p := defaultPayload("security_headers", h.signal, h.name, h.signal)
+			f := r.verifyAndBuild(ctx, "security_headers", target, p, baseline, rr, h.signal, false, false, "", "")
+			r.recordFinding(ctx, &out, f, "security_headers", h.signal)
 		}
-		p := defaultPayload("security_headers", h.signal, h.name, h.signal)
-		f := r.verifyAndBuild(ctx, "security_headers", target, p, baseline, rr, h.signal, false, false, "", "")
-		r.recordFinding(&out, f, "security_headers", h.signal)
 	}
 	if v := headerValue(rr.Response.Headers, "X-Frame-Options"); strings.EqualFold(v, "ALLOWALL") {
 		p := defaultPayload("security_headers", "weak_xfo", v, "weak_xfo")
 		f := r.verifyAndBuild(ctx, "security_headers", target, p, baseline, rr, "weak_xfo", false, false, "", "")
-		r.recordFinding(&out, f, "security_headers", "weak_xfo")
+		r.recordFinding(ctx, &out, f, "security_headers", "weak_xfo")
+	}
+	for _, weakness := range weakCSPDirectives(headerValue(rr.Response.Headers, "Content-Security-Policy")) {
+		p := defaultPayload("security_headers", weakness.signal, weakness.value, weakness.signal)
+		f := r.verifyAndBuild(ctx, "security_headers", target, p, baseline, rr, weakness.signal, false, false, "", "")
+		r.recordFinding(ctx, &out, f, "security_headers", weakness.signal)
+	}
+	if value := strings.TrimSpace(headerValue(rr.Response.Headers, "Cross-Origin-Opener-Policy")); value != "" && !validCOOP(value) {
+		p := defaultPayload("security_headers", "weak_coop", value, "weak_coop")
+		f := r.verifyAndBuild(ctx, "security_headers", target, p, baseline, rr, "weak_coop", false, false, "", "")
+		r.recordFinding(ctx, &out, f, "security_headers", "weak_coop")
+	}
+	for _, name := range []string{"X-ChromeLogger-Data", "X-ChromePhp-Data"} {
+		if value := headerValue(rr.Response.Headers, name); chromeLoggerDisclosure(value) {
+			p := defaultPayload("security_headers", "chrome_logger_disclosure", name, "chrome_logger_disclosure")
+			f := r.verifyAndBuild(ctx, "security_headers", target, p, baseline, rr, "chrome_logger_disclosure", false, false, "", "")
+			if f != nil {
+				f.Severity = "medium"
+				f.Title = "Chrome Logger Debug Data Disclosed"
+				f.Description = name + " exposes structured server-side debug data to unauthenticated clients."
+				r.recordFinding(ctx, &out, f, "security_headers", "chrome_logger_disclosure")
+			}
+			break
+		}
 	}
 	return out
+}
+
+func validCOOP(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(strings.Split(value, ";")[0]))
+	return value == "same-origin" || value == "same-origin-allow-popups" || value == "noopener-allow-popups"
+}
+
+// Chrome Logger values are base64-encoded JSON. Requiring both layers avoids
+// flagging unrelated proprietary headers that merely reuse the same name.
+func chromeLoggerDisclosure(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 1<<20 {
+		return false
+	}
+	raw, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		raw, err = base64.RawStdEncoding.DecodeString(value)
+	}
+	if err != nil || len(raw) < 2 {
+		return false
+	}
+	var decoded interface{}
+	if json.Unmarshal(raw, &decoded) != nil {
+		return false
+	}
+	switch typed := decoded.(type) {
+	case map[string]interface{}:
+		return len(typed) > 0
+	case []interface{}:
+		return len(typed) > 0
+	default:
+		return false
+	}
+}
+
+type cspWeakness struct {
+	signal string
+	value  string
+}
+
+// weakCSPDirectives deliberately reports only source expressions that permit
+// script execution.  It does not turn every missing best-practice directive
+// into a finding, which keeps the passive/configuration signal actionable.
+func weakCSPDirectives(policy string) []cspWeakness {
+	directives := parseCSP(policy)
+	scriptSources := directives["script-src"]
+	if len(scriptSources) == 0 {
+		scriptSources = directives["default-src"]
+	}
+	if len(scriptSources) == 0 {
+		return nil
+	}
+
+	var out []cspWeakness
+	hasNonceOrHash := false
+	for _, source := range scriptSources {
+		lower := strings.ToLower(source)
+		if strings.HasPrefix(lower, "'nonce-") || strings.HasPrefix(lower, "'sha256-") ||
+			strings.HasPrefix(lower, "'sha384-") || strings.HasPrefix(lower, "'sha512-") {
+			hasNonceOrHash = true
+		}
+	}
+	for _, source := range scriptSources {
+		switch strings.ToLower(source) {
+		case "'unsafe-inline'":
+			// CSP3 ignores unsafe-inline when a nonce/hash is present.  Treating
+			// that compatibility token as exploitable creates a common false
+			// positive, so only report it when it is actually effective.
+			if !hasNonceOrHash {
+				out = append(out, cspWeakness{signal: "csp_unsafe_inline_script", value: source})
+			}
+		case "'unsafe-eval'", "wasm-unsafe-eval":
+			out = append(out, cspWeakness{signal: "csp_unsafe_eval_script", value: source})
+		case "*":
+			out = append(out, cspWeakness{signal: "csp_wildcard_script_source", value: source})
+		}
+	}
+	return out
+}
+
+func parseCSP(policy string) map[string][]string {
+	directives := make(map[string][]string)
+	for _, rawDirective := range strings.Split(policy, ";") {
+		fields := strings.Fields(rawDirective)
+		if len(fields) == 0 {
+			continue
+		}
+		name := strings.ToLower(fields[0])
+		if _, exists := directives[name]; !exists {
+			directives[name] = append([]string(nil), fields[1:]...)
+		}
+	}
+	return directives
 }
 
 func (r *Runner) runTLSMisconfig(ctx context.Context, target ScanTarget) []ModuleFinding {
@@ -121,7 +248,7 @@ func (r *Runner) runTLSMisconfig(ctx context.Context, target ScanTarget) []Modul
 				DetectedAt: time.Now().UTC(),
 			},
 		}
-		r.recordFinding(&out, f, "tls_misconfig", signal)
+		r.recordFinding(ctx, &out, f, "tls_misconfig", signal)
 	}
 	return out
 }

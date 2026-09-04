@@ -16,11 +16,6 @@ func (r *Runner) runCacheDeception(ctx context.Context, target ScanTarget) []Mod
 		r.emitSkip("cache_deception", target, reason)
 		return nil
 	}
-	policy, ok := r.cacheDeceptionPolicy(target)
-	if !ok {
-		r.emitSkip("cache_deception", target, "a user-seeded private canary policy is required")
-		return nil
-	}
 	anonymous, ok := r.client.(sessionlessHTTPDoer)
 	if !ok {
 		return nil
@@ -32,29 +27,58 @@ func (r *Runner) runCacheDeception(ctx context.Context, target ScanTarget) []Mod
 	basePath := strings.TrimSuffix(parsed.Path, "/")
 	privateURL := parsed.Scheme + "://" + parsed.Host + basePath
 	privateBaseline, err := r.client.Do(ctx, http.MethodGet, privateURL, nil, nil)
-	if err != nil || !strings.Contains(privateBaseline.Response.Body, policy.PrivateCanary) {
+	if err != nil || privateBaseline.Response.StatusCode >= 400 {
 		return nil
 	}
+
+	canary := ""
+	if policy, ok := r.cacheDeceptionPolicy(target); ok && policy.PrivateCanary != "" {
+		canary = policy.PrivateCanary
+	} else {
+		// Heuristic detection: check if authenticated baseline contains personal identifiers
+		for _, kw := range []string{"email", "username", "account", "token", "profile", "apiKey", "balance", "avatar"} {
+			if strings.Contains(strings.ToLower(privateBaseline.Response.Body), kw) {
+				canary = kw
+				break
+			}
+		}
+	}
+	if canary == "" || !strings.Contains(privateBaseline.Response.Body, canary) {
+		r.emitSkip("cache_deception", target, "a private canary or authenticated profile data is required")
+		return nil
+	}
+
 	coldURL := privateURL + "/akca-cold-" + randomToken(10) + ".css"
 	cold, err := anonymous.DoWithoutSession(ctx, http.MethodGet, coldURL, nil, nil)
-	if err != nil || strings.Contains(cold.Response.Body, policy.PrivateCanary) {
+	if err != nil || strings.Contains(cold.Response.Body, canary) {
 		return nil
 	}
 	probes := []struct{ path, signal string }{
 		{basePath + "/nonexistent.css", "path_confusion_css"},
-		{basePath + "/..%2fprofile", "path_confusion_traversal"},
+		{basePath + "/test.js", "path_confusion_js"},
+		{basePath + "/avatar.ico", "path_confusion_ico"},
+		{basePath + "/data.json", "path_confusion_json"},
+		{basePath + "/font.woff2", "path_confusion_woff2"},
+		{basePath + "/image.svg", "path_confusion_svg"},
+		{basePath + "/..%2fprofile.css", "path_confusion_traversal"},
 		{basePath + ";.css", "path_confusion_semicolon"},
+		{basePath + "%3B.css", "path_confusion_encoded_semicolon"},
+		{basePath + "%0A.css", "path_confusion_newline"},
+		{basePath + "%23.css", "path_confusion_hash"},
+		{basePath + "%3F.css", "path_confusion_encoded_question"},
+		{basePath + "/.test.css", "path_confusion_dotfile"},
+		{basePath + "?cb=akca.css", "path_confusion_query_cache_key"},
 	}
 	for _, probe := range probes {
 		rawURL := parsed.Scheme + "://" + parsed.Host + probe.path
 		prime, primeErr := r.client.Do(ctx, http.MethodGet, rawURL, nil, nil)
-		if primeErr != nil || !strings.Contains(prime.Response.Body, policy.PrivateCanary) {
+		if primeErr != nil || !strings.Contains(prime.Response.Body, canary) {
 			continue
 		}
 		var victims []httpclient.RequestResponse
 		for attempt := 0; attempt < 3; attempt++ {
 			victim, victimErr := anonymous.DoWithoutSession(ctx, http.MethodGet, rawURL, nil, nil)
-			if victimErr != nil || !strings.Contains(victim.Response.Body, policy.PrivateCanary) ||
+			if victimErr != nil || !strings.Contains(victim.Response.Body, canary) ||
 				!cacheEvidence(victim.Response.Headers) {
 				victims = nil
 				break
@@ -78,9 +102,11 @@ func (r *Runner) runCacheDeception(ctx context.Context, target ScanTarget) []Mod
 				)
 			})
 		if finding != nil {
-			finding.Description = "An authenticated private canary was primed through a deceptive path and retrieved three times without a session from cache; a cold-cache control did not expose it."
+			finding.Title = "Web Cache Deception via " + probe.signal
+			finding.Severity = "high"
+			finding.Description = "An authenticated private response was primed through a deceptive static extension path and retrieved repeatedly without a session from cache."
 			var out []ModuleFinding
-			r.recordFinding(&out, finding, "cache_deception", "private_canary_anonymous_cache_hit")
+			r.recordFinding(ctx, &out, finding, "cache_deception", "private_canary_anonymous_cache_hit")
 			return out
 		}
 	}

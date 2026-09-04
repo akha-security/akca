@@ -13,7 +13,7 @@ func TestAnalyzeSSN(t *testing.T) {
 }
 
 func TestAnalyzeCreditCardLuhn(t *testing.T) {
-	findings := Analyze("card: 4111 1111 1111 1111")
+	findings := Analyze("customer payment card number: 4539 5787 6362 1486, expiry 12/29")
 	found := false
 	for _, f := range findings {
 		if f.Kind == "credit_card" {
@@ -22,6 +22,57 @@ func TestAnalyzeCreditCardLuhn(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected Luhn-valid credit card finding")
+	}
+}
+
+func TestAnalyzeCreditCardRejectsKnownFixturesAndMissingContext(t *testing.T) {
+	for _, body := range []string{
+		"test card number: 4111 1111 1111 1111",
+		"order_id=4539578763621486",
+		"card number: 1234 5678 9012 3452",
+	} {
+		for _, finding := range Analyze(body) {
+			if finding.Kind == "credit_card" {
+				t.Fatalf("false card finding for %q: %+v", body, finding)
+			}
+		}
+	}
+}
+
+func TestAnalyzeIBANRequiresChecksumCountryLengthAndContext(t *testing.T) {
+	findings := Analyze(`{"beneficiary_iban":"GB82 WEST 1234 5698 7654 32"}`)
+	found := false
+	for _, finding := range findings {
+		if finding.Kind == "pii_iban" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected valid contextual IBAN, got %+v", findings)
+	}
+	for _, body := range []string{
+		`{"iban":"GB82 WEST 1234 5698 7654 33"}`,
+		`identifier=AB12123456789012345`,
+		`documentation example IBAN: GB82 WEST 1234 5698 7654 32`,
+	} {
+		for _, finding := range Analyze(body) {
+			if finding.Kind == "pii_iban" {
+				t.Fatalf("false IBAN finding for %q: %+v", body, finding)
+			}
+		}
+	}
+}
+
+func TestAnalyzeTurkishIBANWithReadableGrouping(t *testing.T) {
+	findings := Analyze(`{"iban":"TR33 0006 1005 1978 6457 8413 26","beneficiary":"Caner Akca"}`)
+	found := false
+	for _, finding := range findings {
+		if finding.Kind == "pii_iban" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected checksum-valid Turkish IBAN, got %+v", findings)
 	}
 }
 

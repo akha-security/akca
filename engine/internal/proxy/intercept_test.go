@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"context"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -135,6 +137,56 @@ func TestProxyMalformedURLTarget(t *testing.T) {
 
 	if rec.status != http.StatusBadRequest {
 		t.Fatalf("expected HTTP 400 Bad Request for malformed target, got %d", rec.status)
+	}
+}
+
+func TestForwardRejectsOutOfScopeURL(t *testing.T) {
+	db, err := storage.Open(t.TempDir() + "/akca.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"allowed.test"}
+	s := NewInterceptServer(db, scope.NewEngine(cfg), "sess-scope")
+	if _, err := s.Forward(context.Background(), http.MethodGet, "https://outside.test/", "", nil); err == nil {
+		t.Fatal("expected out-of-scope forward to be rejected")
+	}
+}
+
+func TestProxyPreservesIncomingPath(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/nested/path" {
+			t.Errorf("backend received path %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer backend.Close()
+
+	db, err := storage.Open(t.TempDir() + "/akca.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{u.Host}
+	s := NewInterceptServer(db, scope.NewEngine(cfg), "sess-path")
+	s.enabled = true
+	req := httptest.NewRequest(http.MethodGet, backend.URL+"/nested/path", nil)
+	recorder := httptest.NewRecorder()
+	s.handle(recorder, req)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNoContent)
 	}
 }
 

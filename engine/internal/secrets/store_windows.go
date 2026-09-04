@@ -3,11 +3,29 @@
 package secrets
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"syscall"
 	"unsafe"
 )
+
+var dpapiDiskKeyPrefix = []byte("dpapi:")
+
+func encodeDiskMasterKey(key []byte) ([]byte, error) {
+	refID, err := protectOS("disk-master-key", key)
+	if err != nil {
+		return nil, err
+	}
+	return append(append([]byte(nil), dpapiDiskKeyPrefix...), []byte(refID)...), nil
+}
+
+func decodeDiskMasterKey(encoded []byte) ([]byte, error) {
+	if !bytes.HasPrefix(encoded, dpapiDiskKeyPrefix) {
+		return nil, fmt.Errorf("disk master key is not DPAPI protected")
+	}
+	return unprotectOS(string(bytes.TrimPrefix(encoded, dpapiDiskKeyPrefix)))
+}
 
 var (
 	crypt32                = syscall.NewLazyDLL("crypt32.dll")
@@ -21,7 +39,11 @@ type dataBlob struct {
 }
 
 func protectOS(key string, plaintext []byte) (string, error) {
-	in := dataBlob{cbData: uint32(len(plaintext)), pbData: &plaintext[0]}
+	var plaintextPtr *byte
+	if len(plaintext) > 0 {
+		plaintextPtr = &plaintext[0]
+	}
+	in := dataBlob{cbData: uint32(len(plaintext)), pbData: plaintextPtr}
 	var out dataBlob
 	desc, _ := syscall.UTF16PtrFromString("akca:" + key)
 	r, _, err := procCryptProtectData.Call(
@@ -41,6 +63,9 @@ func unprotectOS(refID string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("CryptUnprotectData: empty protected value")
+	}
 	in := dataBlob{cbData: uint32(len(raw)), pbData: &raw[0]}
 	var out dataBlob
 	r, _, err := procCryptUnprotectData.Call(
@@ -50,5 +75,11 @@ func unprotectOS(refID string) ([]byte, error) {
 		return nil, fmt.Errorf("CryptUnprotectData: %w", err)
 	}
 	defer syscall.LocalFree(syscall.Handle(uintptr(unsafe.Pointer(out.pbData))))
-	return unsafe.Slice(out.pbData, out.cbData), nil
+	if out.cbData == 0 || out.pbData == nil {
+		return []byte{}, nil
+	}
+	// CryptUnprotectData owns the output allocation. Copy it before LocalFree;
+	// returning unsafe.Slice directly would expose freed memory to the caller.
+	plaintext := append([]byte(nil), unsafe.Slice(out.pbData, out.cbData)...)
+	return plaintext, nil
 }

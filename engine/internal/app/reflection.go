@@ -13,14 +13,9 @@ func (e *Engine) runReflectionPayloadPhase(ctx context.Context) error {
 
 	ra := reflection.NewAnalyzer(e.session.ID, e.client, e.scope, e.db, e.Emit)
 	limit := e.session.Config.ReflectionProfileLimit()
-	if limit <= 0 {
-		limit = e.session.Config.ModuleTargetLimit()
-	}
-	if limit <= 0 {
-		limit = 500
-	}
 	ra.SetMaxParams(limit)
-	if e.session.Config.RequestBudget > 0 && e.session.Config.RequestBudget < limit {
+	if e.session.Config.RequestBudget > 0 && (limit <= 0 || e.session.Config.RequestBudget < limit) {
+		limit = e.session.Config.RequestBudget / 2
 		ra.SetMaxParams(e.session.Config.RequestBudget / 2)
 	}
 	profiles, err := ra.Run(ctx, limit)

@@ -23,10 +23,22 @@ func (r *Runner) runGraphQL(ctx context.Context, target ScanTarget) []ModuleFind
 		field = "user"
 	}
 	var out []ModuleFinding
-	// Introspection, including sensitive-looking schema field names, is
-	// discovery metadata rather than proof of unauthorized data disclosure.
-	// Keep the request for endpoint characterization but do not report it.
-	introspection, _ := r.probeWithBody(ctx, target, graphQLIntrospectionQuery, "application/json", nil)
+
+	// Probe GraphQL Introspection
+	introspection, err := r.probeWithBody(ctx, target, graphQLIntrospectionQuery, "application/json", nil)
+	if err == nil && graphqlIntrospectionSignal(introspection.Response.Body) {
+		p := defaultPayload("graphql", "graphql_introspection", graphQLIntrospectionQuery, "graphql_schema_exposure")
+		f := r.verifyAndBuildWithCandidate(ctx, "graphql", target, p, introspection, introspection, "graphql_schema_exposure", false, false, "", "", func(candidate *verification.Candidate) {
+			candidate.RequestedProofType = verification.ProofSchemaExposure
+		})
+		if f != nil {
+			f.Title = "GraphQL Introspection Enabled"
+			f.Severity = "medium"
+			f.Description = "GraphQL Introspection is enabled on this endpoint, exposing full schema types and field structures."
+			r.recordFinding(ctx, &out, f, "graphql", "graphql_schema_exposure")
+		}
+	}
+
 	fields := uniqueGraphQLFields(append([]string{field}, graphqlCandidateFieldsFromIntrospection(introspection.Response.Body)...))
 	if len(fields) > 3 {
 		fields = fields[:3]
@@ -50,7 +62,10 @@ func (r *Runner) runGraphQLAbuse(ctx context.Context, target ScanTarget, baselin
 	probes := append([]graphqlattack.Probe{
 		graphqlattack.BuildBatchProbe(100),
 		graphqlattack.BuildSuggestionsProbe(field),
-	}, graphqlattack.BuildTypeInversionProbes(field)...)
+		graphqlattack.BuildCircularDepthProbe(field),
+		graphqlattack.BuildAliasOverloadProbe(field),
+		graphqlattack.BuildMutationPrivilegeProbe(field),
+	}, append(append(graphqlattack.BuildTypeInversionProbes(field), graphqlattack.BuildAuthorizationBypassProbes(field)...), graphqlattack.BuildFilterWhereEvalProbes(field)...)...)
 	for _, probe := range probes {
 		if ctx.Err() != nil {
 			break
@@ -64,12 +79,33 @@ func (r *Runner) runGraphQLAbuse(ctx context.Context, target ScanTarget, baselin
 			continue
 		}
 		p := defaultPayload("graphql", probe.Name, probe.Body[:min(80, len(probe.Body))], signal)
-		f := r.verifyAndBuild(ctx, "graphql", target, p, baseline, rr, signal, false, false, "", "")
+		f := r.verifyAndBuildWithCandidate(ctx, "graphql", target, p, baseline, rr, signal, false, false, "", "", func(candidate *verification.Candidate) {
+			candidate.RequestedProofType = verification.ProofSchemaExposure
+		})
 		if f != nil {
-			f.Title = "GraphQL abuse (" + signal + ")"
-			r.recordFinding(&out, f, "graphql", signal)
+			switch signal {
+			case "graphql_filter_where_rce":
+				f.Title = "GraphQL In-Memory Filter Code Execution ($where RCE)"
+				f.Severity = "critical"
+				f.Description = "Unauthenticated arbitrary JavaScript code execution confirmed in server-side memory query engine (sift/MongoDB $where evaluation)."
+			case "graphql_sift_where_detected":
+				f.Title = "GraphQL In-Memory Filter ($where) Surface Detected"
+				f.Severity = "high"
+				f.Description = "GraphQL query accepts in-memory $where filtering functions, exposing dynamic evaluation."
+			case "graphql_auth_bypass_admin", "graphql_auth_bypass_users", "graphql_auth_bypass_system", "graphql_auth_bypass_mutation":
+				f.Title = "GraphQL Broken Function Level Authorization (BFLA)"
+				f.Severity = "high"
+				f.Description = "An unauthorized query or mutation accessed privileged administrative functions or user records without authorization."
+			case "graphql_field_auth_leak":
+				f.Title = "GraphQL Field-Level Authorization Bypass / Data Leak"
+				f.Severity = "high"
+				f.Description = "Sensitive internal fields (e.g. API keys, secrets, credentials, or tokens) were returned without proper field-level authorization controls."
+			default:
+				f.Title = "GraphQL abuse (" + signal + ")"
+			}
+			r.recordFinding(ctx, &out, f, "graphql", signal)
 		}
-		if len(out) >= 3 {
+		if len(out) >= 5 {
 			break
 		}
 	}
@@ -165,8 +201,13 @@ func (r *Runner) runWebSocket(ctx context.Context, target ScanTarget) []ModuleFi
 	}
 	probes := []struct{ payload, signal string }{
 		{`' OR 1=1--`, "ws_sqli"},
+		{`{"action":"login","user":"admin' OR '1'='1"}`, "ws_sqli"},
 		{`<script>alert(1)</script>`, "ws_xss"},
+		{`{"action":"message","text":"<svg/onload=alert(1)>"}`, "ws_xss"},
 		{`{"id":2}`, "ws_idor"},
+		{`{"action":"get_user","user_id":1}`, "ws_idor"},
+		{`{"action":"subscribe","channel":"internal_admin_feed"}`, "ws_idor"},
+		{`{"action":"handshake_test","origin":"https://evil-attacker.com"}`, "ws_cswsh"},
 	}
 	var out []ModuleFinding
 	for _, pr := range probes {
@@ -208,7 +249,12 @@ func (r *Runner) runWebSocket(ctx context.Context, target ScanTarget) []ModuleFi
 					r.observation("websocket", target, verification.RolePositiveReplay, 3, replays[1]),
 				)
 			})
-		r.recordFinding(&out, f, "websocket", pr.signal)
+		if f != nil && pr.signal == "ws_cswsh" {
+			f.Title = "Cross-Site WebSocket Hijacking (CSWSH)"
+			f.Severity = "high"
+			f.Description = "WebSocket endpoint accepted connections originating from arbitrary cross-domain origins without origin validation."
+		}
+		r.recordFinding(ctx, &out, f, "websocket", pr.signal)
 	}
 	return out
 }
@@ -222,6 +268,8 @@ func websocketSignal(body, signal string) bool {
 		return strings.Contains(body, "<script>") || strings.Contains(lower, "alert")
 	case "ws_idor":
 		return strings.Contains(lower, "email") || strings.Contains(lower, "unauthorized data")
+	case "ws_cswsh":
+		return strings.Contains(lower, "pong") || strings.Contains(lower, "authorized") || strings.Contains(lower, "welcome")
 	default:
 		return false
 	}

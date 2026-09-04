@@ -80,7 +80,7 @@ func (r *Runner) runAccountEnum(ctx context.Context, target ScanTarget) []Module
 		if finding != nil {
 			finding.Description = "A user-supplied known account and a randomized nonexistent account produced stable, distinct response classes across two interleaved rounds."
 			var out []ModuleFinding
-			r.recordFinding(&out, finding, "account_enum", "error_message_diff")
+			r.recordFinding(ctx, &out, finding, "account_enum", "error_message_diff")
 			return out
 		}
 	}
@@ -103,7 +103,7 @@ func (r *Runner) runAccountEnum(ctx context.Context, target ScanTarget) []Module
 		if finding != nil {
 			finding.Description = "Known and randomized nonexistent accounts produced a robust timing separation across two interleaved 15-sample rounds."
 			var out []ModuleFinding
-			r.recordFinding(&out, finding, "account_enum", "timing_differential")
+			r.recordFinding(ctx, &out, finding, "account_enum", "timing_differential")
 			return out
 		}
 	}

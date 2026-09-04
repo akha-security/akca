@@ -2,26 +2,67 @@ package config
 
 import "testing"
 
-func TestEffectiveMaxPagesUnlimitedUsesCeiling(t *testing.T) {
-	cfg := DefaultScanConfig()
-	cfg.MaxPages = 0
-	cfg.ScanIntensity = "normal"
-	if got := cfg.EffectiveMaxPages(); got != 1000 {
-		t.Fatalf("expected default ceiling 1000, got %d", got)
+func TestZeroCoverageLimitsAreUnlimited(t *testing.T) {
+	cfg := ScanConfig{}
+	if got := cfg.EffectiveMaxPages(); got != 0 {
+		t.Fatalf("expected unlimited pages, got %d", got)
 	}
-	cfg.ScanIntensity = "fast"
-	if got := cfg.EffectiveMaxPages(); got != 2000 {
-		t.Fatalf("expected fast ceiling 2000, got %d", got)
+	if got := cfg.MaxEndpointsLimit(); got != 0 {
+		t.Fatalf("expected unlimited endpoints, got %d", got)
+	}
+	if got := cfg.ModuleTargetLimit(); got != 0 {
+		t.Fatalf("expected unlimited module targets, got %d", got)
+	}
+	if got := cfg.ParameterDiscoveryEndpointLimit(); got != 0 {
+		t.Fatalf("expected unlimited parameter discovery, got %d", got)
+	}
+	if got := cfg.ReflectionProfileLimit(); got != 0 {
+		t.Fatalf("expected unlimited reflection profiles, got %d", got)
 	}
 }
 
-func TestMaxEndpointsDefaultCeiling(t *testing.T) {
+func TestExplicitCoverageLimitsRemainHonored(t *testing.T) {
 	cfg := DefaultScanConfig()
-	if cfg.MaxEndpointsLimit() != defaultMaxEndpointsCeiling {
-		t.Fatalf("expected %d, got %d", defaultMaxEndpointsCeiling, cfg.MaxEndpointsLimit())
-	}
+	cfg.MaxPages = 10_000
 	cfg.MaxEndpoints = 10_000
-	if cfg.MaxEndpointsLimit() != 10_000 {
-		t.Fatal("expected custom max endpoints")
+	if cfg.EffectiveMaxPages() != 10_000 || cfg.ModuleTargetLimit() != 0 ||
+		cfg.ParameterDiscoveryEndpointLimit() != 10_000 || cfg.ReflectionProfileLimit() != 0 ||
+		cfg.MaxEndpointsLimit() != 10_000 {
+		t.Fatalf("explicit limits were not preserved: %+v", cfg)
+	}
+}
+
+func TestParameterDiscoveryBudgetsFollowIntensity(t *testing.T) {
+	tests := []struct {
+		intensity        string
+		maxProbes        int
+		wordlistCap      int
+		maxTransferProbe int
+	}{
+		{intensity: "fast", maxProbes: 96, wordlistCap: 64, maxTransferProbe: 256},
+		{intensity: "normal", maxProbes: 320, wordlistCap: 160, maxTransferProbe: 1000},
+		{intensity: "stealth", maxProbes: 60, wordlistCap: 40, maxTransferProbe: 100},
+	}
+	for _, tt := range tests {
+		cfg := DefaultScanConfig()
+		cfg.ScanIntensity = tt.intensity
+		if got := cfg.ParameterMaxProbes(); got != tt.maxProbes {
+			t.Errorf("%s max probes=%d want %d", tt.intensity, got, tt.maxProbes)
+		}
+		if got := cfg.ParameterWordlistCap(); got != tt.wordlistCap {
+			t.Errorf("%s wordlist cap=%d want %d", tt.intensity, got, tt.wordlistCap)
+		}
+		if got := cfg.ParameterTransferMaxProbes(); got != tt.maxTransferProbe {
+			t.Errorf("%s transfer probes=%d want %d", tt.intensity, got, tt.maxTransferProbe)
+		}
+	}
+}
+
+func TestParameterDiscoveryWorkersHonorRuntimeConcurrencyCap(t *testing.T) {
+	cfg := DefaultScanConfig()
+	cfg.ScanIntensity = "fast"
+	cfg.MaxConcurrency = 8
+	if got := cfg.ParameterDiscoveryWorkers(); got != 8 {
+		t.Fatalf("parameter workers=%d, want runtime WAF cap 8", got)
 	}
 }

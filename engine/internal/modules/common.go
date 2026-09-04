@@ -2,8 +2,10 @@ package modules
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/akha-security/akca/engine/internal/evidencemarkers"
@@ -20,6 +22,7 @@ func (r *Runner) probe(ctx context.Context, target ScanTarget, payload string) (
 }
 
 func (r *Runner) probeForModule(ctx context.Context, module string, target ScanTarget, payload string) (httpclient.RequestResponse, error) {
+	r.probeCount.Add(1)
 	method := strings.ToUpper(target.Method)
 	if method == "" {
 		method = http.MethodGet
@@ -31,17 +34,55 @@ func (r *Runner) probeForModule(ctx context.Context, module string, target ScanT
 	if module != "" && isHeaderLocation(loc) && !moduleAllowsHeaderPayloads(module) {
 		return r.probeWithoutInjectedPayload(ctx, module, target)
 	}
-	probeURL, body, headers, err := reflection.BuildProbeRequestWithTemplate(
-		target.EndpointURL, method, target.Parameter, loc, payload, target.BodyTemplate,
-	)
+	if strings.TrimSpace(target.Parameter) == "" {
+		headers := r.wafHeadersForModule(module, target.EndpointURL)
+		headers = sanitizeProbeHeaders(method, nil, headers)
+		rr, err := r.client.Do(ctx, method, target.EndpointURL, nil, headers)
+		if err != nil && strings.Contains(err.Error(), "budget exhausted") {
+			r.markBudgetExhausted(module, target.EndpointURL)
+		}
+		return rr, err
+	}
+	template := target.RequestTemplate
+	if template.URL == "" {
+		template.URL = target.EndpointURL
+	}
+	if template.Method == "" {
+		template.Method = method
+	}
+	if template.Body == "" {
+		template.Body = target.BodyTemplate
+	}
+	if template.ContentType == "" {
+		template.ContentType = target.Profile.ContentType
+	}
+	mutated, err := reflection.MutateRequest(template, target.Parameter, loc, payload)
 	if err != nil {
 		return httpclient.RequestResponse{}, err
 	}
+	probeURL, body, headers := mutated.URL, mutated.Body, mutated.Headers
 	headers = mergeHeaders(headers, r.wafHeadersForModule(module, target.EndpointURL))
-	effMethod := effectiveMethod(method, loc)
+	effMethod := mutated.Method
 	headers = sanitizeProbeHeaders(effMethod, body, headers)
 	headers = r.registerRuntimeProbe(target, payload, headers)
-	return r.client.Do(ctx, effMethod, probeURL, body, headers)
+	rr, err := r.client.Do(ctx, effMethod, probeURL, body, headers)
+	if err != nil && strings.Contains(err.Error(), "budget exhausted") {
+		r.markBudgetExhausted(module, target.EndpointURL)
+	}
+	return rr, err
+}
+
+func (r *Runner) markBudgetExhausted(module, endpoint string) {
+	if !r.budgetExhausted.CompareAndSwap(false, true) {
+		return
+	}
+	r.emitOnce("global_request_budget_exhausted", "coverage_gap",
+		fmt.Sprintf("Full Scan request budget exhausted after %d requests", r.cfg.RequestBudget),
+		map[string]interface{}{
+			"scan_id": r.scanID, "module": module, "endpoint": endpoint,
+			"reason": "global request budget exhausted", "request_budget": r.cfg.RequestBudget,
+		},
+	)
 }
 
 func sanitizeProbeHeaders(method string, body []byte, headers map[string]string) map[string]string {
@@ -120,7 +161,7 @@ func baseSeverity(module string) string {
 		return "info"
 	case "sqli", "command_injection", "ssti", "xxe", "ssrf", "deserialization", "lfi", "rce", "nosql":
 		return "critical"
-	case "xss", "blind_xss", "idor", "auth_bypass", "file_upload":
+	case "xss", "blind_xss", "idor", "auth_bypass", "file_upload", "host_poisoning", "llm_injection":
 		return "high"
 	default:
 		return "medium"
@@ -364,4 +405,11 @@ func repeatSnapshot(s verification.ResponseSnapshot, n int) []verification.Respo
 		out[i] = s
 	}
 	return out
+}
+
+var probeTokenCounter uint64
+
+func randomProbeToken() string {
+	seq := atomic.AddUint64(&probeTokenCounter, 1)
+	return fmt.Sprintf("%x_%x", time.Now().UnixNano(), seq)
 }

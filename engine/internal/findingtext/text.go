@@ -107,7 +107,7 @@ func formatSignal(signal string) string {
 		return "server-side template evaluated arithmetic expression"
 	case "reflected", "dom_xss", "stored":
 		return "user-controlled input reflected or executed in the page"
-	case "blind_oast", "rfi_oast":
+	case "blind_oast", "rfi_oast", "blind_xss_oast_callback":
 		return "out-of-band callback received via Interactsh (OAST) correlation"
 	default:
 		return strings.ReplaceAll(signal, "_", " ")

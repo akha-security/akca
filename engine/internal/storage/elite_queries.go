@@ -225,5 +225,7 @@ func (db *DB) WorkspacePermissionAllowed(workspaceID, email, perm string) bool {
 	_ = workspaceID
 	_ = email
 	_ = perm
-	return true
+	// Workspace membership is not implemented yet. Do not turn the unfinished
+	// multi-user surface into an authorization bypass.
+	return false
 }

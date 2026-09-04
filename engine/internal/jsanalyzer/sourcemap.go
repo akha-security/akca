@@ -21,7 +21,7 @@ func DetectSourceMaps(jsURL, js string) []SourceMapRef {
 			}
 			seen[ref] = struct{}{}
 			out = append(out, SourceMapRef{
-				URL: ref, FromFile: jsURL, Exposed: true, Confidence: 0.9,
+				URL: ref, FromFile: jsURL, Exposed: false, Confidence: 0.5,
 			})
 		}
 	}

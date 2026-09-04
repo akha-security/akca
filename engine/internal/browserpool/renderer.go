@@ -8,8 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-
-	"github.com/go-rod/rod/lib/launcher"
 )
 
 // HeadlessRenderer uses an installed Chromium-compatible browser. Dumping the
@@ -38,44 +36,27 @@ func NewHeadlessRendererWithProxy(proxyURL string, insecureTLS bool) *HeadlessRe
 }
 
 func findBrowserBinary() string {
-	for _, name := range []string{"chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome", "msedge"} {
-		if path, err := exec.LookPath(name); err == nil {
-			return path
-		}
-	}
 	for _, candidate := range windowsBrowserCandidates() {
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 			return candidate
 		}
 	}
-	// Rod's browser manager has a stable per-user cache. Checking BinPath does
-	// not access the network, but makes a previously auto-provisioned Chromium
-	// visible to every renderer created later in the scan.
-	downloaded := launcher.NewBrowser().BinPath()
-	if info, err := os.Stat(downloaded); err == nil && !info.IsDir() {
-		return downloaded
+	for _, name := range []string{"chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome", "msedge", "brave"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return path
+		}
 	}
 	return ""
 }
 
 // EnsureBrowser returns a usable Chromium-compatible binary. Existing system
 // browsers are preferred. If none exists, a portable Chromium build is
-// downloaded once into the current user's browser cache.
+// searched or safely skipped.
 func EnsureBrowser() (path string, downloaded bool, err error) {
 	if path = findBrowserBinary(); path != "" {
 		return path, false, nil
 	}
-	path, err = launcher.NewBrowser().Get()
-	if err != nil {
-		return "", false, fmt.Errorf("automatic Chromium provisioning failed: %w", err)
-	}
-	if info, statErr := os.Stat(path); statErr != nil || info.IsDir() {
-		if statErr == nil {
-			statErr = fmt.Errorf("downloaded path is a directory")
-		}
-		return "", false, fmt.Errorf("automatic Chromium provisioning produced an invalid binary: %w", statErr)
-	}
-	return path, true, nil
+	return "", false, fmt.Errorf("no system Chromium browser found (Chrome/Edge/Brave)")
 }
 
 func (r *HeadlessRenderer) Available() bool { return r != nil && r.binary != "" }
@@ -136,10 +117,18 @@ func cloneStrings(values map[string]string) map[string]string {
 
 func windowsBrowserCandidates() []string {
 	var out []string
-	roots := []string{os.Getenv("PROGRAMFILES"), os.Getenv("PROGRAMFILES(X86)"), os.Getenv("LOCALAPPDATA")}
+	roots := []string{
+		`C:\Program Files`, `C:\Program Files (x86)`,
+		os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)"),
+		os.Getenv("ProgramW6432"), os.Getenv("LocalAppData"),
+		os.Getenv("LOCALAPPDATA"), os.Getenv("PROGRAMFILES"),
+		os.Getenv("PROGRAMFILES(X86)"),
+	}
 	for _, parts := range [][]string{
-		{"Microsoft", "Edge", "Application", "msedge.exe"},
 		{"Google", "Chrome", "Application", "chrome.exe"},
+		{"Chromium", "Application", "chrome.exe"},
+		{"Microsoft", "Edge", "Application", "msedge.exe"},
+		{"BraveSoftware", "Brave-Browser", "Application", "brave.exe"},
 	} {
 		for _, root := range roots {
 			if root == "" {
@@ -155,6 +144,9 @@ func (r *HeadlessRenderer) commandArgs(rawURL string, profileDirs ...string) []s
 	args := []string{
 		"--headless=new", "--disable-gpu", "--disable-extensions",
 		"--disable-background-networking", "--no-first-run", "--no-default-browser-check",
+		"--disable-sync", "--disable-component-update", "--disable-default-apps",
+		"--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints,WebOTP,MicrosoftAccount,EdgeSignin,Sync",
+		"--identity-provider-disabled", "--disable-single-click-autofill", "--disable-autofill", "--guest",
 		"--virtual-time-budget=1500", "--dump-dom",
 	}
 	if len(profileDirs) > 0 && strings.TrimSpace(profileDirs[0]) != "" {

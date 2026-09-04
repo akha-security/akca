@@ -1,0 +1,10 @@
+* text=auto
+*.go text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
+*.exe binary

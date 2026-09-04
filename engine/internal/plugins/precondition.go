@@ -24,33 +24,31 @@ var registry = []Module{
 	{
 		Manifest: models.PluginManifest{Name: "xss", Description: "Cross-site scripting", Version: "0.1.0"},
 		Precondition: Precondition{
-			RequiredEndpointTypes: []string{"html", "api"},
-			RequireContentTypes:   []string{"text/html", "application/json"},
+			RequiredEndpointTypes: []string{"html", "api", "web", "unknown"},
 		},
 	},
 	{
 		Manifest: models.PluginManifest{Name: "sqli", Description: "SQL injection", Version: "0.1.0"},
 		Precondition: Precondition{
-			RequiredEndpointTypes: []string{"api", "html", "graphql"},
+			RequiredEndpointTypes: []string{"api", "html", "web", "graphql", "unknown"},
 		},
 	},
 	{
 		Manifest: models.PluginManifest{Name: "nosql", Description: "NoSQL injection (MongoDB operators)", Version: "0.1.0"},
 		Precondition: Precondition{
-			RequiredEndpointTypes: []string{"api", "graphql"},
-			RequireContentTypes:   []string{"application/json"},
+			RequiredEndpointTypes: []string{"api", "html", "web", "graphql", "unknown"},
 		},
 	},
 	{
 		Manifest: models.PluginManifest{Name: "ssrf", Description: "Server-side request forgery", Version: "0.1.0"},
 		Precondition: Precondition{
-			RequiredEndpointTypes: []string{"api", "graphql"},
+			RequiredEndpointTypes: []string{"api", "html", "web", "graphql", "unknown"},
 		},
 	},
 	{
 		Manifest: models.PluginManifest{Name: "graphql", Description: "GraphQL testing", Version: "0.1.0"},
 		Precondition: Precondition{
-			RequiredEndpointTypes: []string{"graphql"},
+			RequiredEndpointTypes: []string{"graphql", "api", "html", "web", "unknown"},
 		},
 	},
 	{
@@ -62,20 +60,19 @@ var registry = []Module{
 	{
 		Manifest: models.PluginManifest{Name: "idor", Description: "Insecure direct object reference", Version: "0.1.0"},
 		Precondition: Precondition{
-			RequireAuthSurface:    true,
-			RequiredEndpointTypes: []string{"api", "graphql"},
+			RequiredEndpointTypes: []string{"api", "html", "web", "graphql", "unknown"},
 		},
 	},
 	{
 		Manifest: models.PluginManifest{Name: "command_injection", Description: "OS command injection", Version: "0.1.0"},
 		Precondition: Precondition{
-			RequiredEndpointTypes: []string{"api", "html"},
+			RequiredEndpointTypes: []string{"api", "html", "web", "unknown"},
 		},
 	},
 	{
 		Manifest: models.PluginManifest{Name: "ssti", Description: "Server-side template injection", Version: "0.1.0"},
 		Precondition: Precondition{
-			RequireTechHints: []string{"framework:Laravel", "framework:Django", "framework:Rails", "framework:Spring"},
+			RequiredEndpointTypes: []string{"api", "html", "web", "unknown"},
 		},
 	},
 }

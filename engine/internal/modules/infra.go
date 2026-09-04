@@ -39,7 +39,7 @@ func (r *Runner) runCloudStorage(ctx context.Context, target ScanTarget) []Modul
 		signal := cloudStorageProvider(rawURL)
 		p := defaultPayload("cloud_storage", signal, rawURL, signal)
 		f := r.verifyAndBuild(ctx, "cloud_storage", target, p, baseline, rr, signal, false, false, "", "")
-		r.recordFinding(&out, f, "cloud_storage", signal)
+		r.recordFinding(ctx, &out, f, "cloud_storage", signal)
 	}
 	return out
 }

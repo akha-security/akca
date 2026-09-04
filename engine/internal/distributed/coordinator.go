@@ -356,6 +356,9 @@ func (c *Controls) AuthorizeURL(rawURL string) error {
 	if err != nil || target.Scheme == "" || target.Hostname() == "" {
 		return ErrOutOfScope
 	}
+	if !strings.EqualFold(target.Scheme, "http") && !strings.EqualFold(target.Scheme, "https") {
+		return ErrOutOfScope
+	}
 	for _, rawAllowed := range c.job.Scope {
 		allowed := strings.TrimSpace(rawAllowed)
 		if strings.HasPrefix(allowed, "*.") {
@@ -370,9 +373,12 @@ func (c *Controls) AuthorizeURL(rawURL string) error {
 		if parseErr == nil && parsed.Hostname() != "" {
 			sameOrigin := strings.EqualFold(parsed.Scheme, target.Scheme) &&
 				strings.EqualFold(parsed.Host, target.Host)
-			if sameOrigin && (parsed.Path == "" || parsed.Path == "/" ||
-				strings.HasPrefix(target.EscapedPath(), parsed.EscapedPath())) {
-				return nil
+			if sameOrigin {
+				pPath := strings.TrimRight(parsed.EscapedPath(), "/")
+				tPath := strings.TrimRight(target.EscapedPath(), "/")
+				if pPath == "" || pPath == "/" || tPath == pPath || strings.HasPrefix(tPath, pPath+"/") {
+					return nil
+				}
 			}
 			continue
 		}

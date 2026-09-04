@@ -19,6 +19,32 @@ type groupCClient struct {
 	statuses  map[string]int
 }
 
+type thresholdDiscoveryClient struct {
+	account string
+	count   int
+}
+
+func (c *thresholdDiscoveryClient) Do(_ context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	u, _ := url.Parse(rawURL)
+	account := u.Query().Get("user")
+	status, responseBody := 401, "invalid credentials"
+	if strings.HasPrefix(account, "akca-threshold-") {
+		if c.account == "" {
+			c.account = account
+		}
+		if account == c.account {
+			c.count++
+		}
+		if c.count >= 11 {
+			status, responseBody = 429, "too many attempts"
+		}
+	}
+	return httpclient.RequestResponse{
+		Request:  httpclient.RequestRecord{Method: method, URL: rawURL, Body: string(body), Headers: headers},
+		Response: httpclient.ResponseRecord{StatusCode: status, Body: responseBody, Headers: map[string]string{"Content-Type": "text/plain"}},
+	}, nil
+}
+
 type cachePoisonClient struct {
 	poisoned  bool
 	poisonURL string
@@ -56,11 +82,21 @@ func (c *cachePoisonClient) DoWithoutSession(ctx context.Context, method, rawURL
 type authenticatedGroupCClient struct{}
 
 func (authenticatedGroupCClient) Do(_ context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
-	return authResponse(method, rawURL, body, headers, "admin dashboard account settings")
+	headers = copyTestHeaders(headers)
+	headers["Cookie"] = "session=valid"
+	return authResponse(method, rawURL, body, headers, `{"email":"alice@example.com","role":"admin","account_id":"acct-7"}`)
 }
 
 func (authenticatedGroupCClient) DoWithoutSession(_ context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
-	return authResponse(method, rawURL, body, headers, "admin dashboard account settings")
+	return authResponse(method, rawURL, body, headers, `{"email":"alice@example.com","role":"admin","account_id":"acct-7"}`)
+}
+
+func copyTestHeaders(headers map[string]string) map[string]string {
+	out := make(map[string]string, len(headers)+1)
+	for key, value := range headers {
+		out[key] = value
+	}
+	return out
 }
 
 func authResponse(method, rawURL string, body []byte, headers map[string]string, responseBody string) (httpclient.RequestResponse, error) {
@@ -166,8 +202,7 @@ func TestCORSMisconfiguration(t *testing.T) {
 		headers: map[string]map[string]string{
 			"origin:null": {"Access-Control-Allow-Origin": "null"},
 			"origin:https://evil.example": {
-				"Access-Control-Allow-Origin":      "https://evil.example",
-				"Access-Control-Allow-Credentials": "true",
+				"Access-Control-Allow-Origin": "https://evil.example",
 			},
 		},
 	}
@@ -175,6 +210,89 @@ func TestCORSMisconfiguration(t *testing.T) {
 	findings := groupCRunner(t, c).runCORS(context.Background(), target)
 	if len(findings) == 0 {
 		t.Fatal("expected cors finding")
+	}
+}
+
+func TestCORSCloudMetadataSSRF(t *testing.T) {
+	c := &groupCClient{
+		responses: map[string]string{
+			"origin:https://benign.example": "ok",
+			"origin:http://169.254.169.254": "metadata-allowed",
+		},
+		headers: map[string]map[string]string{
+			"origin:http://169.254.169.254": {
+				"Access-Control-Allow-Origin":      "http://169.254.169.254",
+				"Access-Control-Allow-Credentials": "true",
+			},
+		},
+	}
+	target := ScanTarget{EndpointURL: "http://example.com/api/data", Method: "GET", Parameter: "q"}
+	findings := groupCRunner(t, c).runCORS(context.Background(), target)
+	if len(findings) == 0 {
+		t.Fatal("expected cors cloud metadata finding")
+	}
+	found := false
+	for _, f := range findings {
+		if f.Severity == "critical" && strings.Contains(f.Title, "Cloud Metadata") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected critical cloud metadata CORS finding, got: %+v", findings)
+	}
+}
+
+func TestCORSPrivateNetworkAccess(t *testing.T) {
+	c := &groupCClient{
+		responses: map[string]string{
+			"origin:https://benign.example": "ok",
+			"origin:https://evil.example":   "options-ok",
+		},
+		headers: map[string]map[string]string{
+			"origin:https://evil.example": {
+				"Access-Control-Allow-Origin":          "https://evil.example",
+				"Access-Control-Allow-Private-Network": "true",
+			},
+		},
+	}
+	target := ScanTarget{EndpointURL: "http://example.com/api/data", Method: "GET", Parameter: "q"}
+	findings := groupCRunner(t, c).runCORS(context.Background(), target)
+	found := false
+	for _, f := range findings {
+		if strings.Contains(f.Title, "Private Network Access") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected PNA CORS finding, got: %+v", findings)
+	}
+}
+
+func TestCORSProbePreservesRequestTemplate(t *testing.T) {
+	r := groupCRunner(t, &groupCClient{})
+	target := ScanTarget{
+		EndpointURL: "http://example.com/fallback?q=original",
+		Method:      "GET",
+		RequestTemplate: reflection.RequestTemplate{
+			URL:         "http://example.com/api/data?q=original",
+			Method:      "POST",
+			Body:        `{"name":"akca"}`,
+			ContentType: "application/json",
+			Headers:     map[string]string{"X-Route": "api"},
+		},
+	}
+	rr, err := r.probeCORS(context.Background(), target, "https://evil.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Request.Method != "POST" || rr.Request.URL != target.RequestTemplate.URL || rr.Request.Body != target.RequestTemplate.Body {
+		t.Fatalf("CORS probe changed request routing: %+v", rr.Request)
+	}
+	if rr.Request.Headers["Origin"] != "https://evil.example" || rr.Request.Headers["X-Route"] != "api" ||
+		rr.Request.Headers["Content-Type"] != "application/json" {
+		t.Fatalf("CORS probe lost request headers: %+v", rr.Request.Headers)
 	}
 }
 
@@ -286,11 +404,96 @@ func TestCacheDeceptionRequiresCacheEvidence(t *testing.T) {
 func TestBrokenAuthUsesAnonymousControl(t *testing.T) {
 	c := authenticatedGroupCClient{}
 	cfg := config.DefaultScanConfig()
+	cfg.SessionCookies = map[string]string{"session": "valid"}
 	r := NewRunner("scan-c", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
 	target := ScanTarget{EndpointURL: "http://example.com/admin", Method: "GET", Parameter: "q"}
 	findings := r.runBrokenAuth(context.Background(), target)
 	if len(findings) != 1 {
 		t.Fatalf("two stable anonymous replays of the authenticated resource must confirm broken auth, got %d", len(findings))
+	}
+}
+
+func TestBrokenAuthRequiresConfiguredAuthentication(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	r := NewRunner("scan-c", authenticatedGroupCClient{}, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
+	target := ScanTarget{EndpointURL: "http://example.com/admin", Method: "GET", Parameter: "q"}
+	if findings := r.runBrokenAuth(context.Background(), target); len(findings) != 0 {
+		t.Fatalf("public scan must not invent an authenticated baseline, got %d findings", len(findings))
+	}
+}
+
+func TestBrokenAuthRequiresCredentialOnActualBaselineRequest(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.SessionCookies = map[string]string{"session": "configured-but-not-applied"}
+	c := &sessionlessGroupCClient{groupCClient: &groupCClient{responses: map[string]string{
+		"__default__": `{"email":"alice@example.com","role":"admin","account_id":"acct-7"}`,
+	}}}
+	r := NewRunner("scan-c", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
+	target := ScanTarget{EndpointURL: "http://example.com/admin", Method: "GET", Parameter: "q"}
+	if findings := r.runBrokenAuth(context.Background(), target); len(findings) != 0 {
+		t.Fatalf("configured but unapplied credentials must not create a finding, got %d", len(findings))
+	}
+}
+
+type brokenAuthPublicClient struct{}
+
+func (brokenAuthPublicClient) Do(_ context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	headers = copyTestHeaders(headers)
+	headers["Cookie"] = "session=valid"
+	return authResponse(method, rawURL, body, headers, "Public account profile and orders documentation for all visitors")
+}
+
+func (brokenAuthPublicClient) DoWithoutSession(_ context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	return authResponse(method, rawURL, body, headers, "Public account profile and orders documentation for all visitors")
+}
+
+func TestBrokenAuthRejectsPublicKeywordOverlap(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.SessionCookies = map[string]string{"session": "valid"}
+	r := NewRunner("scan-c", brokenAuthPublicClient{}, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
+	target := ScanTarget{EndpointURL: "http://example.com/account", Method: "GET", Parameter: "q"}
+	if findings := r.runBrokenAuth(context.Background(), target); len(findings) != 0 {
+		t.Fatalf("generic auth-related words on a public page must not prove broken auth, got %d findings", len(findings))
+	}
+}
+
+func TestBrokenAuthRequiresSamePrivateResource(t *testing.T) {
+	baseline := httpclient.ResponseRecord{StatusCode: 200, Body: `{"email":"alice@example.com","role":"admin"}`}
+	anonymous := httpclient.ResponseRecord{StatusCode: 200, Body: `{"email":"public@example.com","role":"viewer"}`}
+	if brokenAuthSignal(anonymous, baseline) {
+		t.Fatal("two different resources sharing sensitive field names must not prove broken auth")
+	}
+}
+
+func TestBrokenAuthPreservesStableIdentityAcrossVolatileUUIDNormalization(t *testing.T) {
+	baseline := httpclient.ResponseRecord{StatusCode: 200, Body: `{"account_id":"11111111-1111-1111-1111-111111111111","role":"admin"}`}
+	anonymous := httpclient.ResponseRecord{StatusCode: 200, Body: `{"account_id":"22222222-2222-2222-2222-222222222222","role":"admin"}`}
+	if brokenAuthSignal(anonymous, baseline) {
+		t.Fatal("normalization must not collapse two different account identities into one broken-auth proof")
+	}
+}
+
+func TestBrokenAuthRejectsUnsafeMethod(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.SessionCookies = map[string]string{"session": "valid"}
+	r := NewRunner("scan-c", authenticatedGroupCClient{}, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
+	target := ScanTarget{EndpointURL: "http://example.com/admin/delete", Method: "POST", BodyTemplate: `{"id":7}`}
+	if findings := r.runBrokenAuth(context.Background(), target); len(findings) != 0 {
+		t.Fatalf("unsafe requests must not be replayed for generic broken-auth proof, got %d findings", len(findings))
+	}
+}
+
+func TestBrokenAuthEndpointRunsOnceAcrossParameters(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	r := groupCRunner(t, &groupCClient{})
+	r.cfg = cfg
+	first := ScanTarget{EndpointURL: "http://example.com/account?user=alice", Method: "GET", Parameter: "user"}
+	second := ScanTarget{EndpointURL: "http://example.com/account?tab=billing", Method: "GET", Parameter: "tab"}
+	if !r.endpointModuleOnce("broken_auth", first) {
+		t.Fatal("first endpoint-level broken-auth check should run")
+	}
+	if r.endpointModuleOnce("broken_auth", second) {
+		t.Fatal("same route must not produce one broken-auth check per parameter")
 	}
 }
 
@@ -353,6 +556,22 @@ func TestAPIExcessiveExposure(t *testing.T) {
 	}
 }
 
+func TestAPIExposureRejectsHTMLTokenPage(t *testing.T) {
+	c := &groupCClient{
+		responses: map[string]string{
+			"": `<html><body><input name="csrf_token" value="abc"><span>internal_id</span></body></html>`,
+		},
+		headers: map[string]map[string]string{
+			"": {"Content-Type": "text/html"},
+		},
+	}
+	target := ScanTarget{EndpointURL: "http://example.com/profile", Method: "GET", Parameter: "q"}
+	findings := groupCRunner(t, c).runAPIExposure(context.Background(), target)
+	if len(findings) != 0 {
+		t.Fatalf("HTML token/internal_id page must not become API exposure, got %d", len(findings))
+	}
+}
+
 func TestRateLimitWeakness(t *testing.T) {
 	c := &groupCClient{responses: map[string]string{"__default__": "invalid login attempt"}}
 	target := ScanTarget{EndpointURL: "http://example.com/login", Method: "GET", Parameter: "user"}
@@ -380,6 +599,22 @@ func TestRateLimitWeaknessSuppresses429(t *testing.T) {
 	findings := groupCRunner(t, c).runRateLimit(context.Background(), target)
 	if len(findings) != 0 {
 		t.Fatalf("expected existing rate limit to suppress finding, got %d", len(findings))
+	}
+}
+
+func TestRateLimitThresholdDiscoveryUsesOneAccountAndFindsThresholdAboveSix(t *testing.T) {
+	c := &thresholdDiscoveryClient{}
+	cfg := config.DefaultScanConfig()
+	cfg.PayloadBudget = config.PayloadBudgetHigh
+	r := NewRunner("rate-threshold", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+		func(string, string, map[string]interface{}) error { return nil }, cfg)
+	target := ScanTarget{EndpointURL: "http://example.com/login", Method: "GET", Parameter: "user", Location: "query"}
+	findings := r.runRateLimit(context.Background(), target)
+	if c.count != 11 {
+		t.Fatalf("threshold account request count = %d, want 11", c.count)
+	}
+	if len(findings) != 1 || findings[0].Evidence.Response.StatusCode != 429 {
+		t.Fatalf("threshold discovery did not preserve/report 429 evidence: %+v", findings)
 	}
 }
 
@@ -414,9 +649,15 @@ func TestParameterPollutionRejectsEchoedAdminValue(t *testing.T) {
 	if hppArraySignal("submitted array values: user, admin", "submitted array values: user") {
 		t.Fatal("an echoed HPP array must not prove privilege escalation")
 	}
+	if !hppSignal("role is admin elevated", "role is user") {
+		t.Fatal("server-side elevated role marker should remain visible as an HPP signal")
+	}
+	if !hppArraySignal(`{"is_admin":true}`, `{"is_admin":false}`) {
+		t.Fatal("server-side admin boolean marker should remain visible as an HPP array signal")
+	}
 }
 
-func TestCSRFRequiresMissingTokenProofAndInvalidControl(t *testing.T) {
+func TestCSRFDoesNotExecuteCapturedStateChangeWithoutCleanupPolicy(t *testing.T) {
 	c := &groupCClient{
 		responses: map[string]string{
 			`amount=10&csrf_token=valid`: "transfer accepted",
@@ -435,8 +676,8 @@ func TestCSRFRequiresMissingTokenProofAndInvalidControl(t *testing.T) {
 		Profile:      reflection.ReflectionProfile{ContentType: "application/x-www-form-urlencoded"},
 	}
 	findings := runner.runCSRF(context.Background(), target)
-	if len(findings) != 1 {
-		t.Fatalf("expected one confirmed CSRF finding, got %d", len(findings))
+	if len(findings) != 0 {
+		t.Fatalf("captured POST without state/cleanup contract must not produce a finding, got %d", len(findings))
 	}
 }
 

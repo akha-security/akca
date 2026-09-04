@@ -13,6 +13,23 @@ import (
 	"github.com/akha-security/akca/engine/internal/testfixtures"
 )
 
+func TestVulnerabilityOverviewShowsCountsInDescendingOrder(t *testing.T) {
+	html := vulnerabilityOverviewHTML(storage.DashboardMetrics{ByVulnClass: map[string]int{
+		"sqli": 10, "ssrf": 5, "xss": 20,
+	}})
+	for _, want := range []string{"Cross-Site Scripting (XSS)", "SQL Injection", "Server-Side Request Forgery (SSRF)", `data-vclass="sqli"`} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("vulnerability overview omitted %q: %s", want, html)
+		}
+	}
+	xssIndex := strings.Index(html, "Cross-Site Scripting (XSS)")
+	sqlIndex := strings.Index(html, "SQL Injection")
+	ssrfIndex := strings.Index(html, "Server-Side Request Forgery (SSRF)")
+	if !(xssIndex < sqlIndex && sqlIndex < ssrfIndex) {
+		t.Fatalf("overview is not ordered by count: %s", html)
+	}
+}
+
 func setupReportDB(t *testing.T, findingCount int) (*storage.DB, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "akca.db")
@@ -55,11 +72,11 @@ func TestExportFormatsSampleData(t *testing.T) {
 	if err := exporter.Export(&htmlBuf, opts); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(htmlBuf.String(), "HackerOne Submission Report") {
-		t.Fatal("expected HackerOne template title")
+	if !strings.Contains(htmlBuf.String(), ProductName) {
+		t.Fatal("expected product title")
 	}
-	if strings.Contains(htmlBuf.String(), testfixtures.GitHubReportToken()) {
-		t.Fatal("expected redacted API key in HTML")
+	if strings.Contains(htmlBuf.String(), "[REDACTED]") {
+		t.Fatal("did not expect redacted markers in HTML")
 	}
 
 	opts.Template = TemplateBugcrowd
@@ -106,8 +123,43 @@ func TestExportFormatsSampleData(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(sarifBuf.String(), `"version": "2.1.0"`) ||
-		!strings.Contains(sarifBuf.String(), `"ruleId": "xss"`) {
+		!strings.Contains(sarifBuf.String(), `"ruleId": "xss"`) ||
+		!strings.Contains(sarifBuf.String(), ProductName) {
 		t.Fatalf("invalid SARIF output: %s", sarifBuf.String())
+	}
+}
+
+func TestPathDiscoverySectionUsesFuzzResults(t *testing.T) {
+	db, scanID := setupReportDB(t, 0)
+	defer db.Close()
+	if err := db.SaveFuzzResult(scanID, map[string]interface{}{
+		"url": "https://example.com/admin", "method": "GET", "status_code": 200,
+		"category": "admin", "signal": "ok", "body_length": 123,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveFuzzResult(scanID, map[string]interface{}{
+		"url": "https://example.com/missing", "method": "GET", "status_code": 404,
+		"category": "general", "signal": "not_found",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	builder := NewBuilder(evidencestore.New(db), db)
+	meta, err := builder.BuildMeta(Options{ScanID: scanID, Template: TemplateInternal, Redact: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(meta.PathDiscoveries) != 1 || meta.PathDiscoveries[0].URL != "https://example.com/admin" {
+		t.Fatalf("unexpected path discoveries: %+v", meta.PathDiscoveries)
+	}
+	var htmlBuf bytes.Buffer
+	if err := NewExporter(builder, nil).Export(&htmlBuf, Options{ScanID: scanID, Template: TemplateInternal, Format: FormatHTML}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(htmlBuf.String(), "Directory &amp; Path Discovery") ||
+		!strings.Contains(htmlBuf.String(), "https://example.com/admin") {
+		t.Fatalf("HTML report did not render path discovery section: %s", htmlBuf.String())
 	}
 }
 
@@ -210,11 +262,11 @@ func TestLargeScanStreamingMemory(t *testing.T) {
 	}
 }
 
-func TestRedaction(t *testing.T) {
+func TestRedactionPreservesRawValues(t *testing.T) {
 	in := "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.x and api_key=supersecretvalue"
 	out := RedactString(in)
-	if strings.Contains(out, "supersecretvalue") || strings.Contains(out, "eyJhbGci") {
-		t.Fatalf("redaction failed: %s", out)
+	if !strings.Contains(out, "supersecretvalue") || !strings.Contains(out, "eyJhbGci") {
+		t.Fatalf("raw values were unexpectedly redacted: %s", out)
 	}
 }
 
@@ -296,8 +348,8 @@ func TestMigrationVersionLatest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v != 15 {
-		t.Fatalf("expected migration version 15, got %d", v)
+	if v != 16 {
+		t.Fatalf("expected migration version 16, got %d", v)
 	}
 	_ = scanID
 }

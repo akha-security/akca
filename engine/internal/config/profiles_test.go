@@ -2,72 +2,65 @@ package config
 
 import "testing"
 
-func TestApplyScanProfileQuickRecon(t *testing.T) {
-	cfg := ScanConfig{SmartScanProfile: "QuickRecon"}
-	cfg = ApplyScanProfile(cfg)
-	if cfg.EnableFuzzing {
-		t.Fatal("QuickRecon should disable fuzzing")
+func TestDefaultUsesSingleFullScanProfile(t *testing.T) {
+	cfg := ApplyScanProfile(DefaultScanConfig())
+	if cfg.SmartScanProfile != "Full Scan" {
+		t.Fatalf("default profile = %q, want Full Scan", cfg.SmartScanProfile)
 	}
-	if cfg.MaxDepth != 2 {
-		t.Fatalf("expected depth 2, got %d", cfg.MaxDepth)
+	if cfg.RequestBudget != 0 || cfg.CrawlerRequestBudget != 1_000 {
+		t.Fatalf("unexpected request budgets: total=%d crawler=%d", cfg.RequestBudget, cfg.CrawlerRequestBudget)
 	}
-	if cfg.MaxPages != 150 {
-		t.Fatalf("expected max pages 150, got %d", cfg.MaxPages)
+	if cfg.MaxPages != 1_000 || cfg.MaxEndpoints != 1_000 || cfg.MaxDepth != 0 {
+		t.Fatalf("unexpected full scan coverage limits: pages=%d endpoints=%d depth=%d", cfg.MaxPages, cfg.MaxEndpoints, cfg.MaxDepth)
 	}
-}
-
-func TestApplyScanProfileLowNoise(t *testing.T) {
-	cfg := DefaultScanConfig()
-	cfg.SmartScanProfile = "LowNoiseWAFFriendly"
-	cfg = ApplyScanProfile(cfg)
-	if cfg.GlobalRateLimit != 1 {
-		t.Fatalf("expected rate 1, got %v", cfg.GlobalRateLimit)
+	if cfg.PayloadBudget != PayloadBudgetUnlimited || cfg.TimeBudget != 0 || cfg.MaxMemoryMB != 0 {
+		t.Fatalf("full scan must be exhaustive but memory-safe: %+v", cfg)
 	}
 }
 
-func TestApplyScanProfileHonorsExplicitDisables(t *testing.T) {
+func TestLegacyProfilesNormalizeToFullScan(t *testing.T) {
+	for _, legacy := range []string{"Balanced", "QuickRecon", "FullBugBounty", "APIDeepScan", "JavaScriptHeavySPA"} {
+		cfg := ApplyScanProfile(ScanConfig{SmartScanProfile: legacy})
+		if cfg.SmartScanProfile != "Full Scan" || cfg.RequestBudget != 0 || cfg.CrawlerRequestBudget != 1_000 || cfg.MaxPages != 1_000 || cfg.MaxEndpoints != 1_000 {
+			t.Fatalf("legacy profile %q was not normalized: %+v", legacy, cfg)
+		}
+	}
+}
+
+func TestFullScanHonorsExplicitTrafficLimitsAndFeatureDisables(t *testing.T) {
 	cfg := DefaultScanConfig()
-	cfg.SmartScanProfile = "FullBugBounty"
+	cfg.RequestBudget = 200_000
+	cfg.CrawlerRequestBudget = 50_000
+	cfg.MaxPages = 10_000
+	cfg.TimeBudget = 2
 	cfg.EnableOAST = false
 	cfg.EnableFuzzing = false
 	cfg.EnableJSAnalysis = false
-	cfg.EnableWAFBypassHeaders = false
+	cfg.Explicit.RequestBudget = true
+	cfg.Explicit.CrawlerRequestBudget = true
+	cfg.Explicit.MaxPages = true
+	cfg.Explicit.TimeBudget = true
 	cfg.Explicit.EnableOAST = true
 	cfg.Explicit.EnableFuzzing = true
 	cfg.Explicit.EnableJSAnalysis = true
-	cfg.Explicit.EnableWAFBypassHeaders = true
 
 	cfg = ApplyScanProfile(cfg)
-	if cfg.EnableOAST || cfg.EnableFuzzing || cfg.EnableJSAnalysis || cfg.EnableWAFBypassHeaders {
-		t.Fatalf("profile re-enabled explicit disables: oast=%v fuzzing=%v js=%v waf=%v",
-			cfg.EnableOAST, cfg.EnableFuzzing, cfg.EnableJSAnalysis, cfg.EnableWAFBypassHeaders)
+	if cfg.RequestBudget != 200_000 || cfg.CrawlerRequestBudget != 50_000 || cfg.MaxPages != 10_000 || cfg.MaxEndpoints != 10_000 || cfg.TimeBudget != 2 {
+		t.Fatalf("explicit limits were overwritten: %+v", cfg)
+	}
+	if cfg.EnableOAST || cfg.EnableFuzzing || cfg.EnableJSAnalysis {
+		t.Fatalf("explicit feature disables were overwritten: %+v", cfg)
 	}
 }
 
-func TestFullBugBountyEnablesWAFEvasionByDefault(t *testing.T) {
-	cfg := DefaultScanConfig()
-	if !cfg.EnableWAFBypassHeaders {
-		t.Fatal("default FullBugBounty config should enable WAF evasion")
+func TestFullScanEnablesCompleteCoverage(t *testing.T) {
+	cfg := ApplyScanProfile(ScanConfig{})
+	if !cfg.EnableWAFDetection || !cfg.Enable403BypassChecks || !cfg.EnableBusinessLogicChecks ||
+		!cfg.EnableRaceConditionTesting || !cfg.EnableSecondOrderTracking || !cfg.EnableOAST ||
+		!cfg.EnableFuzzing || !cfg.EnableJSAnalysis {
+		t.Fatalf("full scan coverage was not enabled: %+v", cfg)
 	}
-	cfg.EnableWAFBypassHeaders = false
-	cfg.SmartScanProfile = "FullBugBounty"
-	cfg = ApplyScanProfile(cfg)
-	if !cfg.EnableWAFBypassHeaders {
-		t.Fatal("FullBugBounty profile should enable WAF evasion unless explicitly disabled")
-	}
-}
-
-func TestApplyScanIntensityDoesNotRaiseUserLimits(t *testing.T) {
-	cfg := DefaultScanConfig()
-	cfg.ScanIntensity = "fast"
-	cfg.GlobalRateLimit = 5
-	cfg.PerHostRateLimit = 2
-	cfg.MaxConcurrency = 2
-	cfg.PerHostConcurrency = 1
-
-	ApplyScanIntensity(&cfg)
-	if cfg.GlobalRateLimit != 5 || cfg.PerHostRateLimit != 2 ||
-		cfg.MaxConcurrency != 2 || cfg.PerHostConcurrency != 1 {
-		t.Fatalf("fast intensity raised user limits: %+v", cfg)
+	if cfg.EnableWAFBypassHeaders {
+		t.Fatal("WAF bypass headers must remain opt-in")
 	}
 }

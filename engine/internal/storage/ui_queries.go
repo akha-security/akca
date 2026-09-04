@@ -917,7 +917,7 @@ func shellQuote(s string) string {
 	if !strings.ContainsAny(s, " \t\n'\"\\$`") {
 		return s
 	}
-	return "'" + strings.ReplaceAll(s, "'", `'\'"'"'`) + "'"
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
 func buildRawResponse(status int, headers, respBody string) string {

@@ -1,7 +1,16 @@
-.PHONY: build build-api build-policy test benchmark quality clean
+.PHONY: build build-linux build-windows build-api build-policy test benchmark quality clean
 
+# Yerel isletim sisteminize gore derler (Windows'ta akca.exe, Linux/macOS'ta akca olusturur)
 build:
+	cd engine && go build -buildvcs=false -trimpath -ldflags="-s -w" -o ../akca ./cmd/akca
+
+# Linux cross-compile hedefi (GOOS=linux GOARCH=amd64)
+build-linux:
 	cd engine && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" -o ../akca ./cmd/akca
+
+# Windows hedefi (GOOS=windows GOARCH=amd64)
+build-windows:
+	cd engine && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" -o ../akca.exe ./cmd/akca
 
 build-api:
 	cd engine && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" -o ../akca-api ./cmd/akca-api
@@ -24,4 +33,4 @@ quality:
 	$(MAKE) benchmark
 
 clean:
-	rm -f akca akca-api akca-policy
+	rm -f akca akca.exe akca-api akca-policy

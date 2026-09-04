@@ -17,6 +17,9 @@ func Import(data []byte, opts ImportOptions) (Inventory, error) {
 	if len(trimmed) == 0 {
 		return Inventory{}, fmt.Errorf("empty API definition")
 	}
+	if bytes.HasPrefix(trimmed, []byte("#%RAML")) {
+		return importRAML(trimmed, opts)
+	}
 	if bytes.HasPrefix(trimmed, []byte("<")) {
 		return importWSDL(trimmed, opts)
 	}
@@ -50,6 +53,13 @@ func Import(data []byte, opts ImportOptions) (Inventory, error) {
 }
 
 func importOpenAPI(doc map[string]interface{}, opts ImportOptions) (Inventory, error) {
+	if len(opts.ExternalFiles) > 0 {
+		resolved, err := resolveBundledOpenAPIRefs(doc, opts.SourcePath, opts.ExternalFiles)
+		if err != nil {
+			return Inventory{}, err
+		}
+		doc = resolved
+	}
 	out := Inventory{Format: FormatOpenAPI}
 	if info, ok := doc["info"].(map[string]interface{}); ok {
 		out.Title = stringValue(info["title"])

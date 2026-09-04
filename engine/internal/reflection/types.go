@@ -1,5 +1,24 @@
 package reflection
 
+// RequestTemplate is the canonical replay shape used by active probes.  It is
+// deliberately transport-agnostic: mutation changes one injection surface
+// while preserving the discovered method, URL, body and ambient headers.
+type RequestTemplate struct {
+	Method      string            `json:"method,omitempty"`
+	URL         string            `json:"url,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	Body        string            `json:"body,omitempty"`
+	ContentType string            `json:"content_type,omitempty"`
+}
+
+// MutatedRequest is a fully materialized HTTP request ready for the transport.
+type MutatedRequest struct {
+	Method  string
+	URL     string
+	Headers map[string]string
+	Body    []byte
+}
+
 type ContextType string
 
 const (

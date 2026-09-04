@@ -101,52 +101,23 @@ func recommendModules(intel models.EndpointIntelligence, waf *models.WAFProfile,
 		add("sqli")
 		add("nosql")
 		add("ssrf")
+		add("lfi")
+		add("command_injection")
 		if intel.EndpointType == "graphql" {
 			add("graphql")
 		}
-	case "html":
+	case "html", "web", "unknown":
+		add("sqli")
 		add("xss")
+		add("ssrf")
+		add("lfi")
 		add("open_redirect")
+		add("command_injection")
 	case "websocket":
 		add("websocket")
 	}
-
-	if intel.AuthRequired {
-		add("broken_auth")
-		add("idor")
-	}
-	if intel.StateChanging {
-		add("csrf")
-		add("mass_assignment")
-	}
-
-	if tech != nil {
-		switch strings.ToLower(tech.Framework) {
-		case "laravel", "django", "rails", "spring":
-			add("ssti")
-		case "wordpress":
-			add("wordpress_fuzz")
-		}
-		switch strings.ToLower(tech.BackendLanguage) {
-		case "php":
-			add("lfi")
-		case "java":
-			add("xxe")
-		}
-	}
-
-	if waf != nil && waf.CautiousModeRecommended {
-		// Prefer lower-noise modules behind WAF.
-		filtered := make([]string, 0, len(modules))
-		allowed := map[string]bool{"idor": true, "open_redirect": true, "broken_auth": true}
-		for _, m := range modules {
-			if allowed[m] {
-				filtered = append(filtered, m)
-			}
-		}
-		if len(filtered) > 0 {
-			return filtered
-		}
-	}
+	// WAF intelligence may change pacing and payload ordering, but it must not
+	// remove scanner capabilities from the recommendation set.
+	_ = waf
 	return modules
 }

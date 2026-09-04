@@ -74,6 +74,7 @@ var requiredTables = []string{
 	"workspace_invitations",
 	"audit_log_entries",
 	"shared_findings",
+	"second_order_markers",
 	"schema_migrations",
 }
 
@@ -150,6 +151,9 @@ func (db *DB) Migrate() error {
 			return err
 		}
 	}
+	_, _ = db.conn.Exec(`ALTER TABLE scans ADD COLUMN requests_sent INTEGER DEFAULT 0`)
+	_, _ = db.conn.Exec(`ALTER TABLE scans ADD COLUMN started_at TEXT`)
+	_, _ = db.conn.Exec(`ALTER TABLE scans ADD COLUMN completed_at TEXT`)
 	return nil
 }
 

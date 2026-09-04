@@ -81,13 +81,15 @@ func (w *AsyncNDJSONWriter) Close() error {
 }
 
 type Batcher struct {
-	mu       sync.Mutex
-	maxSize  int
-	flushDur time.Duration
-	pending  []Event
-	writer   Writer
-	stopCh   chan struct{}
-	doneCh   chan struct{}
+	mu        sync.Mutex
+	maxSize   int
+	flushDur  time.Duration
+	pending   []Event
+	writer    Writer
+	stopCh    chan struct{}
+	doneCh    chan struct{}
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func NewBatcher(writer Writer, maxSize int, flushDur time.Duration) *Batcher {
@@ -123,7 +125,7 @@ func shouldFlushImmediately(eventType string) bool {
 	case "scan_started", "scan_finished", "scan_stopped", "scan_error", "scan_progress",
 		"scan_snapshot", "phase_started", "phase_finished", "dashboard_metric",
 		"crawler_started", "crawler_finished",
-		"finding_confirmed", "finding_potential", "finding_candidate",
+		"finding_detected", "finding_verified", "finding_confirmed", "finding_potential", "finding_candidate",
 		"query_result", "oast_callback_received":
 		return true
 	default:
@@ -138,9 +140,12 @@ func (b *Batcher) Flush() error {
 }
 
 func (b *Batcher) Close() error {
-	close(b.stopCh)
-	<-b.doneCh
-	return b.Flush()
+	b.closeOnce.Do(func() {
+		close(b.stopCh)
+		<-b.doneCh
+		b.closeErr = b.Flush()
+	})
+	return b.closeErr
 }
 
 func (b *Batcher) PendingCount() int {
@@ -169,7 +174,9 @@ func (b *Batcher) flushLocked() error {
 	}
 	if len(b.pending) == 1 {
 		err := b.writer.WriteEvent(b.pending[0])
-		b.pending = b.pending[:0]
+		if err == nil {
+			b.pending = b.pending[:0]
+		}
 		return err
 	}
 	payload := map[string]interface{}{
@@ -180,6 +187,8 @@ func (b *Batcher) flushLocked() error {
 		TS:      time.Now().UTC().Format(time.RFC3339),
 		Payload: payload,
 	})
-	b.pending = b.pending[:0]
+	if err == nil {
+		b.pending = b.pending[:0]
+	}
 	return err
 }

@@ -653,3 +653,79 @@ func TestGroupBPayloadsReceiveCompleteMetadata(t *testing.T) {
 		}
 	}
 }
+
+func TestGeneratedPayloadsReceivePlannerV2Metadata(t *testing.T) {
+	result := Generate(Input{
+		Profile: reflection.ReflectionProfile{
+			ScanID: "scan-a", EndpointURL: "https://example.com/api/search", Method: "POST",
+			Parameter: "q", ParameterLocation: "json", ContentType: "application/json",
+			Context: reflection.ContextJSON, ReflectionKind: reflection.ReflectionRaw,
+		},
+		Tech:   TechHints{Database: "postgresql"},
+		Budget: 40,
+	})
+	if result.EstimatedRequests <= 0 || result.Shadow.LegacyPayloads != len(result.Payloads) {
+		t.Fatalf("missing planner estimates/shadow metrics: %+v", result)
+	}
+	if len(result.TestCases) == 0 || result.Shadow.SQLiTestCases == 0 {
+		t.Fatalf("SQLi shadow test cases were not generated: %+v", result.Shadow)
+	}
+	for _, payload := range result.Payloads {
+		if payload.Technique == "" || payload.ProbeRole == "" || payload.EstimatedRequests <= 0 || payload.TransportEncoding == "" {
+			t.Fatalf("payload missing planner v2 metadata: %+v", payload)
+		}
+	}
+	for _, tc := range result.TestCases {
+		if !tc.ShadowOnly || tc.EstimatedRequests <= 0 || len(tc.Payloads) == 0 {
+			t.Fatalf("invalid shadow test case: %+v", tc)
+		}
+	}
+}
+
+func TestNoSQLPayloadGeneratorUsesCanonicalCatalog(t *testing.T) {
+	result := Generate(Input{
+		Profile: reflection.ReflectionProfile{
+			EndpointURL: "https://example.com/login", Method: "POST", Parameter: "username",
+			ParameterLocation: "json", ContentType: "application/json", Context: reflection.ContextJSON,
+		},
+		Learn:  LearningProfile{Blocked: []string{"xss", "sqli", "ssti", "command_injection"}},
+		Budget: -1,
+	})
+	foundLoginBypass := false
+	for _, payload := range result.Payloads {
+		if payload.Family == "nosql" && payload.Variant == "json_login_bypass" && payload.TransportEncoding == "json" {
+			foundLoginBypass = true
+		}
+	}
+	if !foundLoginBypass {
+		t.Fatalf("expected canonical NoSQL JSON login payload, got %+v", result.Payloads)
+	}
+}
+
+func TestXSSXMLAndCommentContextsUseDedicatedPayloads(t *testing.T) {
+	for _, tc := range []struct {
+		ctx     reflection.ContextType
+		variant string
+	}{
+		{reflection.ContextXML, "xml_cdata_breakout"},
+		{reflection.ContextComment, "comment_breakout"},
+	} {
+		result := Generate(Input{
+			Profile: reflection.ReflectionProfile{Context: tc.ctx, ReflectionKind: reflection.ReflectionRaw},
+			Learn:   LearningProfile{Blocked: []string{"sqli", "ssti", "command_injection", "nosql"}},
+			Budget:  -1,
+		})
+		found := false
+		for _, payload := range result.Payloads {
+			if payload.Family == "xss" && payload.Variant == tc.variant {
+				found = true
+			}
+			if payload.Family == "xss" && strings.HasPrefix(payload.Variant, "poly_") {
+				t.Fatalf("%s context should use dedicated payloads before polyglot fallback: %+v", tc.ctx, payload)
+			}
+		}
+		if !found {
+			t.Fatalf("missing %s payload for %s context", tc.variant, tc.ctx)
+		}
+	}
+}

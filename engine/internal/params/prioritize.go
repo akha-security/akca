@@ -51,11 +51,8 @@ func PrioritizedWordlist(endpointURL string) []string {
 // DifferentialWordlist returns a compact probe list for active hidden-parameter discovery.
 // The full Wordlist() remains available for passive extraction elsewhere.
 func DifferentialWordlist(endpointURL string, maxItems int) []string {
-	if maxItems <= 0 {
-		maxItems = 50
-	}
 	full := PrioritizedWordlist(endpointURL)
-	if len(full) <= maxItems {
+	if maxItems <= 0 || len(full) <= maxItems {
 		return full
 	}
 	return full[:maxItems]

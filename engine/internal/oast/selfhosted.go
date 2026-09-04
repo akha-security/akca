@@ -217,16 +217,12 @@ func (p *SelfHostedProvider) handleHTTP(protocol string, w http.ResponseWriter, 
 	var raw strings.Builder
 	raw.WriteString(r.Method + " " + r.URL.RequestURI() + "\n")
 	for key, values := range r.Header {
-		if strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "Cookie") {
-			raw.WriteString(key + ": [REDACTED]\n")
-			continue
-		}
 		raw.WriteString(key + ": " + strings.Join(values, ",") + "\n")
 	}
 	raw.Write(body)
 	p.record(Interaction{
 		Protocol: protocol, UniqueID: token + "." + p.domain, FullID: token + "." + p.domain,
-		RemoteAddress: remoteHost(r.RemoteAddr), RawRequest: redactCallbackRaw(raw.String()),
+		RemoteAddress: remoteHost(r.RemoteAddr), RawRequest: raw.String(),
 		Timestamp: time.Now().UTC(),
 	})
 	w.Header().Set("Content-Type", "text/plain")
@@ -299,7 +295,7 @@ func (p *SelfHostedProvider) startTCP(address, protocol string) error {
 					p.record(Interaction{
 						Protocol: protocol, UniqueID: token + "." + p.domain, FullID: token + "." + p.domain,
 						RemoteAddress: remoteHost(conn.RemoteAddr().String()),
-						RawRequest:    redactCallbackRaw(string(data)), Timestamp: time.Now().UTC(),
+						RawRequest:    string(data), Timestamp: time.Now().UTC(),
 					})
 				}
 			}()
@@ -351,45 +347,14 @@ func tokenFromBytes(data []byte, domain string) string {
 }
 
 func redactCallbackRaw(raw string) string {
-	raw = strings.ReplaceAll(raw, "\x00", "")
-	lines := strings.Split(raw, "\n")
-	for index, line := range lines {
-		lower := strings.ToLower(strings.TrimSpace(line))
-		if strings.HasPrefix(lower, "authorization:") || strings.HasPrefix(lower, "cookie:") ||
-			strings.HasPrefix(lower, "set-cookie:") || strings.HasPrefix(lower, "proxy-authorization:") ||
-			strings.HasPrefix(lower, "x-api-key:") || strings.HasPrefix(lower, "x-auth-token:") ||
-			strings.HasPrefix(lower, "x-akca-sensor-token:") {
-			if colon := strings.IndexByte(line, ':'); colon >= 0 {
-				lines[index] = line[:colon+1] + " [REDACTED]"
-			}
-		}
-	}
-	redacted := strings.TrimSpace(strings.Join(lines, "\n"))
-	redacted = callbackSecretRE.ReplaceAllString(redacted, `${1}[REDACTED]`)
-	return callbackJSONSecretRE.ReplaceAllString(redacted, `${1}[REDACTED]${2}`)
+	return strings.ReplaceAll(raw, "\x00", "")
 }
 
 var callbackSecretRE = regexp.MustCompile(`(?i)((?:token|secret|password|passwd|api[_-]?key|access[_-]?key|auth)=)[^&\s"'<>]+`)
 var callbackJSONSecretRE = regexp.MustCompile(`(?i)("(?:token|secret|password|passwd|api[_-]?key|access[_-]?key|auth)"\s*:\s*")[^"]*(")`)
 
 func redactCallbackURL(raw string) string {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
-		return callbackSecretRE.ReplaceAllString(raw, `${1}[REDACTED]`)
-	}
-	query := parsed.Query()
-	for key, values := range query {
-		lower := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", ""), "_", ""))
-		switch lower {
-		case "token", "secret", "password", "passwd", "apikey", "accesskey", "auth":
-			for index := range values {
-				values[index] = "[REDACTED]"
-			}
-			query[key] = values
-		}
-	}
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
+	return raw
 }
 
 func redactSourceAddress(address string) string {

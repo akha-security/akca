@@ -14,6 +14,7 @@ type BrowserSnapshot struct {
 	URL            string                `json:"url"`
 	DOM            string                `json:"dom"`
 	NetworkEvents  []BrowserNetworkEvent `json:"network_events,omitempty"`
+	ConsoleEntries []BrowserConsoleEntry `json:"console_entries,omitempty"`
 	NetworkCalls   []DiscoveredEndpoint  `json:"network_calls,omitempty"`
 	WebSockets     []string              `json:"websockets,omitempty"`
 	ServiceWorkers []string              `json:"service_workers,omitempty"`
@@ -23,6 +24,14 @@ type BrowserSnapshot struct {
 	VisibleActions []string              `json:"visible_actions,omitempty"`
 	Forms          []string              `json:"forms,omitempty"`
 	DOMSinkEvents  []string              `json:"dom_sink_events,omitempty"`
+}
+
+type BrowserConsoleEntry struct {
+	Level  string `json:"level"`
+	Text   string `json:"text"`
+	Source string `json:"source,omitempty"`
+	URL    string `json:"url,omitempty"`
+	Line   int    `json:"line,omitempty"`
 }
 
 type BrowserNetworkEvent struct {

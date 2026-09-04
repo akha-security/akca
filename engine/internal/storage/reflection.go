@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"sort"
 )
@@ -13,22 +14,27 @@ type ParameterTarget struct {
 	Location     string
 	BodyTemplate string
 	ContentType  string
+	Headers      map[string]string
 }
 
 func (db *DB) ListParameterTargets(scanID string, limit int) ([]ParameterTarget, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-	rows, err := db.conn.Query(`
+	baseQuery := `
 SELECT e.url, e.method, p.name, p.location,
        COALESCE(json_extract(e.discovery_trail_json, '$.request_template.body'), ''),
-       COALESCE(json_extract(e.discovery_trail_json, '$.request_template.content_type'), '')
+       COALESCE(json_extract(e.discovery_trail_json, '$.request_template.content_type'), ''),
+       COALESCE(json_extract(e.discovery_trail_json, '$.request_template.headers'), '{}')
 FROM parameters p
 JOIN endpoints e ON e.id = p.endpoint_id
 WHERE e.scan_id = ?
   AND COALESCE(json_extract(e.discovery_trail_json, '$.request_template.response_status'), 0) NOT IN (404, 410)
-ORDER BY p.priority DESC, p.id ASC
-LIMIT ?`, scanID, limit)
+ORDER BY p.priority DESC, p.id ASC`
+	var rows *sql.Rows
+	var err error
+	if limit > 0 {
+		rows, err = db.conn.Query(baseQuery+" LIMIT ?", scanID, limit)
+	} else {
+		rows, err = db.conn.Query(baseQuery, scanID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -36,9 +42,11 @@ LIMIT ?`, scanID, limit)
 	out := make([]ParameterTarget, 0, limit)
 	for rows.Next() {
 		var t ParameterTarget
-		if err := rows.Scan(&t.EndpointURL, &t.Method, &t.Parameter, &t.Location, &t.BodyTemplate, &t.ContentType); err != nil {
+		var headersJSON string
+		if err := rows.Scan(&t.EndpointURL, &t.Method, &t.Parameter, &t.Location, &t.BodyTemplate, &t.ContentType, &headersJSON); err != nil {
 			return nil, err
 		}
+		_ = json.Unmarshal([]byte(headersJSON), &t.Headers)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -108,10 +116,14 @@ VALUES (?, ?, ?, ?)`,
 }
 
 func (db *DB) ListReflectionProfileJSON(scanID string, limit int) ([]string, error) {
-	if limit <= 0 {
-		limit = 500
+	query := `SELECT baseline_json FROM baseline_profiles WHERE scan_id = ? ORDER BY id DESC`
+	var rows *sql.Rows
+	var err error
+	if limit > 0 {
+		rows, err = db.conn.Query(query+` LIMIT ?`, scanID, limit)
+	} else {
+		rows, err = db.conn.Query(query, scanID)
 	}
-	rows, err := db.conn.Query(`SELECT baseline_json FROM baseline_profiles WHERE scan_id = ? ORDER BY id DESC LIMIT ?`, scanID, limit)
 	if err != nil {
 		return nil, err
 	}

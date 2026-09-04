@@ -111,7 +111,7 @@ func (r *Runner) runIDORRoleCompare(ctx context.Context, target ScanTarget) []Mo
 		finding.Title = "IDOR/BOLA: " + foreignRole.Name + " accessed " + ownerRole.Name + " resource"
 		finding.Description = "The declared foreign identity retrieved the owner's exact stable resource while the anonymous control was denied."
 		var out []ModuleFinding
-		r.recordFinding(&out, finding, "idor", "foreign_object_access")
+		r.recordFinding(ctx, &out, finding, "idor", "foreign_object_access")
 		return out
 	}
 	return nil

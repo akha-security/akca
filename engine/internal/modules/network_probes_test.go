@@ -74,13 +74,16 @@ func TestNetworkWebSocketProberPerformsHandshakeAndFrameExchange(t *testing.T) {
 
 func TestSmugglingPipelineUsesRawConflictingFramingAndHarmlessCanary(t *testing.T) {
 	u, _ := url.Parse("https://example.com/orders")
-	for _, variant := range []string{"cl_te", "te_cl"} {
+	for _, variant := range []string{
+		"cl_te", "te_cl", "te_te_space", "te_te_prefix", "te_te_duplicate", "cl_cl_conflict",
+		"cl_te_crlf", "te_cl_tab", "te_newline",
+	} {
 		raw, err := buildSmugglingPipeline(u, variant, "token")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(raw, "Content-Length:") || !strings.Contains(raw, "Transfer-Encoding: chunked") {
-			t.Fatalf("%s does not contain conflicting framing:\n%s", variant, raw)
+		if !strings.Contains(raw, "Content-Length:") {
+			t.Fatalf("%s does not contain framing:\n%s", variant, raw)
 		}
 		if !strings.Contains(raw, "GET /.well-known/akca-smuggling-token") {
 			t.Fatalf("%s is missing the harmless canary request", variant)

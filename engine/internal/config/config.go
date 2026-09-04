@@ -11,7 +11,9 @@ import (
 	"time"
 )
 
-const DefaultOASTServers = "oast.pro,oast.live,oast.site,oast.online,oast.fun,oast.me"
+// DefaultOASTServers is an ordered startup fallback chain. Registration is
+// attempted from left to right and stops at the first successful server.
+const DefaultOASTServers = "oast.pro,oast.live,oast.site,oast.online,oast.fun,oast.me,interact.sh"
 
 type UserAgentMode string
 
@@ -109,11 +111,12 @@ type SelfHostedOASTConfig struct {
 }
 
 type RecordedRequest struct {
-	Method           string `json:"method"`
-	URL              string `json:"url"`
-	Body             string `json:"body,omitempty"`
-	ContentType      string `json:"content_type,omitempty"`
-	ExpectedStatuses []int  `json:"expected_statuses,omitempty"`
+	Method           string            `json:"method"`
+	URL              string            `json:"url"`
+	Body             string            `json:"body,omitempty"`
+	ContentType      string            `json:"content_type,omitempty"`
+	Headers          map[string]string `json:"headers,omitempty"`
+	ExpectedStatuses []int             `json:"expected_statuses,omitempty"`
 }
 
 // RaceProofPolicy is deliberately application-specific. Transaction IDs and
@@ -145,6 +148,34 @@ type BusinessLogicProofPolicy struct {
 	ForbiddenValue          string          `json:"forbidden_value"`
 }
 
+// StatefulSecurityProofPolicy defines an application-specific, reversible
+// security check. Generic scanners cannot infer whether a password reset or
+// webhook was actually applied from an HTTP 2xx response, so these modules run
+// only when an independent state read and a cleanup request are supplied.
+type StatefulSecurityProofPolicy struct {
+	ID                string          `json:"id"`
+	URLContains       string          `json:"url_contains"`
+	AuthProfileID     string          `json:"auth_profile_id,omitempty"`
+	ExpectedInvariant string          `json:"expected_invariant"`
+	Action            RecordedRequest `json:"action"`
+	NegativeControl   RecordedRequest `json:"negative_control"`
+	State             RecordedRequest `json:"state"`
+	Cleanup           RecordedRequest `json:"cleanup"`
+}
+
+// SessionLifecycleProofPolicy uses a credential explicitly marked disposable.
+// A successful logout intentionally revokes it, so the scanner must never use
+// the ambient crawl session for this proof.
+type SessionLifecycleProofPolicy struct {
+	ID                   string          `json:"id"`
+	URLContains          string          `json:"url_contains"`
+	AuthProfileID        string          `json:"auth_profile_id"`
+	ExpectedInvariant    string          `json:"expected_invariant"`
+	DisposableCredential bool            `json:"disposable_credential"`
+	Logout               RecordedRequest `json:"logout"`
+	ProtectedResource    RecordedRequest `json:"protected_resource"`
+}
+
 type FileUploadProofPolicy struct {
 	ID            string `json:"id"`
 	URLContains   string `json:"url_contains"`
@@ -172,82 +203,98 @@ type HPPProofPolicy struct {
 }
 
 type ScanConfig struct {
-	ScanID                       string                      `json:"scan_id"`
-	AppName                      string                      `json:"app_name"`
-	Targets                      []string                    `json:"targets"`
-	APIImportFiles               []string                    `json:"api_import_files,omitempty"`
-	IncludeDomains               []string                    `json:"include_domains"`
-	ExcludeDomains               []string                    `json:"exclude_domains"`
-	ExcludedPaths                []string                    `json:"excluded_paths"`
-	Authentication               map[string]string           `json:"authentication,omitempty"`
-	SessionCookies               map[string]string           `json:"session_cookies,omitempty"`
-	CustomHeaders                map[string]string           `json:"custom_headers,omitempty"`
-	ApiKeys                      map[string]string           `json:"api_keys,omitempty"`
-	KnownAccounts                []string                    `json:"known_accounts,omitempty"`
-	JWTExpiredTokens             []string                    `json:"jwt_expired_tokens,omitempty"`
-	RateLimitPolicies            []RateLimitPolicy           `json:"rate_limit_policies,omitempty"`
-	AuthorizationPolicies        []AuthorizationPolicy       `json:"authorization_policies,omitempty"`
-	ObjectAuthorizationPolicies  []ObjectAuthorizationPolicy `json:"object_authorization_policies,omitempty"`
-	RaceProofPolicies            []RaceProofPolicy           `json:"race_proof_policies,omitempty"`
-	BusinessLogicProofPolicies   []BusinessLogicProofPolicy  `json:"business_logic_proof_policies,omitempty"`
-	FileUploadProofPolicies      []FileUploadProofPolicy     `json:"file_upload_proof_policies,omitempty"`
-	CacheDeceptionProofPolicies  []CacheDeceptionProofPolicy `json:"cache_deception_proof_policies,omitempty"`
-	HPPProofPolicies             []HPPProofPolicy            `json:"hpp_proof_policies,omitempty"`
-	ProxyURL                     string                      `json:"proxy_url,omitempty"`
-	ScanIntensity                string                      `json:"scan_intensity"`
-	TimeBudget                   time.Duration               `json:"time_budget"`
-	RequestBudget                int                         `json:"request_budget"`
-	PayloadBudget                PayloadBudget               `json:"payload_budget"`
-	AllowedVulnerabilityClasses  []string                    `json:"allowed_vulnerability_classes,omitempty"`
-	UserAgentMode                UserAgentMode               `json:"user_agent_mode"`
-	UserAgents                   []string                    `json:"user_agents,omitempty"`
-	GlobalRateLimit              float64                     `json:"global_rate_limit"`
-	PerHostRateLimit             float64                     `json:"per_host_rate_limit"`
-	MaxConcurrency               int                         `json:"max_concurrency"`
-	PerHostConcurrency           int                         `json:"per_host_concurrency"`
-	MaxDepth                     int                         `json:"max_depth"`
-	MaxPages                     int                         `json:"max_pages"`
-	MaxEndpoints                 int                         `json:"max_endpoints,omitempty"`
-	FollowRedirects              bool                        `json:"follow_redirects"`
-	EnableHeadlessCrawler        bool                        `json:"enable_headless_crawler"`
-	EnableJSAnalysis             bool                        `json:"enable_js_analysis"`
-	EnableWAFDetection           bool                        `json:"enable_waf_detection"`
-	EnableOAST                   bool                        `json:"enable_oast"`
-	OASTServerURL                string                      `json:"oast_server_url,omitempty"`
-	OASTSelfHosted               *SelfHostedOASTConfig       `json:"oast_self_hosted,omitempty"`
-	OASTPollInterval             time.Duration               `json:"oast_poll_interval"`
-	OASTDrainTimeout             time.Duration               `json:"oast_drain_timeout,omitempty"`
-	EnableFuzzing                bool                        `json:"enable_fuzzing"`
-	Enable403BypassChecks        bool                        `json:"enable_403_bypass_checks"`
-	EnableRawTrafficStorage      bool                        `json:"enable_raw_traffic_storage"`
-	RedactionEnabled             bool                        `json:"redaction_enabled"`
-	SmartScanProfile             string                      `json:"smart_scan_profile"`
-	AuthProfiles                 []AuthProfile               `json:"auth_profiles,omitempty"`
-	RoleProfiles                 []RoleProfile               `json:"role_profiles,omitempty"`
-	CredentialStorageMode        CredentialStorageMode       `json:"credential_storage_mode"`
-	EnableEncryptedSecretStorage bool                        `json:"enable_encrypted_secret_storage"`
-	EnableScanResume             bool                        `json:"enable_scan_resume"`
-	EnableFindingCorrelation     bool                        `json:"enable_finding_correlation"`
-	EnableBrowserWorkerPool      bool                        `json:"enable_browser_worker_pool"`
-	BrowserWorkerPoolSize        int                         `json:"browser_worker_pool_size"`
-	EnableHealthMonitoring       bool                        `json:"enable_health_monitoring"`
-	EnableRulePackUpdates        bool                        `json:"enable_rule_pack_updates"`
-	RulePackChannels             []string                    `json:"rule_pack_channels,omitempty"`
-	ReportTemplate               string                      `json:"report_template"`
-	OutputDirectory              string                      `json:"output_directory,omitempty"`
-	ReportFormats                []string                    `json:"report_formats,omitempty"`
-	EnableProxyInterceptMode     bool                        `json:"enable_proxy_intercept_mode"`
-	EnableScanScheduler          bool                        `json:"enable_scan_scheduler"`
-	ScanSchedule                 string                      `json:"scan_schedule,omitempty"`
-	EnableComparisonScan         bool                        `json:"enable_comparison_scan"`
-	DNSResolvers                 []string                    `json:"dns_resolvers,omitempty"`
-	EnableRaceConditionTesting   bool                        `json:"enable_race_condition_testing"`
-	EnableBusinessLogicChecks    bool                        `json:"enable_business_logic_checks"`
-	EnableSecondOrderTracking    bool                        `json:"enable_second_order_tracking"`
-	EnableWAFBypassHeaders       bool                        `json:"enable_waf_bypass_headers"`
-	EnableRuntimeSensor          bool                        `json:"enable_runtime_sensor"`
-	RuntimeSensorListenAddr      string                      `json:"runtime_sensor_listen_addr,omitempty"`
-	RuntimeSensorTokenEnv        string                      `json:"runtime_sensor_token_env,omitempty"`
+	ScanID                        string                        `json:"scan_id"`
+	AppName                       string                        `json:"app_name"`
+	Targets                       []string                      `json:"targets"`
+	APIImportFiles                []string                      `json:"api_import_files,omitempty"`
+	IncludeDomains                []string                      `json:"include_domains"`
+	ExcludeDomains                []string                      `json:"exclude_domains"`
+	ExcludedPaths                 []string                      `json:"excluded_paths"`
+	Authentication                map[string]string             `json:"authentication,omitempty"`
+	SessionCookies                map[string]string             `json:"session_cookies,omitempty"`
+	CustomHeaders                 map[string]string             `json:"custom_headers,omitempty"`
+	ApiKeys                       map[string]string             `json:"api_keys,omitempty"`
+	KnownAccounts                 []string                      `json:"known_accounts,omitempty"`
+	JWTExpiredTokens              []string                      `json:"jwt_expired_tokens,omitempty"`
+	RateLimitPolicies             []RateLimitPolicy             `json:"rate_limit_policies,omitempty"`
+	AuthorizationPolicies         []AuthorizationPolicy         `json:"authorization_policies,omitempty"`
+	ObjectAuthorizationPolicies   []ObjectAuthorizationPolicy   `json:"object_authorization_policies,omitempty"`
+	RaceProofPolicies             []RaceProofPolicy             `json:"race_proof_policies,omitempty"`
+	BusinessLogicProofPolicies    []BusinessLogicProofPolicy    `json:"business_logic_proof_policies,omitempty"`
+	AccountRecoveryProofPolicies  []StatefulSecurityProofPolicy `json:"account_recovery_proof_policies,omitempty"`
+	WebhookProofPolicies          []StatefulSecurityProofPolicy `json:"webhook_proof_policies,omitempty"`
+	CSRFProofPolicies             []StatefulSecurityProofPolicy `json:"csrf_proof_policies,omitempty"`
+	SessionLifecycleProofPolicies []SessionLifecycleProofPolicy `json:"session_lifecycle_proof_policies,omitempty"`
+	FileUploadProofPolicies       []FileUploadProofPolicy       `json:"file_upload_proof_policies,omitempty"`
+	CacheDeceptionProofPolicies   []CacheDeceptionProofPolicy   `json:"cache_deception_proof_policies,omitempty"`
+	HPPProofPolicies              []HPPProofPolicy              `json:"hpp_proof_policies,omitempty"`
+	ProxyURL                      string                        `json:"proxy_url,omitempty"`
+	ScanIntensity                 string                        `json:"scan_intensity"`
+	TimeBudget                    time.Duration                 `json:"time_budget"`
+	RequestBudget                 int                           `json:"request_budget"`
+	CrawlerRequestBudget          int                           `json:"crawler_request_budget,omitempty"`
+	PayloadBudget                 PayloadBudget                 `json:"payload_budget"`
+	AllowedVulnerabilityClasses   []string                      `json:"allowed_vulnerability_classes,omitempty"`
+	UserAgentMode                 UserAgentMode                 `json:"user_agent_mode"`
+	UserAgents                    []string                      `json:"user_agents,omitempty"`
+	GlobalRateLimit               float64                       `json:"global_rate_limit"`
+	PerHostRateLimit              float64                       `json:"per_host_rate_limit"`
+	MaxConcurrency                int                           `json:"max_concurrency"`
+	PerHostConcurrency            int                           `json:"per_host_concurrency"`
+	MaxDepth                      int                           `json:"max_depth"`
+	MaxPages                      int                           `json:"max_pages"`
+	SubdomainCount                int                           `json:"subdomain_count,omitempty"`
+	MaxEndpoints                  int                           `json:"max_endpoints,omitempty"`
+	IncludeLinkedAPISubdomains    bool                          `json:"include_linked_api_subdomains,omitempty"`
+	MaxMemoryMB                   int                           `json:"max_memory_mb,omitempty"`
+	MemoryLimitSource             string                        `json:"memory_limit_source,omitempty"`
+	DetectedAvailableMemoryMB     int                           `json:"detected_available_memory_mb,omitempty"`
+	FollowRedirects               bool                          `json:"follow_redirects"`
+	EnableHeadlessCrawler         bool                          `json:"enable_headless_crawler"`
+	EnableJSAnalysis              bool                          `json:"enable_js_analysis"`
+	EnableWAFDetection            bool                          `json:"enable_waf_detection"`
+	EnableOAST                    bool                          `json:"enable_oast"`
+	OASTServerURL                 string                        `json:"oast_server_url,omitempty"`
+	OASTSelfHosted                *SelfHostedOASTConfig         `json:"oast_self_hosted,omitempty"`
+	OASTPollInterval              time.Duration                 `json:"oast_poll_interval"`
+	OASTDrainTimeout              time.Duration                 `json:"oast_drain_timeout,omitempty"`
+	EnableFuzzing                 bool                          `json:"enable_fuzzing"`
+	Enable403BypassChecks         bool                          `json:"enable_403_bypass_checks"`
+	EnableRawTrafficStorage       bool                          `json:"enable_raw_traffic_storage"`
+	RedactionEnabled              bool                          `json:"redaction_enabled"`
+	SmartScanProfile              string                        `json:"smart_scan_profile"`
+	// PassiveMode is an execution safety invariant, not merely a UI label. When
+	// set, active calibration, mutation, browser execution and fuzzing phases
+	// are disabled again at scan bootstrap even if a caller supplied conflicting
+	// defaults later.
+	PassiveMode                  bool                  `json:"passive_mode,omitempty"`
+	AuthProfiles                 []AuthProfile         `json:"auth_profiles,omitempty"`
+	RoleProfiles                 []RoleProfile         `json:"role_profiles,omitempty"`
+	CredentialStorageMode        CredentialStorageMode `json:"credential_storage_mode"`
+	EnableEncryptedSecretStorage bool                  `json:"enable_encrypted_secret_storage"`
+	EnableScanResume             bool                  `json:"enable_scan_resume"`
+	EnableFindingCorrelation     bool                  `json:"enable_finding_correlation"`
+	EnableBrowserWorkerPool      bool                  `json:"enable_browser_worker_pool"`
+	BrowserWorkerPoolSize        int                   `json:"browser_worker_pool_size"`
+	EnableHealthMonitoring       bool                  `json:"enable_health_monitoring"`
+	EnableRulePackUpdates        bool                  `json:"enable_rule_pack_updates"`
+	RulePackChannels             []string              `json:"rule_pack_channels,omitempty"`
+	ReportTemplate               string                `json:"report_template"`
+	OutputDirectory              string                `json:"output_directory,omitempty"`
+	ReportFormats                []string              `json:"report_formats,omitempty"`
+	EnableProxyInterceptMode     bool                  `json:"enable_proxy_intercept_mode"`
+	EnableScanScheduler          bool                  `json:"enable_scan_scheduler"`
+	ScanSchedule                 string                `json:"scan_schedule,omitempty"`
+	EnableComparisonScan         bool                  `json:"enable_comparison_scan"`
+	DNSResolvers                 []string              `json:"dns_resolvers,omitempty"`
+	EnableRaceConditionTesting   bool                  `json:"enable_race_condition_testing"`
+	EnableBusinessLogicChecks    bool                  `json:"enable_business_logic_checks"`
+	EnableSecondOrderTracking    bool                  `json:"enable_second_order_tracking"`
+	EnableWAFBypassHeaders       bool                  `json:"enable_waf_bypass_headers"`
+	EnableRuntimeSensor          bool                  `json:"enable_runtime_sensor"`
+	EnableInformationalChecks    bool                  `json:"enable_informational_checks"`
+	RuntimeSensorListenAddr      string                `json:"runtime_sensor_listen_addr,omitempty"`
+	RuntimeSensorTokenEnv        string                `json:"runtime_sensor_token_env,omitempty"`
 	// ForceHTTP1 disables HTTP/2 ALPN negotiation (Burp-style). Required for some login flows.
 	ForceHTTP1 bool `json:"force_http1"`
 	// InsecureSkipVerify disables TLS certificate verification (USE WITH CAUTION - TESTING ONLY).
@@ -264,14 +311,25 @@ type ScanConfig struct {
 }
 
 type ExplicitScanOptions struct {
-	EnableOAST             bool
-	EnableFuzzing          bool
-	EnableJSAnalysis       bool
-	GlobalRateLimit        bool
-	PerHostRateLimit       bool
-	MaxConcurrency         bool
-	PerHostConcurrency     bool
-	EnableWAFBypassHeaders bool
+	EnableOAST                 bool
+	EnableFuzzing              bool
+	EnableJSAnalysis           bool
+	EnableWAFDetection         bool
+	Enable403BypassChecks      bool
+	EnableBusinessLogicChecks  bool
+	EnableRaceConditionTesting bool
+	EnableSecondOrderTracking  bool
+	GlobalRateLimit            bool
+	PerHostRateLimit           bool
+	MaxConcurrency             bool
+	PerHostConcurrency         bool
+	EnableWAFBypassHeaders     bool
+	RequestBudget              bool
+	CrawlerRequestBudget       bool
+	TimeBudget                 bool
+	MaxPages                   bool
+	MaxEndpoints               bool
+	MaxDepth                   bool
 }
 
 type LoginCredentials struct {
@@ -290,20 +348,25 @@ type LoginCredentials struct {
 func DefaultScanConfig() ScanConfig {
 	return ScanConfig{
 		ScanIntensity:                "fast",
-		GlobalRateLimit:              50,
-		PerHostRateLimit:             30,
-		MaxConcurrency:               48,
-		PerHostConcurrency:           16,
-		MaxDepth:                     4,
-		MaxPages:                     1000,
+		GlobalRateLimit:              20,
+		PerHostRateLimit:             10,
+		MaxConcurrency:               16,
+		PerHostConcurrency:           8,
+		MaxDepth:                     0,
+		MaxPages:                     FullScanMaxPages,
+		MaxEndpoints:                 FullScanMaxEndpoints,
+		MaxMemoryMB:                  0,
+		RequestBudget:                FullScanRequestBudget,
+		CrawlerRequestBudget:         FullScanCrawlerRequestBudget,
+		TimeBudget:                   0,
 		PayloadBudget:                PayloadBudgetUnlimited,
-		RedactionEnabled:             true,
+		RedactionEnabled:             false,
 		EnableWAFDetection:           true,
 		EnableJSAnalysis:             true,
 		EnableHeadlessCrawler:        true,
 		EnableFuzzing:                true,
 		Enable403BypassChecks:        true,
-		EnableWAFBypassHeaders:       true,
+		EnableWAFBypassHeaders:       false,
 		EnableOAST:                   true,
 		OASTServerURL:                DefaultOASTServers,
 		OASTPollInterval:             2 * time.Second,
@@ -314,13 +377,17 @@ func DefaultScanConfig() ScanConfig {
 		EnableBrowserWorkerPool:      true,
 		BrowserWorkerPoolSize:        3,
 		EnableHealthMonitoring:       true,
-		SmartScanProfile:             "FullBugBounty",
+		SmartScanProfile:             "Full Scan",
 		ReportTemplate:               "HackerOne",
 		UserAgentMode:                UserAgentReal,
 		CredentialStorageMode:        CredentialStorageEncryptedDisk,
 		FollowRedirects:              true,
 		ForceHTTP1:                   true,
+		EnableBusinessLogicChecks:    true,
+		EnableRaceConditionTesting:   true,
+		EnableSecondOrderTracking:    true,
 		EnableRuntimeSensor:          true,
+		EnableInformationalChecks:    true,
 		RuntimeSensorListenAddr:      "127.0.0.1:19091",
 		RuntimeSensorTokenEnv:        "AKCA_SENSOR_TOKEN",
 	}
@@ -332,6 +399,9 @@ func (c *ScanConfig) Validate() error {
 		return err
 	}
 	c.ProxyURL = proxyURL
+	if c.MaxMemoryMB < 0 {
+		return fmt.Errorf("max_memory_mb cannot be negative")
+	}
 	if c.EnableRuntimeSensor {
 		if strings.TrimSpace(c.RuntimeSensorListenAddr) == "" {
 			c.RuntimeSensorListenAddr = "127.0.0.1:19091"
@@ -411,6 +481,34 @@ func (c *ScanConfig) Validate() error {
 		return fmt.Errorf("invalid credential_storage_mode: %q", c.CredentialStorageMode)
 	}
 
+	if c.RequestBudget < 0 {
+		return fmt.Errorf("request_budget cannot be negative: %d", c.RequestBudget)
+	}
+	if c.CrawlerRequestBudget < 0 {
+		return fmt.Errorf("crawler_request_budget cannot be negative: %d", c.CrawlerRequestBudget)
+	}
+	if c.MaxPages < 0 {
+		return fmt.Errorf("max_pages cannot be negative: %d", c.MaxPages)
+	}
+	if c.MaxEndpoints < 0 {
+		return fmt.Errorf("max_endpoints cannot be negative: %d", c.MaxEndpoints)
+	}
+	if c.MaxDepth < 0 {
+		return fmt.Errorf("max_depth cannot be negative: %d", c.MaxDepth)
+	}
+	if c.MaxConcurrency < 0 {
+		return fmt.Errorf("max_concurrency cannot be negative: %d", c.MaxConcurrency)
+	}
+	if c.PerHostConcurrency < 0 {
+		return fmt.Errorf("per_host_concurrency cannot be negative: %d", c.PerHostConcurrency)
+	}
+	if c.BrowserWorkerPoolSize < 0 {
+		return fmt.Errorf("browser_worker_pool_size cannot be negative: %d", c.BrowserWorkerPoolSize)
+	}
+	if c.TimeBudget < 0 {
+		return fmt.Errorf("time_budget cannot be negative: %v", c.TimeBudget)
+	}
+
 	if c.GlobalRateLimit <= 0 {
 		c.GlobalRateLimit = 3
 	}
@@ -467,6 +565,9 @@ func (c *ScanConfig) Validate() error {
 		seenObjectPolicies[policy.ID] = struct{}{}
 		if policy.OwnerRoleProfileID == policy.ForeignRoleProfileID {
 			return fmt.Errorf("object authorization policy %q must use distinct owner/foreign roles", policy.ID)
+		}
+		if !recordedReadMethod(policy.Method) {
+			return fmt.Errorf("object authorization policy %q must use a read-only method; use an authorization state/cleanup policy for writes", policy.ID)
 		}
 		if _, exists := roleProfileIDs[policy.OwnerRoleProfileID]; !exists {
 			return fmt.Errorf("object authorization policy %q references unknown owner role %q", policy.ID, policy.OwnerRoleProfileID)
@@ -545,6 +646,42 @@ func (c *ScanConfig) Validate() error {
 			return fmt.Errorf("business logic policy %q requires write actions/cleanup and read-only state request", policy.ID)
 		}
 	}
+	if err := validateStatefulSecurityPolicies("account_recovery_proof_policies", c.AccountRecoveryProofPolicies, authProfileIDs); err != nil {
+		return err
+	}
+	if err := validateStatefulSecurityPolicies("webhook_proof_policies", c.WebhookProofPolicies, authProfileIDs); err != nil {
+		return err
+	}
+	if err := validateStatefulSecurityPolicies("csrf_proof_policies", c.CSRFProofPolicies, authProfileIDs); err != nil {
+		return err
+	}
+	for index, policy := range c.CSRFProofPolicies {
+		if strings.TrimSpace(policy.AuthProfileID) == "" {
+			return fmt.Errorf("csrf_proof_policies[%d] requires an isolated auth profile", index)
+		}
+	}
+	seenSessionPolicies := make(map[string]struct{}, len(c.SessionLifecycleProofPolicies))
+	for index, policy := range c.SessionLifecycleProofPolicies {
+		if policy.ID == "" || policy.URLContains == "" || policy.AuthProfileID == "" ||
+			policy.ExpectedInvariant == "" || !policy.DisposableCredential || policy.Logout.URL == "" ||
+			policy.ProtectedResource.URL == "" || !recordedWriteMethod(policy.Logout.Method) ||
+			!recordedReadMethod(policy.ProtectedResource.Method) {
+			return fmt.Errorf("session_lifecycle_proof_policies[%d] requires a disposable credential, write logout, and read-only protected resource", index)
+		}
+		if _, duplicate := seenSessionPolicies[policy.ID]; duplicate {
+			return fmt.Errorf("duplicate session lifecycle proof policy id: %q", policy.ID)
+		}
+		seenSessionPolicies[policy.ID] = struct{}{}
+		if _, exists := authProfileIDs[policy.AuthProfileID]; !exists {
+			return fmt.Errorf("session lifecycle policy %q references unknown auth profile %q", policy.ID, policy.AuthProfileID)
+		}
+		for name, rawURL := range map[string]string{"logout": policy.Logout.URL, "protected_resource": policy.ProtectedResource.URL} {
+			parsed, parseErr := url.ParseRequestURI(rawURL)
+			if parseErr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+				return fmt.Errorf("session lifecycle policy %q has invalid %s URL", policy.ID, name)
+			}
+		}
+	}
 	for index, policy := range c.FileUploadProofPolicies {
 		if policy.ID == "" || policy.URLContains == "" || policy.CleanupMethod == "" || policy.CleanupURL == "" {
 			return fmt.Errorf("file_upload_proof_policies[%d] is incomplete", index)
@@ -552,6 +689,9 @@ func (c *ScanConfig) Validate() error {
 		if strings.EqualFold(policy.CleanupMethod, http.MethodGet) ||
 			strings.EqualFold(policy.CleanupMethod, http.MethodHead) {
 			return fmt.Errorf("file upload cleanup policy %q must use a write method", policy.ID)
+		}
+		if strings.Contains(policy.CleanupURL, "{{location}}") {
+			return fmt.Errorf("file upload cleanup policy %q must be resolvable before upload; {{location}} is not allowed", policy.ID)
 		}
 	}
 	for index, policy := range c.CacheDeceptionProofPolicies {
@@ -565,6 +705,42 @@ func (c *ScanConfig) Validate() error {
 			policy.State.URL == "" || policy.State.Method == "" || policy.Cleanup.URL == "" ||
 			policy.Cleanup.Method == "" || policy.StateValueExpression == "" || policy.ForbiddenValue == "" {
 			return fmt.Errorf("hpp_proof_policies[%d] is incomplete", index)
+		}
+	}
+	return nil
+}
+
+func validateStatefulSecurityPolicies(field string, policies []StatefulSecurityProofPolicy,
+	authProfileIDs map[string]struct{}) error {
+	seen := make(map[string]struct{}, len(policies))
+	for index, policy := range policies {
+		if strings.TrimSpace(policy.ID) == "" || strings.TrimSpace(policy.URLContains) == "" ||
+			strings.TrimSpace(policy.ExpectedInvariant) == "" || policy.Action.Method == "" || policy.Action.URL == "" ||
+			policy.NegativeControl.Method == "" || policy.NegativeControl.URL == "" ||
+			policy.State.Method == "" || policy.State.URL == "" || policy.Cleanup.Method == "" || policy.Cleanup.URL == "" {
+			return fmt.Errorf("%s[%d] is incomplete", field, index)
+		}
+		if _, duplicate := seen[policy.ID]; duplicate {
+			return fmt.Errorf("duplicate %s id: %q", field, policy.ID)
+		}
+		seen[policy.ID] = struct{}{}
+		if profileID := strings.TrimSpace(policy.AuthProfileID); profileID != "" {
+			if _, exists := authProfileIDs[profileID]; !exists {
+				return fmt.Errorf("%s %q references unknown auth profile %q", field, policy.ID, profileID)
+			}
+		}
+		if !recordedWriteMethod(policy.Action.Method) || !recordedWriteMethod(policy.NegativeControl.Method) ||
+			!recordedReadMethod(policy.State.Method) || !recordedWriteMethod(policy.Cleanup.Method) {
+			return fmt.Errorf("%s %q requires write action/negative control/cleanup and read-only state request", field, policy.ID)
+		}
+		for name, request := range map[string]RecordedRequest{
+			"action": policy.Action, "negative_control": policy.NegativeControl,
+			"state": policy.State, "cleanup": policy.Cleanup,
+		} {
+			parsed, parseErr := url.ParseRequestURI(request.URL)
+			if parseErr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+				return fmt.Errorf("%s %q has invalid %s URL", field, policy.ID, name)
+			}
 		}
 	}
 	return nil
@@ -677,19 +853,152 @@ func NormalizeDomain(domain string) string {
 		d = strings.TrimPrefix(d, "*.")
 	}
 	if strings.Contains(d, "://") {
-		if u, err := url.Parse(d); err == nil && u.Hostname() != "" {
-			d = u.Hostname()
+		if u, err := url.Parse(d); err == nil && u.Host != "" {
+			host := strings.ToLower(u.Host)
+			if (u.Scheme == "http" && strings.HasSuffix(host, ":80")) ||
+				(u.Scheme == "https" && strings.HasSuffix(host, ":443")) {
+				d = u.Hostname()
+			} else {
+				d = host
+			}
 		}
 	} else if strings.ContainsAny(d, "/?#") {
-		if u, err := url.Parse("https://" + d); err == nil && u.Hostname() != "" {
-			d = u.Hostname()
+		if u, err := url.Parse("https://" + d); err == nil && u.Host != "" {
+			d = u.Host
 		}
-	} else if h, _, ok := strings.Cut(d, ":"); ok && h != "" {
-		d = h
 	}
 	d = strings.TrimPrefix(d, ".")
 	if wildcard && d != "" {
 		return "*." + d
 	}
 	return d
+}
+
+// RedactedForStorage returns a copy of ScanConfig with sensitive credentials, passwords, and tokens masked.
+func (c ScanConfig) RedactedForStorage() ScanConfig {
+	redacted := c
+	if redacted.LoginCredentials != nil && redacted.LoginCredentials.Password != "" {
+		credentials := *redacted.LoginCredentials
+		redacted.LoginCredentials = &credentials
+		redacted.LoginCredentials.Password = "[REDACTED]"
+	}
+	if len(redacted.Authentication) > 0 {
+		auth := make(map[string]string, len(redacted.Authentication))
+		for k := range redacted.Authentication {
+			auth[k] = "[REDACTED]"
+		}
+		redacted.Authentication = auth
+	}
+	if len(redacted.SessionCookies) > 0 {
+		cookies := make(map[string]string, len(redacted.SessionCookies))
+		for k := range redacted.SessionCookies {
+			cookies[k] = "[REDACTED]"
+		}
+		redacted.SessionCookies = cookies
+	}
+	if len(redacted.ApiKeys) > 0 {
+		keys := make(map[string]string, len(redacted.ApiKeys))
+		for k := range redacted.ApiKeys {
+			keys[k] = "[REDACTED]"
+		}
+		redacted.ApiKeys = keys
+	}
+	if len(redacted.CustomHeaders) > 0 {
+		headers := make(map[string]string, len(redacted.CustomHeaders))
+		for k := range redacted.CustomHeaders {
+			headers[k] = "[REDACTED]"
+		}
+		redacted.CustomHeaders = headers
+	}
+	if len(redacted.AuthProfiles) > 0 {
+		redacted.AuthProfiles = append([]AuthProfile(nil), redacted.AuthProfiles...)
+		for index := range redacted.AuthProfiles {
+			if len(redacted.AuthProfiles[index].Headers) > 0 {
+				headers := make(map[string]string, len(redacted.AuthProfiles[index].Headers))
+				for key := range redacted.AuthProfiles[index].Headers {
+					headers[key] = "[REDACTED]"
+				}
+				redacted.AuthProfiles[index].Headers = headers
+			}
+			if len(redacted.AuthProfiles[index].Cookies) > 0 {
+				cookies := make(map[string]string, len(redacted.AuthProfiles[index].Cookies))
+				for key := range redacted.AuthProfiles[index].Cookies {
+					cookies[key] = "[REDACTED]"
+				}
+				redacted.AuthProfiles[index].Cookies = cookies
+			}
+		}
+	}
+	for index := range redacted.AuthorizationPolicies {
+		if redacted.AuthorizationPolicies[index].ActionBody != "" {
+			redacted.AuthorizationPolicies[index].ActionBody = "[REDACTED]"
+		}
+		if redacted.AuthorizationPolicies[index].CleanupBody != "" {
+			redacted.AuthorizationPolicies[index].CleanupBody = "[REDACTED]"
+		}
+	}
+	redactRecorded := func(request *RecordedRequest) {
+		if request.Body != "" {
+			request.Body = "[REDACTED]"
+		}
+		if len(request.Headers) > 0 {
+			headers := make(map[string]string, len(request.Headers))
+			for key := range request.Headers {
+				headers[key] = "[REDACTED]"
+			}
+			request.Headers = headers
+		}
+	}
+	redacted.RaceProofPolicies = append([]RaceProofPolicy(nil), redacted.RaceProofPolicies...)
+	for index := range redacted.RaceProofPolicies {
+		redactRecorded(&redacted.RaceProofPolicies[index].Action)
+		redactRecorded(&redacted.RaceProofPolicies[index].State)
+		redactRecorded(&redacted.RaceProofPolicies[index].Cleanup)
+	}
+	redacted.BusinessLogicProofPolicies = append([]BusinessLogicProofPolicy(nil), redacted.BusinessLogicProofPolicies...)
+	for index := range redacted.BusinessLogicProofPolicies {
+		redactRecorded(&redacted.BusinessLogicProofPolicies[index].NativeAction)
+		redactRecorded(&redacted.BusinessLogicProofPolicies[index].ManipulatedAction)
+		redactRecorded(&redacted.BusinessLogicProofPolicies[index].NegativeControl)
+		redactRecorded(&redacted.BusinessLogicProofPolicies[index].State)
+		redactRecorded(&redacted.BusinessLogicProofPolicies[index].Cleanup)
+	}
+	redacted.AccountRecoveryProofPolicies = redactStatefulSecurityPolicies(redacted.AccountRecoveryProofPolicies)
+	redacted.WebhookProofPolicies = redactStatefulSecurityPolicies(redacted.WebhookProofPolicies)
+	redacted.CSRFProofPolicies = redactStatefulSecurityPolicies(redacted.CSRFProofPolicies)
+	redacted.SessionLifecycleProofPolicies = append([]SessionLifecycleProofPolicy(nil), redacted.SessionLifecycleProofPolicies...)
+	for index := range redacted.SessionLifecycleProofPolicies {
+		redactRecorded(&redacted.SessionLifecycleProofPolicies[index].Logout)
+		redactRecorded(&redacted.SessionLifecycleProofPolicies[index].ProtectedResource)
+	}
+	redacted.HPPProofPolicies = append([]HPPProofPolicy(nil), redacted.HPPProofPolicies...)
+	for index := range redacted.HPPProofPolicies {
+		redactRecorded(&redacted.HPPProofPolicies[index].State)
+		redactRecorded(&redacted.HPPProofPolicies[index].Cleanup)
+	}
+	if len(redacted.JWTExpiredTokens) > 0 {
+		redacted.JWTExpiredTokens = []string{"[REDACTED]"}
+	}
+	return redacted
+}
+
+func redactStatefulSecurityPolicies(policies []StatefulSecurityProofPolicy) []StatefulSecurityProofPolicy {
+	redacted := append([]StatefulSecurityProofPolicy(nil), policies...)
+	for index := range redacted {
+		for _, request := range []*RecordedRequest{
+			&redacted[index].Action, &redacted[index].NegativeControl, &redacted[index].State, &redacted[index].Cleanup,
+		} {
+			if request.Body != "" {
+				request.Body = "[REDACTED]"
+			}
+			if len(request.Headers) > 0 {
+				headers := make(map[string]string, len(request.Headers))
+				for key := range request.Headers {
+					headers[key] = "[REDACTED]"
+				}
+				request.Headers = headers
+			}
+		}
+	}
+	return redacted
 }

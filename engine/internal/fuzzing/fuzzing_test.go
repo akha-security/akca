@@ -119,13 +119,28 @@ func Test403PriorityOrdering(t *testing.T) {
 
 func TestPrefixPruningRequiresRepeatedHard404s(t *testing.T) {
 	e := &Engine{}
-	e.recordPrefixMiss("/api")
-	e.recordPrefixMiss("/api")
-	if _, banned := e.bannedPrefixes.Load("/api"); banned {
+	e.recordPrefixMiss("/legacy")
+	e.recordPrefixMiss("/legacy")
+	if _, banned := e.bannedPrefixes.Load("/legacy"); banned {
 		t.Fatal("prefix was pruned after fewer than three hard misses")
 	}
-	e.recordPrefixMiss("/api")
-	if _, banned := e.bannedPrefixes.Load("/api"); !banned {
+	e.recordPrefixMiss("/legacy")
+	if _, banned := e.bannedPrefixes.Load("/legacy"); !banned {
 		t.Fatal("prefix should be pruned after repeated hard misses")
+	}
+}
+
+func TestProtectedRootPrefixes(t *testing.T) {
+	// Root /api should not be extractable as a depth-1 bannable prefix
+	if p := pathPrefix("/api"); p != "" {
+		t.Fatalf("expected empty prefix for protected root /api, got %q", p)
+	}
+	// Multi-segment under /api should track specific sub-prefix /api/legacy
+	if p := pathPrefix("/api/legacy/endpoint"); p != "/api/legacy" {
+		t.Fatalf("expected /api/legacy prefix, got %q", p)
+	}
+	// Non-protected paths should track normally
+	if p := pathPrefix("/old-admin/test"); p != "/old-admin/test" {
+		t.Fatalf("expected /old-admin/test, got %q", p)
 	}
 }

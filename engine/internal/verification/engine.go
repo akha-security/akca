@@ -259,11 +259,18 @@ func ScoreConfidence(c Candidate, r Result) (ConfidenceLevel, float64) {
 	}
 	if c.DirectTypedSignal {
 		// The module's parser/guard matched its vulnerability-specific signal.
-		// This is enough to retain a Potential lead, but not to reach a
-		// reportable tier without independent replay/control evidence.
+		// It is useful corroboration, but a single response must never reach a
+		// high-confidence tier by itself. Independent replay/control, OAST,
+		// timing, DOM execution, or a boolean-pair proof supplies that upgrade.
 		if r.TypedReplayRatio < 2.0/3.0 && !r.OASTConfirmed && !r.TimingConfirmed &&
 			!c.DOMExecuted && !validBooleanPairProof(c.BooleanPairProof) {
-			score += 0.50
+			score += 0.20
+			// Stateful and identity-bound proofs include independent before/after
+			// or role/control observations. Preserve their stronger weight while
+			// keeping one-shot content matches at the Potential tier.
+			if isStatefulProof(r.ProofType) {
+				score += 0.30
+			}
 		}
 	}
 	if r.PolymorphicOK {
@@ -347,4 +354,15 @@ func ScoreConfidence(c Candidate, r Result) (ConfidenceLevel, float64) {
 		return Potential, score
 	}
 	return NeedsManualReview, score
+}
+
+func isStatefulProof(proof ProofType) bool {
+	switch proof {
+	case ProofStateMutation, ProofIdentityBoundary, ProofFileRetrieval,
+		ProofPolicyViolation, ProofRequestPolicy, ProofAnonymousAccess,
+		ProofStoredExecution:
+		return true
+	default:
+		return false
+	}
 }

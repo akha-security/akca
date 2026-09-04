@@ -61,9 +61,13 @@ func TestFuzzEngineWorkerPool(t *testing.T) {
 	_ = db.Migrate()
 
 	var batches int
+	var summary map[string]interface{}
 	fe := NewEngine("scan-f", client, scopeEngine, db, func(eventType, message string, payload map[string]interface{}) error {
 		if eventType == "fuzz_result_batch" {
 			batches++
+		}
+		if eventType == "fuzzing_discovery_summary" {
+			summary = payload
 		}
 		return nil
 	}, 4)
@@ -82,5 +86,15 @@ func TestFuzzEngineWorkerPool(t *testing.T) {
 	}
 	if fe.Queue403().Metrics().TotalEnqueued == 0 {
 		t.Fatal("expected 403 queue entries")
+	}
+	count, err := db.CountEndpoints("scan-f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("expected two promoted fuzz endpoints, got %d", count)
+	}
+	if summary == nil || summary["live"] == nil {
+		t.Fatalf("expected fuzzing discovery summary, got %+v", summary)
 	}
 }

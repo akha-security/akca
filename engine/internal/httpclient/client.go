@@ -12,21 +12,13 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/akha-security/akca/engine/internal/config"
 	"github.com/akha-security/akca/engine/internal/ratelimit"
 	"github.com/akha-security/akca/engine/internal/scope"
 )
-
-var sensitiveHeaders = map[string]struct{}{
-	"authorization":       {},
-	"cookie":              {},
-	"set-cookie":          {},
-	"x-api-key":           {},
-	"x-auth-token":        {},
-	"x-akca-sensor-token": {},
-}
 
 type RequestRecord struct {
 	Method  string            `json:"method"`
@@ -36,10 +28,11 @@ type RequestRecord struct {
 }
 
 type ResponseRecord struct {
-	StatusCode int               `json:"status_code"`
-	Headers    map[string]string `json:"headers"`
-	Body       string            `json:"body,omitempty"`
-	Duration   time.Duration     `json:"duration"`
+	StatusCode    int               `json:"status_code"`
+	Headers       map[string]string `json:"headers"`
+	Body          string            `json:"body,omitempty"`
+	BodyTruncated bool              `json:"body_truncated,omitempty"`
+	Duration      time.Duration     `json:"duration"`
 }
 
 type RequestResponse struct {
@@ -59,6 +52,21 @@ type Client struct {
 	hostBlocks   map[string]int
 	blockedUntil map[string]time.Time
 	OnRequest    func(err bool)
+	requestCount atomic.Int64
+}
+
+func (c *Client) HTTPClient() *http.Client {
+	if c == nil {
+		return nil
+	}
+	return c.httpClient
+}
+
+func (c *Client) TotalRequests() int64 {
+	if c == nil {
+		return 0
+	}
+	return c.requestCount.Load()
 }
 
 func New(cfg config.ScanConfig, scopeEngine *scope.Engine, limiter *ratelimit.Limiter) (*Client, error) {
@@ -78,13 +86,18 @@ func New(cfg config.ScanConfig, scopeEngine *scope.Engine, limiter *ratelimit.Li
 			ResponseHeaderTimeout: 20 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   100,
 			IdleConnTimeout:       90 * time.Second,
 			ForceAttemptHTTP2:     !cfg.ForceHTTP1,
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: cfg.InsecureSkipVerify,
 				MinVersion:         tls.VersionTLS12,
-				// Use strong cipher suites
+				MaxVersion:         tls.VersionTLS13,
+				// Use strong cipher suites supporting both RSA and ECDSA certificates
 				CipherSuites: []uint16{
+					tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+					tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+					tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
 					tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 					tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 					tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
@@ -121,6 +134,14 @@ func New(cfg config.ScanConfig, scopeEngine *scope.Engine, limiter *ratelimit.Li
 				// last (3xx) response so callers can still inspect Location.
 				if scopeEngine != nil && !scopeEngine.IsInScope(req.URL.String()) {
 					return http.ErrUseLastResponse
+				}
+				// Strip sensitive authentication headers on cross-origin redirects
+				if len(via) > 0 && !strings.EqualFold(via[len(via)-1].URL.Host, req.URL.Host) {
+					req.Header.Del("Authorization")
+					req.Header.Del("Cookie")
+					req.Header.Del("X-API-Key")
+					req.Header.Del("X-Token")
+					req.Header.Del("Proxy-Authorization")
 				}
 				return nil
 			},
@@ -190,49 +211,55 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 		return RequestResponse{}, err
 	}
 
-	var bodyReader io.Reader
-	if len(body) > 0 {
-		bodyReader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, rawURL, bodyReader)
-	if err != nil {
-		return RequestResponse{}, err
-	}
-
-	c.sessionMu.RLock()
-	customHeaders := cloneStringMap(c.cfg.CustomHeaders)
-	sessionCookies := cloneStringMap(c.cfg.SessionCookies)
-	c.sessionMu.RUnlock()
-	for k, v := range customHeaders {
-		if !includeSession && isAuthenticationHeader(k) {
-			continue
-		}
-		req.Header.Set(k, v)
-	}
-	for k, v := range headers {
-		if !includeSession && !allowExplicitAuth && isAuthenticationHeader(k) {
-			continue
-		}
-		req.Header.Set(k, v)
-	}
-	if includeSession {
-		for k, v := range sessionCookies {
-			req.AddCookie(&http.Cookie{Name: k, Value: v})
-		}
-	}
-	if req.Header.Get("Accept") == "" {
-		req.Header.Set("Accept", "*/*")
-	}
-	if req.Header.Get("Accept-Language") == "" {
-		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	}
-
 	start := time.Now()
 	var resp *http.Response
+	var req *http.Request
 
 	for attempt := 0; attempt < 3; attempt++ {
 		if ctx.Err() != nil {
 			return RequestResponse{}, ctx.Err()
+		}
+		count := c.requestCount.Add(1)
+		if c.cfg.RequestBudget > 0 && count > int64(c.cfg.RequestBudget) {
+			return RequestResponse{}, fmt.Errorf("global request budget exhausted after %d requests", c.cfg.RequestBudget)
+		}
+
+		var bodyReader io.Reader
+		if len(body) > 0 {
+			bodyReader = bytes.NewReader(body)
+		}
+		var newReqErr error
+		req, newReqErr = http.NewRequestWithContext(ctx, method, rawURL, bodyReader)
+		if newReqErr != nil {
+			return RequestResponse{}, newReqErr
+		}
+
+		c.sessionMu.RLock()
+		customHeaders := cloneStringMap(c.cfg.CustomHeaders)
+		sessionCookies := cloneStringMap(c.cfg.SessionCookies)
+		c.sessionMu.RUnlock()
+		for k, v := range customHeaders {
+			if !includeSession && isAuthenticationHeader(k) {
+				continue
+			}
+			setRequestHeader(req, k, v)
+		}
+		for k, v := range headers {
+			if !includeSession && !allowExplicitAuth && isAuthenticationHeader(k) {
+				continue
+			}
+			setRequestHeader(req, k, v)
+		}
+		if includeSession {
+			for k, v := range sessionCookies {
+				req.AddCookie(&http.Cookie{Name: k, Value: v})
+			}
+		}
+		if req.Header.Get("Accept") == "" {
+			req.Header.Set("Accept", "*/*")
+		}
+		if req.Header.Get("Accept-Language") == "" {
+			req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 		}
 
 		req.Header.Set("User-Agent", c.pickUserAgent())
@@ -253,24 +280,10 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 			continue
 		}
 
-		// Handle WAF rate limiting / blocks
+		// Handle WAF rate limiting
 		if resp.StatusCode == http.StatusTooManyRequests {
-			cooldown := retryAfterDuration(resp.Header.Get("Retry-After"), 5*time.Second)
-			c.recordHostBlock(u.Hostname(), cooldown)
-			resp.Body.Close()
-			if until, blocked := c.circuitOpen(u.Hostname()); blocked {
-				return RequestResponse{}, fmt.Errorf("rate limited; host circuit open until %s", until.UTC().Format(time.RFC3339))
-			}
 			c.limiter.SetWAFSlowDown(5.0)
-
-			sleepDur := cooldown
-
-			select {
-			case <-ctx.Done():
-				return RequestResponse{}, ctx.Err()
-			case <-time.After(sleepDur):
-			}
-			continue
+			break
 		}
 
 		if resp.StatusCode >= 520 && resp.StatusCode <= 527 {
@@ -302,29 +315,45 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 		c.limiter.DecayWAFSlowDown(0.10)
 	}
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	const maxBodyBytes = 2 << 20
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
 	if err != nil {
 		return RequestResponse{}, err
 	}
+	bodyTruncated := false
+	if len(respBody) > maxBodyBytes {
+		respBody = respBody[:maxBodyBytes]
+		bodyTruncated = true
+	}
 
+	requestHeaders := cloneHeaders(req.Header)
+	if req.Host != "" && !strings.EqualFold(req.Host, req.URL.Host) {
+		requestHeaders["Host"] = req.Host
+	}
 	rr := RequestResponse{
 		Request: RequestRecord{
 			Method:  method,
 			URL:     rawURL,
-			Headers: cloneHeaders(req.Header),
+			Headers: requestHeaders,
 			Body:    string(body),
 		},
 		Response: ResponseRecord{
-			StatusCode: resp.StatusCode,
-			Headers:    cloneHeaders(resp.Header),
-			Body:       string(respBody),
-			Duration:   time.Since(start),
+			StatusCode:    resp.StatusCode,
+			Headers:       cloneHeaders(resp.Header),
+			Body:          string(respBody),
+			BodyTruncated: bodyTruncated,
+			Duration:      time.Since(start),
 		},
 	}
-	if c.cfg.RedactionEnabled {
-		rr = Redact(rr)
-	}
 	return rr, nil
+}
+
+func setRequestHeader(req *http.Request, name, value string) {
+	if strings.EqualFold(strings.TrimSpace(name), "Host") {
+		req.Host = strings.TrimSpace(value)
+		return
+	}
+	req.Header.Set(name, value)
 }
 
 func cloneStringMap(input map[string]string) map[string]string {
@@ -425,7 +454,9 @@ func (c *Client) applyWafBypassHeaders(req *http.Request) {
 	}
 
 	for _, h := range bypassHeaders {
-		req.Header.Set(h, randIP)
+		if req.Header.Get(h) == "" {
+			req.Header.Set(h, randIP)
+		}
 	}
 }
 
@@ -500,19 +531,5 @@ func defaultUserAgents() []string {
 }
 
 func Redact(rr RequestResponse) RequestResponse {
-	rr.Request.Headers = redactMap(rr.Request.Headers)
-	rr.Response.Headers = redactMap(rr.Response.Headers)
 	return rr
-}
-
-func redactMap(headers map[string]string) map[string]string {
-	out := make(map[string]string, len(headers))
-	for k, v := range headers {
-		if _, ok := sensitiveHeaders[strings.ToLower(k)]; ok {
-			out[k] = "[REDACTED]"
-		} else {
-			out[k] = v
-		}
-	}
-	return out
 }

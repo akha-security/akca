@@ -2,8 +2,26 @@ package storage
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
+
+func TestShellQuotePreservesSingleQuotes(t *testing.T) {
+	if got, want := shellQuote("it's"), `'it'"'"'s'`; got != want {
+		t.Fatalf("shellQuote()=%q want %q", got, want)
+	}
+	command := buildCurlCommand("POST", "https://example.test/search?q=it's", "X-Name: O'Reilly", `{"name":"it's"}`)
+	for _, want := range []string{
+		`'https://example.test/search?q=it'"'"'s'`,
+		`'X-Name: O'"'"'Reilly'`,
+		`'{"name":"it'"'"'s"}'`,
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("curl command omitted valid quote sequence %q: %s", want, command)
+		}
+	}
+}
 
 func TestListFindingsUIAndAnnotation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "akca.db")
@@ -128,3 +146,42 @@ func TestListEvidenceLazyFromEmbeddedDescription(t *testing.T) {
 		t.Fatalf("expected parsed HTTP proof, got %+v", body)
 	}
 }
+
+func TestDashboardMetrics_DurationAndRequestsAccurate(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	scanID := "scan-metrics-test"
+	_ = db.EnsureScan(scanID)
+
+	// Simulate scan running with 150 requests, started 3 minutes ago
+	now := time.Now().UTC()
+	start := now.Add(-95 * time.Second) // 1m 35s duration
+	if err := db.UpdateScanFinished(scanID, "completed", 150, start, now); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := db.DashboardMetrics(scanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if m.TotalRequests != 150 {
+		t.Fatalf("expected 150 requests sent, got %d", m.TotalRequests)
+	}
+
+	if m.Duration != "1m 35s" {
+		t.Fatalf("expected duration '1m 35s', got %q", m.Duration)
+	}
+
+	if m.StartedAt == "" || m.FinishedAt == "" || m.StartedAt == m.FinishedAt {
+		t.Fatalf("expected distinct StartedAt and FinishedAt timestamps, got started=%q finished=%q", m.StartedAt, m.FinishedAt)
+	}
+}
+

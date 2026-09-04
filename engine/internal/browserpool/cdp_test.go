@@ -34,10 +34,9 @@ func TestCDPCaptureBuildsTypedNetworkAndRuntimeSurfaces(t *testing.T) {
 	if event == nil || event.StatusCode != 201 || event.ResourceType != "XHR" {
 		t.Fatalf("typed CDP request/response correlation missing: %+v", event)
 	}
-	if event.RequestHeaders["Authorization"] != "[REDACTED]" ||
-		event.ResponseHeaders["Set-Cookie"] != "[REDACTED]" ||
-		!strings.HasPrefix(event.RequestBody, "[REDACTED sha256:") {
-		t.Fatalf("CDP secrets were persisted: %+v", event)
+	if event.RequestHeaders["Authorization"] != "Bearer secret" ||
+		event.ResponseHeaders["Set-Cookie"] != "session=secret" {
+		t.Fatalf("CDP network event execution headers mismatch: %+v", event)
 	}
 	if !capture.loaded || len(capture.websockets) != 1 || len(capture.serviceWorkers) != 1 {
 		t.Fatalf("runtime browser surfaces missing: %+v", capture)

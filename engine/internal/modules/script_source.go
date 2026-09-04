@@ -3,6 +3,7 @@ package modules
 import (
 	"context"
 	"net/url"
+	"strings"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/scriptsurface"
@@ -51,10 +52,36 @@ func (r *Runner) runScriptSource(ctx context.Context, target ScanTarget) []Modul
 		}
 		f.Title = "Controllable external " + res.Kind + " (" + signal + ")"
 		f.Description = res.URL + " referenced from page; " + signal
-		r.recordFinding(&out, f, "script_source", signal)
+		r.recordFinding(ctx, &out, f, "script_source", signal)
 		if len(out) >= 3 {
 			break
 		}
 	}
+
+	// Check Dependency Confusion for extracted scoped packages
+	for _, res := range scriptsurface.ExtractFromHTML(pageRR.Response.Body, target.EndpointURL) {
+		if res.Kind == "package" && strings.HasPrefix(res.URL, "@") {
+			pkgURL := "https://registry.npmjs.org/" + res.URL
+			if _, ok := seen[pkgURL]; ok {
+				continue
+			}
+			seen[pkgURL] = struct{}{}
+			rr, err := r.client.Do(ctx, "GET", pkgURL, nil, nil)
+			if err != nil {
+				continue
+			}
+			if ok, signal := scriptsurface.CheckDependencyConfusion(rr.Response.StatusCode, rr.Response.Body); ok {
+				p := defaultPayload("script_source", "dependency_confusion", res.URL, signal)
+				f := r.verifyAndBuild(ctx, "script_source", target, p, baseline, rr, signal, false, false, "", "")
+				if f != nil {
+					f.Title = "Dependency Confusion Risk (Unregistered Scoped Package: " + res.URL + ")"
+					f.Severity = "critical"
+					f.Description = "Internal package '" + res.URL + "' was referenced in client-side code but is unregistered on the public NPM registry."
+					r.recordFinding(ctx, &out, f, "script_source", signal)
+				}
+			}
+		}
+	}
+
 	return out
 }

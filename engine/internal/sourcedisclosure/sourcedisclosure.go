@@ -1,6 +1,7 @@
 package sourcedisclosure
 
 import (
+	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
@@ -21,21 +22,34 @@ var (
 	internalHostRe = regexp.MustCompile(`(?i)\b(?:internal|staging|dev|corp|local)\.[a-z0-9.\-]+\.(?:local|internal|lan|corp)\b`)
 	debugLogicRe   = regexp.MustCompile(`(?i)(?:if\s*\(\s*(?:debug|is_debug|app_debug|dev_mode|staging)\s*(?:==|===|!=)\s*(?:true|1|'1'|"1"|'staging'|"staging")\s*\)|APP_DEBUG\s*=\s*true|DEBUG\s*=\s*True|env\s*==\s*['"]staging['"])`)
 	jwtSecretRe    = regexp.MustCompile(`(?i)(?:jwt[_\-]?secret|session[_\-]?secret|signing[_\-]?key|cookie[_\-]?secret)\s*[:=]\s*['"]([^'"]{8,})['"]`)
+	dbPassRe       = regexp.MustCompile(`(?i)(?:DB_PASSWORD|POSTGRES_PASSWORD|MYSQL_ROOT_PASSWORD|REDIS_PASSWORD)\s*=\s*['"]?([^"'\s]{4,})['"]?`)
+	envSecretRe    = regexp.MustCompile(`(?i)(?:SECRET_KEY|API_SECRET|APP_KEY|AUTH_SECRET|ENCRYPTION_KEY)\s*=\s*['"]?([^"'\s]{8,})['"]?`)
 )
 
 // SourceSuffixes are backup/disclosure extensions to probe relative to a URL path.
 var SourceSuffixes = []string{
-	".bak", ".old", ".save", ".swp", ".tmp", "~",
-	".php.bak", ".php.old", ".php~", ".php.swp",
-	".py.bak", ".js.map", ".css.map",
-	".conf.bak", ".config.bak", ".env.bak", ".env.old",
+	".bak", ".old", ".save", ".swp", ".tmp", "~", ".orig", ".copy", ".1", ".2",
+	".php.bak", ".php.old", ".php~", ".php.swp", ".php.orig",
+	".py.bak", ".js.map", ".css.map", ".js.bak", ".ts.bak",
+	".conf.bak", ".config.bak", ".env.bak", ".env.old", ".env.local",
+	".sql.bak", ".tar.gz", ".zip", ".rar", ".7z",
 }
 
 // SourcePathHints are common disclosed source/config paths.
 var SourcePathHints = []string{
-	"/config.php", "/config.php.bak", "/wp-config.php.bak",
+	"/.env", "/.env.local", "/.env.production", "/.env.staging", "/.env.dev", "/.env.backup", "/.env.old",
+	"/.git/config", "/.git/HEAD", "/.git/index", "/.gitignore",
+	"/.svn/entries", "/.svn/wc.db", "/.hg/dirstate", "/.bzr/README",
+	"/.DS_Store", "/.idea/workspace.xml", "/.vscode/settings.json",
+	"/.npmrc", "/.gitlab-ci.yml", "/.travis.yml", "/.github/workflows/main.yml",
+	"/config.php", "/config.php.bak", "/wp-config.php.bak", "/wp-config.php~", "/wp-config.php.save",
 	"/settings.py", "/settings.py.bak", "/web.config", "/web.config.bak",
-	"/application.yml.bak", "/database.yml", "/.env.backup",
+	"/application.yml", "/application.yml.bak", "/application.properties", "/database.yml",
+	"/config.json", "/config.json.bak", "/appsettings.json", "/appsettings.Development.json",
+	"/docker-compose.yml", "/Dockerfile", "/server.js.bak", "/app.js.bak",
+	"/backup.sql", "/dump.sql", "/database.sql", "/db.sql", "/users.sql",
+	"/id_rsa", "/id_rsa.pub", "/id_ed25519", "/.ssh/id_rsa",
+	"/.aws/credentials", "/.aws/config",
 }
 
 // LooksLikeSourceCode reports whether a response body resembles raw source.
@@ -78,7 +92,7 @@ func Analyze(body string) []Finding {
 		if m.Confidence < 0.7 {
 			sev = "medium"
 		}
-		add("secret_"+m.Kind, m.Redacted, sev, m.Confidence)
+		add("secret_"+m.Kind, m.Value, sev, m.Confidence)
 	}
 
 	for _, ip := range internalIPRe.FindAllString(body, 8) {
@@ -92,6 +106,12 @@ func Analyze(body string) []Finding {
 	}
 	if m := jwtSecretRe.FindStringSubmatch(body); len(m) > 1 {
 		add("jwt_secret", secretscan.Redact(m[1]), "critical", 0.9)
+	}
+	if m := dbPassRe.FindStringSubmatch(body); len(m) > 1 {
+		add("database_password_disclosure", secretscan.Redact(m[1]), "critical", 0.95)
+	}
+	if m := envSecretRe.FindStringSubmatch(body); len(m) > 1 {
+		add("app_secret_disclosure", secretscan.Redact(m[1]), "high", 0.9)
 	}
 	return out
 }
@@ -139,6 +159,24 @@ func CandidateURLs(baseURL string) []string {
 	if strings.Contains(lower, ".php") {
 		add(joinURL(baseURL, ".bak"))
 		add(joinURL(baseURL, "~"))
+	}
+
+	// Dynamic Path Segments (e.g. domain.com/Scripts/main.js -> domain.com/Scripts.zip, domain.com/Scripts.tar.gz)
+	if parsed, err := url.Parse(baseURL); err == nil && parsed.Path != "" && parsed.Path != "/" {
+		rootURL := fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
+		segments := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+		for _, seg := range segments {
+			cleanSeg := strings.TrimSpace(seg)
+			if cleanSeg == "" {
+				continue
+			}
+			if dotIdx := strings.LastIndex(cleanSeg, "."); dotIdx > 0 {
+				cleanSeg = cleanSeg[:dotIdx]
+			}
+			for _, ext := range []string{".zip", ".tar.gz", ".7z", ".rar", ".bak", ".old"} {
+				add(rootURL + "/" + cleanSeg + ext)
+			}
+		}
 	}
 	return out
 }

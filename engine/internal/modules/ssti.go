@@ -18,6 +18,11 @@ func baseSSTIProbes() []payloadgen.Payload {
 		{Value: `{{11*13}}`, VulnClass: "ssti", Variant: "twig", ExpectedSignal: "template_evaluation"},
 		{Value: `${13*17}`, VulnClass: "ssti", Variant: "jinja", ExpectedSignal: "template_evaluation"},
 		{Value: `<%= 11*13 %>`, VulnClass: "ssti", Variant: "erb", ExpectedSignal: "template_evaluation"},
+		{Value: `{{11*'13'}}`, VulnClass: "ssti", Variant: "jinja_string_multiply", ExpectedSignal: "template_evaluation"},
+		{Value: `#{11*13}`, VulnClass: "ssti", Variant: "pug_jade", ExpectedSignal: "template_evaluation"},
+		{Value: `*{11*13}`, VulnClass: "ssti", Variant: "thymeleaf", ExpectedSignal: "template_evaluation"},
+		{Value: `${{11*13}}`, VulnClass: "ssti", Variant: "angularjs_sandbox", ExpectedSignal: "template_evaluation"},
+		{Value: `[= 11*13]`, VulnClass: "ssti", Variant: "freemarker_alt", ExpectedSignal: "template_evaluation"},
 	}
 }
 
@@ -45,9 +50,17 @@ func (r *Runner) runSSTI(ctx context.Context, target ScanTarget) []ModuleFinding
 		return nil
 	}
 	var out []ModuleFinding
-	baseline, ok := r.stableNativeBaselineForModule(ctx, "ssti", target)
+	baseline, ok, baselineReason := r.stableNativeBaselineForModule(ctx, "ssti", target)
 	if !ok {
-		return nil
+		fallback, err := r.cachedEmptyProbe(ctx, target)
+		if err != nil {
+			r.emitSkip("ssti", target, baselineReason+"; empty-request fallback failed: "+err.Error())
+			return nil
+		}
+		baseline = fallback
+		r.emitOnce("ssti_fallback:"+target.EndpointURL, "coverage_gap", "SSTI used a single native fallback because the stability baseline was unavailable", map[string]interface{}{
+			"endpoint": target.EndpointURL, "reason": baselineReason,
+		})
 	}
 	probes := mergeSSTIProbes(
 		baseSSTIProbes(),
@@ -61,7 +74,7 @@ func (r *Runner) runSSTI(ctx context.Context, target ScanTarget) []ModuleFinding
 			continue
 		}
 		rr := attempt.RR
-		if isInfrastructureError(rr.Response.StatusCode) || (rr.Response.StatusCode >= 400 && baseline.Response.StatusCode < 400) {
+		if isInfrastructureError(rr.Response.StatusCode) {
 			continue
 		}
 		probeTarget := attempt.Target
@@ -70,7 +83,7 @@ func (r *Runner) runSSTI(ctx context.Context, target ScanTarget) []ModuleFinding
 		}
 		if runtimeFinding, handled := r.runtimeSinkProof(ctx, "ssti", probeTarget, p, baseline, rr); handled {
 			if runtimeFinding != nil {
-				r.recordFinding(&out, runtimeFinding, "ssti", runtimeFinding.Evidence.Signal)
+				r.recordFinding(ctx, &out, runtimeFinding, "ssti", runtimeFinding.Evidence.Signal)
 				return out
 			}
 			continue
@@ -84,8 +97,7 @@ func (r *Runner) runSSTI(ctx context.Context, target ScanTarget) []ModuleFinding
 		}
 		// Parser errors and generic operating-system strings are useful
 		// telemetry, but are not execution proof.
-		if signal == "error_trace" || signal == "command_output" || signal == "separator_output" ||
-			signal == "string_multiply_eval" {
+		if signal == "error_trace" || signal == "separator_output" {
 			continue
 		}
 		if !sstiSignalConfirmed(p, rr.Response.Body, baseline.Response.Body, signal) {
@@ -109,8 +121,9 @@ func (r *Runner) runSSTI(ctx context.Context, target ScanTarget) []ModuleFinding
 		}
 		f := r.verifyAndBuild(ctx, "ssti", probeTarget, p, baseline, rr, signal, false, false, "", "")
 		if f != nil {
-			_ = r.persistFinding(*f)
-			out = append(out, *f)
+			if r.recordFinding(ctx, &out, f, "ssti", signal) {
+				return out
+			}
 		}
 	}
 	return out

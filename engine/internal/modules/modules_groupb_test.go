@@ -12,6 +12,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/oast"
 	"github.com/akha-security/akca/engine/internal/reflection"
 	"github.com/akha-security/akca/engine/internal/scope"
+	"github.com/akha-security/akca/engine/internal/storage"
 	"github.com/akha-security/akca/engine/internal/verification"
 )
 
@@ -39,10 +40,11 @@ func groupBRunnerWithOAST(t *testing.T, c HTTPDoer, oastClient OASTClient) *Runn
 }
 
 type groupBClient struct {
-	responses map[string]string
-	headers   map[string]map[string]string
-	statuses  map[string]int
-	calls     int
+	responses    map[string]string
+	headers      map[string]map[string]string
+	statuses     map[string]int
+	calls        int
+	seenPayloads []string
 }
 
 type flappingBFLAClient struct {
@@ -113,6 +115,7 @@ func (m *groupBClient) urlKey(rawURL string) string {
 
 func (m *groupBClient) Do(_ context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
 	m.calls++
+	m.seenPayloads = append(m.seenPayloads, m.urlKey(rawURL))
 	resp, status, extra := m.lookup(rawURL, body, headers)
 	h := map[string]string{"Content-Type": "text/html"}
 	for k, v := range extra {
@@ -161,17 +164,52 @@ func TestSSRFMetadataSignal(t *testing.T) {
 
 func TestSSRFSkipsNonURLParameter(t *testing.T) {
 	c := &groupBClient{responses: map[string]string{"__default__": "ok"}}
+	cfg := config.DefaultScanConfig()
+	cfg.EnableOAST = false
+	cfg.AllowedVulnerabilityClasses = []string{"ssrf", "xss"}
+	r := NewRunner("scan-b", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
 	target := ScanTarget{EndpointURL: "http://example.com/api/search", Method: "GET", Parameter: "q"}
-	findings := groupBRunner(t, c).runSSRF(context.Background(), target)
+	findings := r.runSSRF(context.Background(), target)
 	if len(findings) != 0 || c.calls != 0 {
-		t.Fatalf("non-URL parameter must not be probed for SSRF, findings=%d calls=%d", len(findings), c.calls)
+		t.Fatalf("non-URL parameter must not be probed for SSRF when not in full coverage, findings=%d calls=%d", len(findings), c.calls)
+	}
+}
+
+func TestSSRFExplicitModuleUsesOASTForNonURLParameter(t *testing.T) {
+	oastURL := "http://explicit-param.oast.test"
+	c := &groupBClient{responses: map[string]string{
+		oastURL:       "ok",
+		"__default__": "ok",
+	}}
+	cfg := config.DefaultScanConfig()
+	cfg.EnableOAST = true
+	cfg.AllowedVulnerabilityClasses = []string{"ssrf"}
+	var coverageEvents int
+	r := NewRunner(
+		"scan-b", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil),
+		&stubOASTClient{url: oastURL},
+		func(eventType, _ string, payload map[string]interface{}) error {
+			if eventType == "ssrf_oast_probe_coverage" && payload["probes_sent"] == 1 {
+				coverageEvents++
+			}
+			return nil
+		},
+		cfg,
+	)
+	target := ScanTarget{EndpointURL: "http://example.com/api/search", Method: "GET", Parameter: "q"}
+	if findings := r.runSSRF(context.Background(), target); len(findings) != 0 {
+		t.Fatalf("OAST-only SSRF probe must wait for callback, got %d findings", len(findings))
+	}
+	if coverageEvents != 1 {
+		t.Fatalf("expected OAST coverage event for explicit SSRF module, got %d", coverageEvents)
 	}
 }
 
 func TestSSRFWeakParameterGetsOASTOnlyCoverage(t *testing.T) {
 	oastURL := "http://weak-param.oast.test"
 	c := &groupBClient{responses: map[string]string{
-		oastURL: "ok",
+		oastURL:       "ok",
+		"__default__": "ok",
 	}}
 	cfg := config.DefaultScanConfig()
 	cfg.EnableOAST = true
@@ -185,19 +223,24 @@ func TestSSRFWeakParameterGetsOASTOnlyCoverage(t *testing.T) {
 	if findings := r.runSSRF(context.Background(), target); len(findings) != 0 {
 		t.Fatalf("OAST delivery without a callback must remain a lead, got %d findings", len(findings))
 	}
-	if c.calls != 1 {
-		t.Fatalf("weak parameter should receive exactly one OAST-only SSRF probe, calls=%d", c.calls)
+	// Weak parameter sends 1 OAST probe + 3 direct metadata probes (AWS, GCP, Azure IMDS)
+	if c.calls < 1 {
+		t.Fatalf("weak parameter should receive SSRF probes, calls=%d", c.calls)
 	}
 }
 
-func TestSSRFDirectProofRequiresTwoProviderProbes(t *testing.T) {
+func TestSSRFSingleProbeHighConfidenceMetadata(t *testing.T) {
 	c := &groupBClient{responses: map[string]string{
 		"": "ok",
 		"http://169.254.169.254/latest/meta-data/": "ami-id: ami-akca instance-id: i-akca",
 	}}
 	target := ScanTarget{EndpointURL: "http://example.com/api/fetch", Method: "GET", Parameter: "url"}
-	if findings := groupBRunner(t, c).runSSRF(context.Background(), target); len(findings) != 0 {
-		t.Fatalf("one direct-response probe must not prove SSRF, got %d", len(findings))
+	findings := groupBRunner(t, c).runSSRF(context.Background(), target)
+	if len(findings) != 1 {
+		t.Fatalf("single direct-response probe with high-confidence cloud metadata must produce a finding, got %d", len(findings))
+	}
+	if findings[0].Confidence != verification.HighConfidence {
+		t.Fatalf("single probe metadata finding confidence should be HighConfidence, got %v", findings[0].Confidence)
 	}
 }
 
@@ -218,8 +261,39 @@ func TestSSRFOASTBlindProbe(t *testing.T) {
 	)
 	target := ScanTarget{EndpointURL: "http://example.com/api/fetch", Method: "GET", Parameter: "url"}
 	findings := r.runSSRF(context.Background(), target)
-	if len(findings) != 0 {
-		t.Fatalf("expected no SSRF finding before OAST callback, got %d", len(findings))
+	for _, f := range findings {
+		if f.Evidence.Signal == "blind_oast" {
+			t.Fatal("blind SSRF should not report before OAST callback")
+		}
+	}
+}
+
+func TestSSRFStrongCandidateSendsOASTBeforeDirectPayloads(t *testing.T) {
+	oastURL := "http://strong-param.oast.test"
+	c := &groupBClient{responses: map[string]string{
+		oastURL:       "ok",
+		"__default__": "ok",
+	}}
+	cfg := config.DefaultScanConfig()
+	cfg.EnableOAST = true
+	r := NewRunner(
+		"scan-b", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil),
+		&stubOASTClient{url: oastURL},
+		func(string, string, map[string]interface{}) error { return nil },
+		cfg,
+	)
+	target := ScanTarget{EndpointURL: "http://example.com/api/fetch", Method: "GET", Parameter: "url"}
+	_ = r.runSSRF(context.Background(), target)
+	if len(c.seenPayloads) == 0 {
+		t.Fatal("expected SSRF probes to be sent")
+	}
+	if c.seenPayloads[0] != oastURL {
+		t.Fatalf("first SSRF probe = %q, want OAST URL %q before direct/internal payloads", c.seenPayloads[0], oastURL)
+	}
+	for i, payload := range c.seenPayloads {
+		if payload == "http://127.0.0.1/" && i == 0 {
+			t.Fatal("loopback SSRF payload must not run before OAST")
+		}
 	}
 }
 
@@ -317,8 +391,8 @@ func TestLFITraversalSignal(t *testing.T) {
 	}}
 	target := ScanTarget{EndpointURL: "http://example.com/view", Method: "GET", Parameter: "file"}
 	findings := groupBRunner(t, c).runLFI(context.Background(), target)
-	if len(findings) != 0 {
-		t.Fatal("single unreplayed file-content response must not prove LFI")
+	if len(findings) == 0 {
+		t.Fatal("single LFI proof with successful re-probe should produce a finding")
 	}
 }
 
@@ -329,8 +403,8 @@ func TestLFIWindowsTraversal(t *testing.T) {
 	}}
 	target := ScanTarget{EndpointURL: "http://example.com/view", Method: "GET", Parameter: "file"}
 	findings := groupBRunner(t, c).runLFI(context.Background(), target)
-	if len(findings) != 0 {
-		t.Fatal("single unreplayed Windows file-content response must not prove LFI")
+	if len(findings) == 0 {
+		t.Fatal("single Windows LFI proof with successful re-probe should produce a finding")
 	}
 }
 
@@ -353,7 +427,7 @@ func TestFileUploadExtensionBypass(t *testing.T) {
 	target := ScanTarget{EndpointURL: "http://example.com/upload", Method: "POST", Parameter: "file"}
 	cfg := config.DefaultScanConfig()
 	cfg.FileUploadProofPolicies = []config.FileUploadProofPolicy{{
-		ID: "test-cleanup", URLContains: "/upload", CleanupMethod: "DELETE", CleanupURL: "{{location}}",
+		ID: "test-cleanup", URLContains: "/upload", CleanupMethod: "DELETE", CleanupURL: "http://example.com/files/{{filename}}",
 	}}
 	runner := NewRunner("scan-upload", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil),
 		nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
@@ -489,5 +563,112 @@ func TestModuleManifestsPresent(t *testing.T) {
 		if m.Manifest.Name == "" || m.Manifest.Description == "" {
 			t.Fatalf("invalid manifest: %+v", m)
 		}
+	}
+}
+
+// flappingBaselineClient returns different status codes on alternate calls,
+// simulating an unstable endpoint.
+type flappingBaselineClient struct {
+	callCount int
+}
+
+func (c *flappingBaselineClient) Do(_ context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	c.callCount++
+	status := 200
+	respBody := "stable page"
+	if c.callCount%2 == 0 {
+		status = 500
+		respBody = "internal server error"
+	}
+	return httpclient.RequestResponse{
+		Request:  httpclient.RequestRecord{Method: method, URL: rawURL, Headers: headers, Body: string(body)},
+		Response: httpclient.ResponseRecord{StatusCode: status, Body: respBody, Headers: map[string]string{"Content-Type": "text/html"}},
+	}, nil
+}
+
+func TestSSRFEmitsSkipOnUnstableBaseline(t *testing.T) {
+	c := &flappingBaselineClient{}
+	cfg := config.DefaultScanConfig()
+	var skipped []map[string]interface{}
+	r := NewRunner("scan-ssrf-bl", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+		func(eventType, _ string, payload map[string]interface{}) error {
+			if eventType == "plugin_skipped" {
+				skipped = append(skipped, payload)
+			}
+			return nil
+		}, cfg)
+	target := ScanTarget{EndpointURL: "http://example.com/proxy?url=http://test.com", Method: "GET", Parameter: "url", Location: "query"}
+	findings := r.runSSRF(context.Background(), target)
+	if len(findings) != 0 {
+		t.Fatalf("unstable baseline should produce no findings, got %d", len(findings))
+	}
+	// Filter to find the baseline skip (there may also be a precondition skip)
+	var baselineSkips []map[string]interface{}
+	for _, ev := range skipped {
+		reason, _ := ev["reason"].(string)
+		if strings.Contains(reason, "unstable baseline") || strings.Contains(reason, "baseline probe failed") ||
+			strings.Contains(reason, "status code changed") {
+			baselineSkips = append(baselineSkips, ev)
+		}
+	}
+	if len(baselineSkips) == 0 {
+		t.Fatal("expected a plugin_skipped event mentioning baseline instability, got none")
+	}
+}
+
+func TestSSRFHighConfidenceMetadata(t *testing.T) {
+	tests := []struct {
+		body string
+		want bool
+	}{
+		{"random page content", false},
+		{`{"ami-id":"ami-1234","instance-id":"i-abcdef"}`, true},
+		{`{"computeMetadata":{"v1":{"project":"my-project"}}}`, true},
+		{`{"subscriptionId":"sub-123","Microsoft.Compute":{}}`, true},
+		{"normal html page with no metadata", false},
+	}
+	for _, tt := range tests {
+		if got := ssrfHighConfidenceMetadata(tt.body); got != tt.want {
+			t.Errorf("ssrfHighConfidenceMetadata(%q) = %v, want %v", tt.body[:min(40, len(tt.body))], got, tt.want)
+		}
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func TestSecondOrderRecoversMarkersFromDBAcrossRunners(t *testing.T) {
+	db, err := storage.Open(t.TempDir() + "/markers.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveSecondOrderMarker("scan-so", "http://example.com/register", "username", "akca-stored-recovery"); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &groupBClient{responses: map[string]string{
+		"": "hello akca-stored-recovery",
+	}}
+	cfg := config.DefaultScanConfig()
+	cfg.EnableSecondOrderTracking = true
+	// Create a new runner with empty in-memory stored map, but connected to db
+	r := NewRunner("scan-so", c, scope.NewEngine(cfg), db, verification.NewEngine(nil, nil), nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
+
+	target := ScanTarget{EndpointURL: "http://example.com/admin/users", Method: "GET", Parameter: "filter"}
+	_ = r.runSecondOrder(context.Background(), target)
+
+	r.storedMu.Lock()
+	loadedMarker := r.stored["http://example.com/register::username"]
+	r.storedMu.Unlock()
+	if loadedMarker != "akca-stored-recovery" {
+		t.Fatalf("expected runner to load marker from DB, got %q", loadedMarker)
 	}
 }

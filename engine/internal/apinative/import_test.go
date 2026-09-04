@@ -212,3 +212,60 @@ type Query {
 		t.Fatalf("scalar GraphQL field must not have a selection set: %s", inventory.Operations[1].BodyTemplate)
 	}
 }
+
+func TestRAMLImportResolvesIncludedPostBody(t *testing.T) {
+	spec := `#%RAML 1.0
+title: Users API
+baseUri: https://api.test/v1
+types:
+  UserInput: !include types/user.raml
+/users:
+  post:
+    queryParameters:
+      notify?: boolean
+    body:
+      application/json:
+        type: UserInput
+`
+	userType := []byte("type: object\nproperties:\n  email: string\n  'age?': integer\n")
+	inventory, err := Import([]byte(spec), ImportOptions{SourcePath: "api.raml", ExternalFiles: map[string][]byte{"types/user.raml": userType}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inventory.Format != FormatRAML || len(inventory.Operations) != 1 {
+		t.Fatalf("unexpected inventory: %+v", inventory)
+	}
+	op := inventory.Operations[0]
+	if op.Method != "POST" || op.URL != "https://api.test/v1/users" || !strings.Contains(op.BodyTemplate, `"email":"akca"`) {
+		t.Fatalf("RAML POST body was not materialized: %+v", op)
+	}
+	params := map[string]Parameter{}
+	for _, p := range op.Parameters {
+		params[p.Name] = p
+	}
+	if params["notify"].Required || !params["email"].Required || params["age"].Required {
+		t.Fatalf("RAML parameter constraints lost: %+v", op.Parameters)
+	}
+}
+
+func TestOpenAPIBundleResolvesExternalRequestSchema(t *testing.T) {
+	spec := `openapi: 3.1.0
+info: {title: Bundled}
+paths:
+  /orders:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: 'schemas/order.yaml#/Order'}
+      responses: {'204': {description: ok}}
+`
+	schema := []byte("Order:\n  type: object\n  required: [quantity]\n  properties:\n    quantity: {type: integer, minimum: 1}\n")
+	inv, err := Import([]byte(spec), ImportOptions{BaseURL: "https://api.test", SourcePath: "openapi.yaml", ExternalFiles: map[string][]byte{"schemas/order.yaml": schema}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inv.Operations) != 1 || !strings.Contains(inv.Operations[0].BodyTemplate, `"quantity":1`) {
+		t.Fatalf("external schema was not resolved: %+v", inv)
+	}
+}

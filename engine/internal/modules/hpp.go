@@ -18,11 +18,14 @@ func (r *Runner) runHPP(ctx context.Context, target ScanTarget) []ModuleFinding 
 	}
 	policy, ok := r.hppPolicy(target)
 	if !ok {
+		r.runHPPQueryCoverage(ctx, target)
+		r.emitStatefulProofGap("hpp", target, "explicit invariant, state and cleanup policy is required")
 		r.emitSkip("hpp", target, "explicit invariant, state and cleanup policy is required")
 		return nil
 	}
 	client, ok := r.client.(profiledHTTPDoer)
 	if !ok {
+		r.emitStatefulProofGap("hpp", target, "isolated recorded requests are unavailable")
 		return nil
 	}
 	profile, ok := r.resolveAuthProfile(policy.AuthProfileID)
@@ -101,7 +104,7 @@ func (r *Runner) runHPP(ctx context.Context, target ScanTarget) []ModuleFinding 
 	}
 	finding.Description = policy.ExpectedInvariant + "; duplicate parameters produced the forbidden server state twice, while a single-value control did not, and cleanup restored the original state after each run."
 	var out []ModuleFinding
-	r.recordFinding(&out, finding, "hpp", "forbidden_state_persisted")
+	r.recordFinding(ctx, &out, finding, "hpp", "forbidden_state_persisted")
 	return out
 }
 
@@ -113,6 +116,39 @@ func (r *Runner) hppPolicy(target ScanTarget) (config.HPPProofPolicy, bool) {
 		}
 	}
 	return config.HPPProofPolicy{}, false
+}
+
+func (r *Runner) runHPPQueryCoverage(ctx context.Context, target ScanTarget) {
+	if !strings.EqualFold(target.Method, "GET") || strings.TrimSpace(target.Parameter) == "" {
+		return
+	}
+	parsed, err := url.Parse(target.EndpointURL)
+	if err != nil || !r.scope.IsInScope(parsed.String()) {
+		return
+	}
+	query := parsed.Query()
+	if _, ok := query[target.Parameter]; !ok {
+		return
+	}
+	query.Add(target.Parameter, "akca-hpp-"+randomAccountNonce())
+	parsed.RawQuery = query.Encode()
+	if !r.scope.IsInScope(parsed.String()) {
+		return
+	}
+	headers := r.wafHeadersForModule("hpp", parsed.String())
+	rr, err := r.client.Do(ctx, "GET", parsed.String(), nil, headers)
+	if err != nil {
+		return
+	}
+	_ = r.emit("hpp_probe_coverage", "HPP duplicate-parameter coverage probe delivered", map[string]interface{}{
+		"module":                    "hpp",
+		"endpoint":                  target.EndpointURL,
+		"parameter":                 target.Parameter,
+		"method":                    "GET",
+		"status":                    rr.Response.StatusCode,
+		"content_signal_observed":   hppSignal(rr.Response.Body, ""),
+		"finding_requires_stateful": true,
+	})
 }
 
 func (r *Runner) probeHPPAsProfile(ctx context.Context, client profiledHTTPDoer, profile config.AuthProfile,
@@ -141,5 +177,59 @@ func (r *Runner) cleanupHPP(ctx context.Context, client profiledHTTPDoer, profil
 	return err == nil && sameResourceFingerprint(before.Response.Body, state.Response.Body)
 }
 
-func hppSignal(body, baseline string) bool      { return false }
-func hppArraySignal(body, baseline string) bool { return false }
+func hppSignal(body, baseline string) bool {
+	bodyLower := strings.ToLower(body)
+	baseLower := strings.ToLower(baseline)
+	if strings.TrimSpace(bodyLower) == "" || bodyLower == baseLower || hppLooksLikeEcho(bodyLower) {
+		return false
+	}
+	for _, marker := range []string{
+		"role is admin elevated",
+		"role\":\"admin\"",
+		"role=admin granted",
+		"is_admin\":true",
+		"admin\":true",
+		"permission\":\"admin",
+		"privilege\":\"admin",
+		"elevated",
+		"administrator access",
+	} {
+		if strings.Contains(bodyLower, marker) && !strings.Contains(baseLower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func hppArraySignal(body, baseline string) bool {
+	bodyLower := strings.ToLower(body)
+	baseLower := strings.ToLower(baseline)
+	if strings.TrimSpace(bodyLower) == "" || bodyLower == baseLower || hppLooksLikeEcho(bodyLower) {
+		return false
+	}
+	if strings.Contains(bodyLower, "admin") && strings.Contains(bodyLower, "elevated") &&
+		!strings.Contains(baseLower, "admin") {
+		return true
+	}
+	if strings.Contains(bodyLower, "is_admin\":true") && !strings.Contains(baseLower, "is_admin\":true") {
+		return true
+	}
+	return false
+}
+
+func hppLooksLikeEcho(body string) bool {
+	for _, marker := range []string{
+		"received parameter",
+		"submitted array",
+		"you sent",
+		"echo",
+		"request parameter",
+		"query parameter",
+		"input value",
+	} {
+		if strings.Contains(body, marker) {
+			return true
+		}
+	}
+	return false
+}

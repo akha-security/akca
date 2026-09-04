@@ -297,7 +297,12 @@ func (s *Server) await(scanID string) {
 		return
 	}
 	s.state.Status = "completed"
-	if err != nil {
+	if errors.Is(err, context.Canceled) {
+		s.state.Status = "stopped"
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		s.state.Status = "timeout"
+		s.state.Error = err.Error()
+	} else if err != nil {
 		s.state.Status = "failed"
 		s.state.Error = err.Error()
 	}
@@ -336,7 +341,7 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data, err := s.engine.GenerateReport(report.Options{
-		ScanID: scanID, Template: report.TemplateInternal, Format: format, Redact: true,
+		ScanID: scanID, Template: report.TemplateInternal, Format: format, Redact: false,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

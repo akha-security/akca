@@ -21,6 +21,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/packs"
 	"github.com/akha-security/akca/engine/internal/proxy"
 	"github.com/akha-security/akca/engine/internal/scheduler"
+	"github.com/akha-security/akca/engine/internal/scope"
 	"github.com/akha-security/akca/engine/internal/secrets"
 	"github.com/akha-security/akca/engine/internal/sensor"
 	"github.com/akha-security/akca/engine/internal/storage"
@@ -58,10 +59,14 @@ func platformDataDir() string {
 }
 
 func (e *Engine) initPlatform(dataDir string) {
+	e.initPlatformWithConfig(dataDir, e.session.Snapshot().Config)
+}
+
+func (e *Engine) initPlatformWithConfig(dataDir string, cfg config.ScanConfig) {
 	if e.platform != nil {
 		return
 	}
-	secretStore := secrets.NewStore(string(e.session.Config.CredentialStorageMode), dataDir)
+	secretStore := secrets.NewStore(string(cfg.CredentialStorageMode), dataDir)
 	_ = secrets.EnsureDataDir(dataDir)
 	ctx, cancel := context.WithCancel(context.Background())
 	e.platform = &Platform{
@@ -79,7 +84,7 @@ func (e *Engine) initPlatform(dataDir string) {
 	}
 	wsDB := &workspaceDBAdapter{db: e.db}
 	e.platform.workspace = workspace.NewAPI(wsDB)
-	if e.session.Config.EnableScanScheduler {
+	if cfg.EnableScanScheduler {
 		e.platform.scheduler = scheduler.NewRunner(e.db, func(cfg config.ScanConfig) error {
 			if err := e.StartScan(cfg); err != nil {
 				return err
@@ -90,9 +95,9 @@ func (e *Engine) initPlatform(dataDir string) {
 	}
 }
 
-func (e *Engine) bootstrapPlatform(cfg config.ScanConfig) error {
+func (e *Engine) bootstrapPlatform(cfg config.ScanConfig, scanScope *scope.Engine) error {
 	dataDir, _ := storage.DataDir()
-	e.initPlatform(dataDir)
+	e.initPlatformWithConfig(dataDir, cfg)
 	e.resetPlatformWorkers()
 	if e.platform.auth != nil {
 		_ = e.platform.auth.PersistProfiles(cfg.ScanID, cfg)
@@ -102,7 +107,7 @@ func (e *Engine) bootstrapPlatform(cfg config.ScanConfig) error {
 		e.platform.browserPool.Start(e.platform.platCtx)
 	}
 	if cfg.EnableProxyInterceptMode {
-		e.platform.proxy = proxy.NewInterceptServer(e.db, e.scope, "proxy-"+cfg.ScanID)
+		e.platform.proxy = proxy.NewInterceptServer(e.db, scanScope, "proxy-"+cfg.ScanID)
 		_ = e.platform.proxy.Start("127.0.0.1:18080")
 	}
 	if cfg.EnableRuntimeSensor {
@@ -172,7 +177,7 @@ func (e *Engine) checkpointPhase(scanID, phase string, completed []string, statu
 	if !e.session.Config.EnableScanResume || e.platform == nil {
 		return
 	}
-	cfgJSON, _ := json.Marshal(e.session.Config)
+	cfgJSON, _ := json.Marshal(e.session.Config.RedactedForStorage())
 	_ = e.platform.checkpoint.Save(scanID, checkpoint.State{
 		Phase: phase, Completed: completed, PhaseStatus: status,
 		CrawlQueue:  e.reqQueue.Snapshot(),
@@ -207,7 +212,24 @@ func (a *workspaceDBAdapter) SaveWorkspace(id, name, raw string) error {
 	return a.db.SaveWorkspace(id, name, raw)
 }
 func (a *workspaceDBAdapter) ListWorkspaces() ([]workspace.Workspace, error) {
-	return nil, nil
+	rows, err := a.db.Conn().Query(`SELECT workspace_json FROM workspaces ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []workspace.Workspace
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var item workspace.Workspace
+		if err := json.Unmarshal([]byte(raw), &item); err != nil {
+			return nil, fmt.Errorf("decode workspace: %w", err)
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 func (a *workspaceDBAdapter) SaveMember(workspaceID, raw string) error {
 	return a.db.SaveWorkspaceMember(workspaceID, raw)

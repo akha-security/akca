@@ -2,12 +2,19 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
+	"runtime"
+	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/akha-security/akca/engine/internal/config"
@@ -15,6 +22,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/events"
 	"github.com/akha-security/akca/engine/internal/fuzzing"
 	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/modules"
 	"github.com/akha-security/akca/engine/internal/oast"
 	"github.com/akha-security/akca/engine/internal/queue"
 	"github.com/akha-security/akca/engine/internal/ratelimit"
@@ -27,6 +35,7 @@ import (
 
 type Engine struct {
 	mu            sync.Mutex
+	activeScanID  atomic.Pointer[string]
 	writer        events.Writer
 	batcher       *events.Batcher
 	db            *storage.DB
@@ -45,8 +54,12 @@ type Engine struct {
 	scanning      bool
 	scanCancel    context.CancelFunc
 	scanDone      chan struct{}
+	scanErr       error
 	metricsCancel context.CancelFunc
 	jobs          *distributed.Coordinator
+	moduleRunner  *modules.Runner
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 func New(writer events.Writer) (*Engine, error) {
@@ -94,29 +107,63 @@ func New(writer events.Writer) (*Engine, error) {
 }
 
 func (e *Engine) Close() error {
-	e.mu.Lock()
-	if e.scanning && e.scanCancel != nil {
-		e.scanCancel()
-	}
-	if e.metricsCancel != nil {
-		e.metricsCancel()
-	}
-	e.mu.Unlock()
-	e.shutdownPlatform()
-	if e.oast != nil {
-		e.oast.Stop()
-	}
-	if e.oastCancel != nil {
-		e.oastCancel()
-	}
-	if e.stopCh != nil {
-		close(e.stopCh)
-	}
-	_ = e.batcher.Close()
-	return e.db.Close()
+	e.closeOnce.Do(func() {
+		e.mu.Lock()
+		if e.scanning && e.scanCancel != nil {
+			e.scanCancel()
+		}
+		if e.metricsCancel != nil {
+			e.metricsCancel()
+		}
+		doneCh := e.scanDone
+		e.mu.Unlock()
+
+		if doneCh != nil {
+			// Every scan operation must observe the scan context. Do not tear the
+			// database and event writer out from under a still-running pipeline.
+			<-doneCh
+		}
+
+		e.shutdownPlatform()
+		if e.oast != nil {
+			e.oast.Stop()
+		}
+		if e.oastCancel != nil {
+			e.oastCancel()
+		}
+		if e.stopCh != nil {
+			select {
+			case <-e.stopCh:
+			default:
+				close(e.stopCh)
+			}
+		}
+		_ = e.batcher.Close()
+		e.closeErr = e.db.Close()
+	})
+	return e.closeErr
 }
 
 func (e *Engine) Emit(eventType, message string, payload map[string]interface{}) error {
+	// Persist high-diagnostic-value events to the timeline_events table so
+	// skip reasons and error context survive after the scan completes.
+	if storage.IsDiagnosticEvent(eventType) && e.db != nil {
+		scanID := ""
+		if payload != nil {
+			if s, ok := payload["scan_id"].(string); ok {
+				scanID = s
+			}
+		}
+		if scanID == "" {
+			if ptr := e.activeScanID.Load(); ptr != nil {
+				scanID = *ptr
+			}
+		}
+		if scanID != "" {
+			eventJSON, _ := json.Marshal(payload)
+			_ = e.db.SaveTimelineEvent(scanID, eventType, message, string(eventJSON))
+		}
+	}
 	return e.batcher.Emit(events.Event{
 		Type:    eventType,
 		TS:      time.Now().UTC().Format(time.RFC3339),
@@ -140,6 +187,11 @@ func (e *Engine) startScan(cfg config.ScanConfig, completed map[string]bool) err
 	}
 	cfg = config.ApplyScanProfile(cfg)
 	config.ApplyScanIntensity(&cfg)
+	configuredMemoryMB := cfg.MaxMemoryMB
+	if strings.HasPrefix(cfg.MemoryLimitSource, "automatic_") {
+		configuredMemoryMB = 0
+	}
+	cfg.MaxMemoryMB, cfg.MemoryLimitSource, cfg.DetectedAvailableMemoryMB = resolveMemoryLimitMB(configuredMemoryMB)
 	if cfg.EnableOAST && cfg.OASTSelfHosted == nil && strings.TrimSpace(cfg.OASTServerURL) == "" {
 		cfg.OASTServerURL = config.DefaultOASTServers
 	}
@@ -152,7 +204,7 @@ func (e *Engine) startScan(cfg config.ScanConfig, completed map[string]bool) err
 		cfg.IncludeDomains = deriveIncludeDomains(cfg.Targets)
 	}
 	if cfg.ScanID == "" {
-		cfg.ScanID = fmt.Sprintf("scan-%d", time.Now().Unix())
+		cfg.ScanID = deriveTargetScanID(cfg.Targets)
 	}
 
 	e.mu.Lock()
@@ -160,9 +212,40 @@ func (e *Engine) startScan(cfg config.ScanConfig, completed map[string]bool) err
 		e.mu.Unlock()
 		return errScanRunning
 	}
+
+	newScope := scope.NewEngine(cfg)
+	if err := e.bootstrapPlatform(cfg, newScope); err != nil {
+		e.mu.Unlock()
+		return err
+	}
+
+	// Auto-detect previous incomplete scan checkpoint for this target so user
+	// does not need to manually supply --scan-id or --resume flags.
+	if cfg.EnableScanResume && completed == nil && e.platform != nil && e.platform.checkpoint != nil {
+		if st, ok, err := e.platform.checkpoint.Latest(cfg.ScanID); err == nil && ok && len(st.Completed) > 0 {
+			var status string
+			if err := e.db.Conn().QueryRow("SELECT status FROM scans WHERE id = ?", cfg.ScanID).Scan(&status); err == nil && status != "completed" {
+				completed = make(map[string]bool)
+				for _, p := range st.Completed {
+					completed[p] = true
+				}
+				_ = e.Emit("scan_resumed", "automatically resuming previous scan from checkpoint", map[string]interface{}{
+					"scan_id":   cfg.ScanID,
+					"phase":     e.platform.checkpoint.ResumeFromPhase(st),
+					"completed": st.Completed,
+				})
+			}
+		}
+	}
+
+	idCopy := cfg.ScanID
+	e.activeScanID.Store(&idCopy)
 	_ = e.db.EnsureScan(cfg.ScanID)
+	cfgJSON, _ := json.Marshal(cfg.RedactedForStorage())
+	_ = e.db.UpdateScanConfig(cfg.ScanID, string(cfgJSON))
+
 	e.session = session.NewScanSession(cfg)
-	e.scope = scope.NewEngine(cfg)
+	e.scope = newScope
 	e.limiter = ratelimit.New(cfg.GlobalRateLimit, cfg.PerHostRateLimit)
 	client, err := httpclient.New(cfg, e.scope, e.limiter)
 	if err != nil {
@@ -170,12 +253,12 @@ func (e *Engine) startScan(cfg config.ScanConfig, completed map[string]bool) err
 		return err
 	}
 	e.client = client
+	// Module phases A-D are one logical scan. Reset the shared runner here so
+	// state such as stored/second-order markers survives phase boundaries but
+	// never leaks into a later scan.
+	e.moduleRunner = nil
 	e.resetScanQueues()
 	e.session.Start()
-	if err := e.bootstrapPlatform(cfg); err != nil {
-		e.mu.Unlock()
-		return err
-	}
 	if e.platform != nil && e.platform.health != nil {
 		e.client.OnRequest = func(err bool) {
 			e.platform.health.RecordRequest(err)
@@ -195,10 +278,17 @@ func (e *Engine) startScan(cfg config.ScanConfig, completed map[string]bool) err
 		e.oast.SetScanID(cfg.ScanID)
 	}
 	e.session.SetPhase("bootstrap")
-	scanCtx, cancel := context.WithCancel(context.Background())
+	var scanCtx context.Context
+	var cancel context.CancelFunc
+	if cfg.TimeBudget > 0 {
+		scanCtx, cancel = context.WithTimeout(context.Background(), cfg.TimeBudget)
+	} else {
+		scanCtx, cancel = context.WithCancel(context.Background())
+	}
 	e.scanCancel = cancel
 	e.scanning = true
 	e.scanDone = make(chan struct{})
+	e.scanErr = nil
 
 	metricsCtx, metricsCancel := context.WithCancel(context.Background())
 	e.metricsCancel = metricsCancel
@@ -220,27 +310,97 @@ func (e *Engine) WaitScanDone(ctx context.Context) error {
 	}
 	select {
 	case <-ch:
-		return nil
+		e.mu.Lock()
+		err := e.scanErr
+		e.mu.Unlock()
+		return err
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
 func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, completed map[string]bool) {
+	var failedPhases []string
+	var fatalPipelineErr error
+	if cfg.MaxMemoryMB > 0 {
+		softLimit := int64(cfg.MaxMemoryMB) * int64(bytesPerMiB) * 9 / 10
+		previousLimit := debug.SetMemoryLimit(softLimit)
+		defer debug.SetMemoryLimit(previousLimit)
+	}
+	preventSleep()
+	defer restoreSleep()
 	defer func() {
-		e.mu.Lock()
-		e.scanning = false
-		if e.scanCancel != nil {
-			e.scanCancel()
-			e.scanCancel = nil
+		finalStatus := "completed"
+		var resultErr error
+		if r := recover(); r != nil {
+			finalStatus = "failed"
+			resultErr = fmt.Errorf("scan pipeline panic: %v", r)
+			_ = e.Emit("scan_error", fmt.Sprintf("scan pipeline recovered from panic: %v", r), map[string]interface{}{
+				"scan_id": cfg.ScanID, "panic": fmt.Sprintf("%v", r),
+			})
+		} else if fatalPipelineErr != nil {
+			finalStatus = "failed"
+			resultErr = fatalPipelineErr
+		} else if ctx.Err() != nil {
+			if ctx.Err() == context.Canceled {
+				finalStatus = "stopped"
+			} else if ctx.Err() == context.DeadlineExceeded {
+				finalStatus = "timeout"
+			}
+			resultErr = ctx.Err()
+		} else if len(failedPhases) > 0 {
+			finalStatus = "partial"
+			resultErr = fmt.Errorf("scan completed with failed phases: %s", strings.Join(failedPhases, ", "))
 		}
+		var totalRequests int64
+		if e.client != nil {
+			totalRequests = e.client.TotalRequests()
+		}
+		if totalRequests == 0 && e.platform != nil && e.platform.health != nil {
+			totalRequests = int64(e.platform.health.RequestCount())
+		}
+		startedAt := time.Now().UTC()
+		if e.session != nil {
+			snap := e.session.Snapshot()
+			if !snap.StartedAt.IsZero() {
+				startedAt = snap.StartedAt
+			}
+		}
+		completedAt := time.Now().UTC()
+		if e.db != nil {
+			if err := e.db.UpdateScanFinished(cfg.ScanID, finalStatus, totalRequests, startedAt, completedAt); err != nil && resultErr == nil {
+				resultErr = fmt.Errorf("persist final scan status: %w", err)
+			}
+		}
+		if finalStatus == "stopped" {
+			_ = e.Emit("scan_stopped", "scan stopped", map[string]interface{}{"scan_id": cfg.ScanID, "was_running": true})
+		}
+
+		// An Interactsh registration is a scan-scoped, expiring remote session.
+		// Detach and close it before advertising the scan as finished; otherwise
+		// the next scan can inherit a stale registration and flood the event stream
+		// with polling/failover errors until the process state is reset.
+		e.mu.Lock()
+		listener := e.oast
+		e.oast = nil
 		if e.metricsCancel != nil {
 			e.metricsCancel()
 			e.metricsCancel = nil
 		}
+		e.mu.Unlock()
+		if listener != nil {
+			listener.Stop()
+		}
+
+		e.mu.Lock()
+		e.scanning = false
+		e.scanErr = resultErr
+		if e.scanCancel != nil {
+			e.scanCancel()
+			e.scanCancel = nil
+		}
 		if e.scanDone != nil {
 			close(e.scanDone)
-			e.scanDone = nil
 		}
 		e.mu.Unlock()
 	}()
@@ -248,7 +408,7 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 	done := func(phase string) bool { return completed != nil && completed[phase] }
 	completedList := []string{"bootstrap"}
 	for _, p := range []string{
-		"fingerprint", "learning_waf", "api_import", "crawling", "sensor_discovery", "js_analysis", "shadow_api",
+		"preflight", "fingerprint", "learning_waf", "api_import", "crawling", "sensor_discovery", "js_analysis", "shadow_api",
 		"parameter_discovery", "fuzzing", "bypass403", "reflection", "vuln_modules", "oast_drain",
 	} {
 		if done(p) {
@@ -272,6 +432,16 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 	}
 
 	markFailed := func(phase string) {
+		alreadyFailed := false
+		for _, failed := range failedPhases {
+			if failed == phase {
+				alreadyFailed = true
+				break
+			}
+		}
+		if !alreadyFailed {
+			failedPhases = append(failedPhases, phase)
+		}
 		phaseStatus[phase] = "failed"
 		e.checkpointPhase(cfg.ScanID, phase, append([]string{}, completedList...), phaseStatus)
 	}
@@ -291,23 +461,45 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 	}
 
 	_ = e.Emit("scan_started", "scan started", map[string]interface{}{
-		"scan_id":           cfg.ScanID,
-		"targets":           cfg.Targets,
-		"max_pages":         cfg.MaxPages,
-		"request_budget":    cfg.RequestBudget,
-		"global_rate_limit": cfg.GlobalRateLimit,
-		"scan_intensity":    cfg.ScanIntensity,
-		"scan_profile":      cfg.SmartScanProfile,
-		"oast_enabled":      cfg.EnableOAST,
-		"proxy_enabled":     cfg.ProxyURL != "",
-		"proxy_endpoint":    config.SafeProxyURL(cfg.ProxyURL),
-		"insecure_tls":      cfg.InsecureSkipVerify,
+		"scan_id":                      cfg.ScanID,
+		"targets":                      cfg.Targets,
+		"max_pages":                    cfg.EffectiveMaxPages(),
+		"max_endpoints":                cfg.MaxEndpointsLimit(),
+		"max_depth":                    cfg.MaxDepth,
+		"subdomain_count":              cfg.SubdomainCount,
+		"request_budget":               cfg.RequestBudget,
+		"crawler_request_budget":       cfg.EffectiveCrawlerBudget(),
+		"payload_budget":               cfg.PayloadBudget,
+		"global_rate_limit":            cfg.GlobalRateLimit,
+		"scan_intensity":               cfg.ScanIntensity,
+		"scan_profile":                 cfg.SmartScanProfile,
+		"passive_mode":                 cfg.PassiveMode,
+		"memory_limit_mb":              cfg.MaxMemoryMB,
+		"memory_limit_source":          cfg.MemoryLimitSource,
+		"detected_available_memory_mb": cfg.DetectedAvailableMemoryMB,
+		"oast_enabled":                 cfg.EnableOAST,
+		"proxy_enabled":                cfg.ProxyURL != "",
+		"proxy_endpoint":               config.SafeProxyURL(cfg.ProxyURL),
+		"insecure_tls":                 cfg.InsecureSkipVerify,
 	})
 	_ = e.Emit("log", "core engine foundation initialized", nil)
 	_ = e.Emit("phase_started", "phase bootstrap", map[string]interface{}{"phase": "bootstrap"})
 	_ = e.Emit("phase_finished", "phase bootstrap", map[string]interface{}{"phase": "bootstrap"})
 
 	targets := cfg.Targets
+	if !done("preflight") {
+		if err := e.runPreflightValidation(ctx, cfg); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			fatalPipelineErr = err
+			markFailed("preflight")
+			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "preflight"})
+			e.session.Stop()
+			return
+		}
+		markSuccess("preflight")
+	}
 
 	// ── Phase 1: Technology + WAF fingerprinting ──────────────────────────
 	if !done("fingerprint") {
@@ -405,15 +597,12 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 	// Runtime sensor agent discovery.
 	// The collector starts automatically, but correlation headers are enabled
 	// only when the target identifies an installed Akca application agent.
-	if cfg.EnableRuntimeSensor && e.platform != nil && e.platform.sensor != nil {
-		err := e.runRuntimeSensorDiscovery(ctx, crawlerTargets)
-		if !done("sensor_discovery") {
-			if err != nil {
-				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "sensor_discovery"})
-				markFailed("sensor_discovery")
-			} else {
-				markSuccess("sensor_discovery")
-			}
+	if !done("sensor_discovery") && cfg.EnableRuntimeSensor && e.platform != nil && e.platform.sensor != nil {
+		if err := e.runRuntimeSensorDiscovery(ctx, crawlerTargets); err != nil {
+			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "sensor_discovery"})
+			markFailed("sensor_discovery")
+		} else {
+			markSuccess("sensor_discovery")
 		}
 	} else if !done("sensor_discovery") {
 		markSkipped("sensor_discovery")
@@ -460,13 +649,17 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 	}
 
 	// ── Phase 6: Parameter + hidden parameter discovery ─────────────────────
-	if !done("parameter_discovery") {
+	if !done("parameter_discovery") && !cfg.PassiveMode {
 		if err := e.runParameterDiscoveryPhase(ctx); err != nil {
 			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "parameter_discovery"})
 			markFailed("parameter_discovery")
 		} else {
 			markSuccess("parameter_discovery")
 		}
+	} else if !done("parameter_discovery") {
+		_ = e.Emit("phase_started", "parameter discovery", map[string]interface{}{"phase": "parameter_discovery", "skipped": true, "reason": "passive_mode"})
+		_ = e.Emit("phase_finished", "parameter discovery", map[string]interface{}{"phase": "parameter_discovery", "skipped": true})
+		markSkipped("parameter_discovery")
 	}
 	if stopped() {
 		return
@@ -510,13 +703,17 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 	}
 
 	// ── Phase 9: Reflection analysis + context-aware payload generation ─────
-	if !done("reflection") {
+	if !done("reflection") && !cfg.PassiveMode {
 		if err := e.runReflectionPayloadPhase(ctx); err != nil {
 			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "reflection"})
 			markFailed("reflection")
 		} else {
 			markSuccess("reflection")
 		}
+	} else if !done("reflection") {
+		_ = e.Emit("phase_started", "reflection and payload generation", map[string]interface{}{"phase": "reflection", "skipped": true, "reason": "passive_mode"})
+		_ = e.Emit("phase_finished", "reflection and payload generation", map[string]interface{}{"phase": "reflection", "skipped": true})
+		markSkipped("reflection")
 	}
 	if stopped() {
 		return
@@ -533,20 +730,8 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 		markSuccess("session_guard_modules")
 	}
 	if !done("vuln_modules") {
-		hasError := false
-		for _, run := range []func(context.Context) error{
-			e.runVulnModulesPhaseA, e.runVulnModulesPhaseB,
-			e.runVulnModulesPhaseC, e.runVulnModulesPhaseD,
-		} {
-			if stopped() {
-				return
-			}
-			if err := run(ctx); err != nil {
-				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "vuln_modules"})
-				hasError = true
-			}
-		}
-		if hasError {
+		if err := e.runVulnModulesSequential(ctx); err != nil {
+			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "vuln_modules"})
 			markFailed("vuln_modules")
 		} else {
 			markSuccess("vuln_modules")
@@ -566,14 +751,43 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 	}
 
 	e.finalizePlatform(cfg.ScanID)
+
+	var currentRequests int64
+	if e.client != nil {
+		currentRequests = e.client.TotalRequests()
+	}
+	if currentRequests == 0 && e.platform != nil && e.platform.health != nil {
+		currentRequests = int64(e.platform.health.RequestCount())
+	}
+	startedAt := time.Now().UTC()
+	if e.session != nil {
+		snap := e.session.Snapshot()
+		if !snap.StartedAt.IsZero() {
+			startedAt = snap.StartedAt
+		}
+	}
+	completedAt := time.Now().UTC()
+	if e.db != nil {
+		_ = e.db.UpdateScanFinished(cfg.ScanID, "running", currentRequests, startedAt, completedAt)
+	}
+
 	if !cfg.SkipAutoReport {
 		e.checkpointPhase(cfg.ScanID, "report_generation", append([]string{}, completedList...), phaseStatus)
 		if err := e.runReportPhase(ctx, cfg.ScanID, false); err != nil {
-			_ = e.Emit("scan_error", err.Error(), nil)
+			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"scan_id": cfg.ScanID, "phase": "report_generation"})
+			markFailed("report_generation")
+		} else {
+			markSuccess("report_generation")
 		}
 	}
 
-	_ = e.Emit("scan_finished", "scan finished", map[string]interface{}{"scan_id": cfg.ScanID})
+	status := "completed"
+	if len(failedPhases) > 0 {
+		status = "partial"
+	}
+	_ = e.Emit("scan_finished", "scan finished", map[string]interface{}{
+		"scan_id": cfg.ScanID, "status": status, "failed_phases": append([]string(nil), failedPhases...),
+	})
 	e.session.Stop()
 }
 
@@ -587,6 +801,11 @@ func (e *Engine) applyAuth(cfg config.ScanConfig) {
 	}
 	for k, v := range cfg.CustomHeaders {
 		headers[k] = v
+	}
+	if len(cfg.ApiKeys) > 0 {
+		for k, v := range cfg.ApiKeys {
+			headers[k] = v
+		}
 	}
 	if len(cfg.Authentication) > 0 {
 		for k, v := range cfg.Authentication {
@@ -634,7 +853,7 @@ func (e *Engine) StopScan() error {
 	e.session.Stopping()
 	id := e.session.ID
 	e.mu.Unlock()
-	return e.Emit("scan_stopped", "scan stopping", map[string]interface{}{"scan_id": id, "was_running": scanning})
+	return e.Emit("scan_stopping", "scan stopping", map[string]interface{}{"scan_id": id, "was_running": scanning})
 }
 
 func (e *Engine) Snapshot() ([]byte, error) {
@@ -724,9 +943,9 @@ func (e *Engine) ensureOAST(cfg config.ScanConfig) error {
 		}
 		return nil
 	}
-	if e.oast != nil && e.oast.ServerURL() == desired {
-		return nil
-	}
+	// Never reuse an existing listener merely because its configured endpoint
+	// is unchanged. Remote OAST credentials and correlation domains expire and
+	// belong to one scan run, so each run must register a fresh session.
 	if e.oast != nil {
 		e.oast.Stop()
 		e.oast = nil
@@ -742,16 +961,19 @@ func (e *Engine) ensureOAST(cfg config.ScanConfig) error {
 	} else {
 		listenerConfig.ServerURL = desired
 	}
+	listenerConfig.HTTPClient = e.client.HTTPClient()
 	listener, err := oast.NewListener(e.db, e.Emit, listenerConfig)
 	if err != nil {
 		return err
 	}
 	if err := listener.Start(e.oastCtx); err != nil {
-		_ = e.Emit("oast_failed", "OAST initialization failed: "+err.Error(), map[string]interface{}{
-			"server": desired, "blind_coverage": false,
+		_ = e.Emit("oast_failed", "OAST startup failed after trying the configured server order: "+err.Error(), map[string]interface{}{
+			"scan_id":      cfg.ScanID,
+			"server_order": strings.Split(desired, ","), "fallback_stage": "startup_registration",
+			"runtime_failover": false, "blind_coverage": false,
 		})
-		_ = e.Emit("coverage_gap", "blind SSRF/XSS/XXE/OOB coverage unavailable", map[string]interface{}{
-			"module": "oast", "reason": err.Error(),
+		_ = e.Emit("coverage_gap", "blind SSRF/XSS/XXE/OOB coverage unavailable (all configured OAST servers unreachable)", map[string]interface{}{
+			"scan_id": cfg.ScanID, "module": "oast", "reason": err.Error(), "server_order": strings.Split(desired, ","),
 		})
 		return nil
 	}
@@ -805,9 +1027,17 @@ func deriveIncludeDomains(targets []string) []string {
 		if err != nil {
 			continue
 		}
-		host := strings.ToLower(u.Hostname())
+		host := strings.ToLower(u.Host)
+		if host == "" {
+			host = strings.ToLower(u.Hostname())
+		}
 		if host == "" {
 			continue
+		}
+		// Strip standard default ports (:80 for http, :443 for https)
+		if (u.Scheme == "http" && strings.HasSuffix(host, ":80")) ||
+			(u.Scheme == "https" && strings.HasSuffix(host, ":443")) {
+			host = strings.ToLower(u.Hostname())
 		}
 		if _, ok := seen[host]; ok {
 			continue
@@ -821,18 +1051,48 @@ func deriveIncludeDomains(targets []string) []string {
 func uniqueURLSeeds(urls []string) []string {
 	seen := map[string]struct{}{}
 	var out []string
+	add := func(raw string) {
+		if _, ok := seen[raw]; ok {
+			return
+		}
+		seen[raw] = struct{}{}
+		out = append(out, raw)
+	}
 	for _, raw := range urls {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
 			continue
 		}
-		if _, ok := seen[raw]; ok {
+
+		// Keep the exact URL as the primary seed, but also crawl the site's
+		// root. A deep-link target (for example /ssti) often has no links back
+		// to the lab/site index; without the root seed the crawler can never
+		// discover sibling routes even though the whole host is in scope.
+		add(raw)
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme == "" || u.Host == "" {
 			continue
 		}
-		seen[raw] = struct{}{}
-		out = append(out, raw)
+		u.Path = "/"
+		u.RawPath = ""
+		u.RawQuery = ""
+		u.ForceQuery = false
+		u.Fragment = ""
+		add(u.String())
 	}
 	return out
+}
+
+func deriveTargetScanID(targets []string) string {
+	if len(targets) == 0 {
+		b := make([]byte, 4)
+		_, _ = rand.Read(b)
+		return fmt.Sprintf("scan-%d-%s", time.Now().UnixNano(), hex.EncodeToString(b))
+	}
+	sorted := append([]string(nil), targets...)
+	sort.Strings(sorted)
+	hash := sha256.Sum256([]byte(strings.Join(sorted, "|")))
+	return fmt.Sprintf("scan-%s", hex.EncodeToString(hash[:6]))
 }
 
 func ConfigDir() (string, error) {
@@ -848,6 +1108,13 @@ func ConfigDir() (string, error) {
 }
 
 func (e *Engine) runMetricsLoop(ctx context.Context, scanID string) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			_ = e.Emit("scan_error", fmt.Sprintf("metrics worker recovered from panic: %v", recovered), map[string]interface{}{
+				"scan_id": scanID, "worker": "metrics",
+			})
+		}
+	}()
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -864,7 +1131,44 @@ func (e *Engine) runMetricsLoop(ctx context.Context, scanID string) {
 			reqQueue := e.reqQueue
 			oast := e.oast
 			sess := e.session
+			cancelScan := e.scanCancel
+			moduleRunner := e.moduleRunner
 			e.mu.Unlock()
+
+			var heapMB int
+			var processMemoryMB int
+			var memoryLimitMB int
+			if sess != nil {
+				snapshot := sess.Snapshot()
+				memoryLimitMB = snapshot.Config.MaxMemoryMB
+				var memory runtime.MemStats
+				runtime.ReadMemStats(&memory)
+				heapMB = int(memory.HeapAlloc >> 20)
+				processBytes, processErr := processMemoryBytes()
+				if processErr == nil {
+					processMemoryMB = int(processBytes >> 20)
+				}
+				if snapshot.Config.MaxMemoryMB > 0 {
+					limitBytes := uint64(snapshot.Config.MaxMemoryMB) << 20
+					usedBytes := memory.HeapAlloc
+					resource := "heap_memory"
+					if processBytes > usedBytes {
+						usedBytes = processBytes
+						resource = "process_memory"
+					}
+					if usedBytes >= limitBytes {
+						_ = e.Emit("resource_limit_reached", "scan stopped before exhausting process memory; resume from checkpoint with --resume", map[string]interface{}{
+							"scan_id": scanID, "resource": resource, "heap_mb": memory.HeapAlloc >> 20,
+							"process_memory_mb": processMemoryMB,
+							"limit_mb":          snapshot.Config.MaxMemoryMB, "recoverable": true,
+						})
+						if cancelScan != nil {
+							cancelScan()
+						}
+						return
+					}
+				}
+			}
 
 			if health == nil {
 				continue
@@ -876,6 +1180,10 @@ func (e *Engine) runMetricsLoop(ctx context.Context, scanID string) {
 				elapsed = 1
 			}
 			reqCount := int(health.RequestCount())
+			payloadProbes := 0
+			if moduleRunner != nil {
+				payloadProbes = int(moduleRunner.ProbeCount())
+			}
 			reqRate := float64(reqCount-lastReqCount) / elapsed
 			lastReqCount = reqCount
 			lastCaptureTime = now
@@ -917,7 +1225,11 @@ func (e *Engine) runMetricsLoop(ctx context.Context, scanID string) {
 				case "report_generation", "oast_drain":
 					progressBase = 95
 				default:
-					progressBase = 0
+					if strings.HasPrefix(phase, "vuln_module_") {
+						progressBase = 75
+					} else {
+						progressBase = 0
+					}
 				}
 
 				if progressBase > 0 {
@@ -947,6 +1259,11 @@ func (e *Engine) runMetricsLoop(ctx context.Context, scanID string) {
 
 			_ = e.Emit("health_snapshot", "health metrics update", map[string]interface{}{
 				"request_rate":         reqRate,
+				"request_count":        reqCount,
+				"payload_probes":       payloadProbes,
+				"heap_mb":              heapMB,
+				"process_memory_mb":    processMemoryMB,
+				"memory_limit_mb":      memoryLimitMB,
 				"endpoints_discovered": discovered,
 				"endpoints_tested":     tested,
 				"endpoints_remaining":  remaining,

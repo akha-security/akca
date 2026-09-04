@@ -1,13 +1,13 @@
 package modules
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/deeptraversal"
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/nosql"
 	"github.com/akha-security/akca/engine/internal/payloadgen"
-	"github.com/akha-security/akca/engine/internal/sensitivedata"
 	"github.com/akha-security/akca/engine/internal/verification"
 )
 
@@ -22,12 +22,20 @@ const (
 
 func fpCategoryFor(module string) fpCategory {
 	switch module {
-	case "security_headers", "tls_misconfig", "rate_limit", "api_exposure", "api_versioning":
+	case "security_headers", "cookie_security", "tls_misconfig", "rate_limit", "api_exposure", "api_versioning":
 		return fpInformational
 	case "secret_exposure", "sensitive_data", "cicd_exposure", "git_recovery",
-		"source_code_disclosure", "cloud_storage", "cloud_posture", "vulnerable_components":
+		"source_code_disclosure", "cloud_storage", "cloud_posture", "vulnerable_components", "llm_injection":
 		return fpContentMatch
-	case "cors", "open_redirect", "host_header", "crlf", "cache_poisoning", "cache_deception", "jwt", "oauth":
+	case "actuator", "backup_archives", "cloud_takeover", "devops_exposure", "route_auth_bypass", "tenant_isolation", "account_recovery", "webhook_security", "session_lifecycle", "parser_differential",
+		"nginx_alias", "nextjs_bypass", "framework_debug", "iis_discovery",
+		"firebase_misconfig", "spring_cloud_jolokia", "saas_exposure", "pdf_injection",
+		"cpdos", "proxy_path_confusion", "ws_cswsh", "jsonp_callback",
+		"react_rsc_rce", "server_side_js_injection", "csti_detection", "swagger_exposure", "sensitive_file_discovery",
+		"http_smuggling", "race_condition_sync", "oauth_flow_audit",
+		"cloud_native_exposure", "grpc_scan":
+		return fpContentMatch
+	case "cors", "open_redirect", "host_header", "host_poisoning", "crlf", "cache_poisoning", "cache_deception", "jwt", "oauth":
 		return fpHeaderEvidence
 	default:
 		return fpDifferential
@@ -101,26 +109,55 @@ func moduleSignalConfirmed(
 		return openRedirectHeaderConfirmed(probeHeaders, signal)
 	case "host_header":
 		return hostHeaderSignal(body, baseBody)
+	case "host_poisoning":
+		if strings.HasSuffix(signal, "_body_reflection") {
+			return strings.Contains(strings.ToLower(body), strings.ToLower(p.Value)) &&
+				!strings.Contains(strings.ToLower(baseBody), strings.ToLower(p.Value))
+		}
+		for key, value := range probeHeaders {
+			if strings.EqualFold(key, "Location") && strings.Contains(strings.ToLower(value), strings.ToLower(p.Value)) {
+				return true
+			}
+		}
+		return false
 	case "cors":
 		return corsSignalConfirmed(baseHeaders, probeHeaders, signal, p.Value)
 	case "secret_exposure":
 		return secretExposureConfirmed(body, baseBody, signal)
 	case "sensitive_data":
-		if body == baseBody {
-			return false
-		}
-		return len(sensitivedata.Analyze(body)) > len(sensitivedata.Analyze(baseBody))
+		return sensitiveDataSignalConfirmed(body, baseBody, signal, p.Value)
 	case "cicd_exposure":
 		return cicdExposureSignal(p.Value, body)
 	case "rate_limit":
 		if signal == "policy_violation_confirmed" {
 			return probeStatus > 0 && !rateLimitBlockSignal(probeStatus, body)
 		}
+		if signal == "rate_limit_threshold_discovered" {
+			return rateLimitBlockSignal(probeStatus, body)
+		}
+		if signal == "missing_rate_limiting" {
+			return rateLimitAttemptProcessed(probeStatus, body)
+		}
 		return probeStatus >= 200 && probeStatus < 400
-	case "security_headers", "tls_misconfig", "api_exposure", "api_versioning":
+	case "security_headers", "cookie_security", "tls_misconfig", "api_exposure", "api_versioning":
 		return probeStatus >= 200 && probeStatus < 400
-	case "jwt":
-		return jwtModuleConfirmed(body, baseBody, signal, probeStatus, baseStatus)
+	case "llm_injection":
+		pr := llmProbe{
+			payload:     p.Value,
+			signal:      signal,
+			matchMarker: p.Value,
+		}
+		if strings.Contains(p.Value, "AKCA_SYSTEM_PROMPT_LEAK:") {
+			pr.matchMarker = "AKCA_SYSTEM_PROMPT_LEAK:"
+			pr.instructionEcho = "ignore previous instructions"
+		} else if strings.Contains(p.Value, "AKCA_INSTRUCTION_OVERRIDE_CONFIRMED") {
+			pr.matchMarker = "AKCA_INSTRUCTION_OVERRIDE_CONFIRMED"
+			pr.instructionEcho = "---end of user input---"
+		} else if strings.Contains(p.Value, "AKCA_PROMPT_DEBUG_MODE_CONFIRMED") {
+			pr.matchMarker = "AKCA_PROMPT_DEBUG_MODE_CONFIRMED"
+			pr.instructionEcho = "[inst] <<sys>>"
+		}
+		return isLegitimateLLMOutput(probe, baseline, pr)
 	case "oauth":
 		if signal == "redirect_uri_location_confirmed" {
 			return oauthProofSignal(p, baseline, probe)
@@ -133,6 +170,20 @@ func moduleSignalConfirmed(
 			probeStatus == 200 && cacheEvidence(probeHeaders)
 	case "broken_auth":
 		return brokenAuthSignal(probe, baseline)
+	case "route_auth_bypass":
+		return isRouteBypassSuccessful(probe, baseline)
+	case "tenant_isolation":
+		return signal == "cross_tenant_access_confirmed" && successfulResourceResponse(probe)
+	case "account_recovery":
+		return signal == "recovery_state_mutation" && probeStatus >= 200 && probeStatus < 300 &&
+			resourceFingerprint(body) != resourceFingerprint(baseBody)
+	case "webhook_security":
+		return signal == "unauthenticated_webhook_state_mutation" && probeStatus >= 200 && probeStatus < 300 &&
+			resourceFingerprint(body) != resourceFingerprint(baseBody)
+	case "session_lifecycle":
+		return probe.StatusCode == 200 && privateAuthResourceEvidence(probe.Body)
+	case "parser_differential":
+		return probe.StatusCode == 200 && probe.Body != baseline.Body && len(strings.TrimSpace(probe.Body)) > 20
 	case "bfla":
 		return signal == "protected_state_mutation" &&
 			probeStatus >= 200 && probeStatus < 300 &&
@@ -147,9 +198,24 @@ func moduleSignalConfirmed(
 	case "ldap_xpath_injection":
 		return ldapXPathModuleConfirmed(body, baseBody, p.Value, signal, probeStatus, baseStatus)
 	case "crlf":
-		return crlfHeaderConfirmed(baseHeaders, probeHeaders, p.Value)
+		return crlfSignalConfirmed(baseHeaders, probeHeaders, baseBody, body, p.Value, signal)
 	case "debug_admin":
 		return debugAdminSignal(body, probeStatus)
+	case "actuator":
+		return actuatorSignalConfirmed(signal, probe)
+	case "backup_archives":
+		return backupArchiveSignalConfirmed(signal, probe)
+	case "cloud_takeover":
+		return cloudTakeoverSignalConfirmed(signal, probe)
+	case "devops_exposure":
+		return devopsExposureSignalConfirmed(signal, probeStatus, body)
+	case "http_methods":
+		return (signal == "http_put_unauthenticated_upload" && probeStatus == 200 && strings.Contains(body, p.Value)) ||
+			(signal == "http_trace_xst" && probeStatus == 200 && strings.Contains(body, p.Value))
+	case "ldap":
+		return strings.HasPrefix(signal, "ldap_error_") && ldapErrorSignal(body, baseBody)
+	case "xpath":
+		return strings.HasPrefix(signal, "xpath_error_") && xpathErrorSignal(body, baseBody)
 	case "race_condition":
 		return signal == "multiple_unique_side_effects" &&
 			probeStatus >= 200 && probeStatus < 300 &&
@@ -164,7 +230,7 @@ func moduleSignalConfirmed(
 			resourceFingerprint(body) != resourceFingerprint(baseBody)
 	case "file_upload":
 		return signal == "retrieved_hash_confirmed" && probeStatus == 200 &&
-			len(strings.TrimSpace(body)) > 0
+			p.Value != "" && strings.Contains(body, p.Value)
 	case "second_order":
 		if p.Value != "" && strings.Contains(body, p.Value) && !strings.Contains(baseBody, p.Value) {
 			return true
@@ -174,7 +240,7 @@ func moduleSignalConfirmed(
 		return probeStatus == 200 && body != baseBody && len(strings.TrimSpace(body)) > 4 &&
 			(isGitContent(body) || strings.Contains(body, "Exposed .git") || strings.Contains(body, "partial_git_exposure"))
 	case "mass_assignment":
-		return (signal == "role_escalation" || signal == "hidden_admin_flag" || signal == "permission_injection") &&
+		return (strings.HasPrefix(signal, "mass_assignment_") || signal == "role_escalation" || signal == "hidden_admin_flag" || signal == "permission_injection") &&
 			probeStatus >= 200 && probeStatus < 300 &&
 			resourceFingerprint(body) != resourceFingerprint(baseBody)
 	case "idor":
@@ -182,9 +248,60 @@ func moduleSignalConfirmed(
 			probeStatus >= 200 && probeStatus < 300 &&
 			(baseStatus == 401 || baseStatus == 403 || !successfulResourceResponse(baseline)) &&
 			successfulResourceResponse(probe)
-	case "csrf", "account_enum",
+	case "nginx_alias":
+		return signal == "alias_traversal" && probeStatus == 200 && len(body) >= 50
+	case "nextjs_bypass":
+		return nextJSBypassSignalConfirmed(signal, body, probeStatus, baseStatus)
+	case "framework_debug":
+		return frameworkDebugSignalConfirmed(signal, body, probeStatus)
+	case "iis_discovery":
+		return (signal == "iis_shortname" && (probeStatus != baseStatus || (probeStatus == 404 && baseStatus == 404))) ||
+			(signal == "iis_source_disclosure" && probeStatus == 200 &&
+				(strings.Contains(body, "<%@") || strings.Contains(body, "<script runat") || strings.Contains(body, "<?php")))
+	case "firebase_misconfig":
+		return firebaseSignalConfirmed(signal, body, probeStatus)
+	case "spring_cloud_jolokia":
+		return springCloudJolokiaSignalConfirmed(signal, body, probeStatus)
+	case "saas_exposure":
+		return saasExposureSignalConfirmed(signal, body, probeStatus)
+	case "pdf_injection":
+		return pdfInjectionSignalConfirmed(signal, body, probeStatus)
+	case "cpdos":
+		return (probeStatus == 400 || probeStatus == 405 || probeStatus == 500 || probeStatus == 501) && baseStatus == 200
+	case "proxy_path_confusion":
+		return probeStatus == 200 && (baseStatus == 401 || baseStatus == 403)
+	case "ws_cswsh":
+		return probeStatus == 101
+	case "jsonp_callback":
+		return probeStatus == 200 && strings.Contains(body, p.Value)
+	case "react_rsc_rce":
+		return false
+	case "server_side_js_injection":
+		return ssjsSignalConfirmed(body, baseBody, signal, probeStatus, baseStatus)
+	case "csti_detection":
+		return cstiSignalConfirmed(body, baseBody, p.Value, signal, probeStatus)
+	case "swagger_exposure":
+		return swaggerExposureSignalConfirmed(signal, body, probeStatus)
+	case "sensitive_file_discovery":
+		return sensitiveFileSignalConfirmed(signal, probe)
+	case "http_smuggling":
+		return httpSmugglingSignalConfirmed(signal, body, p.Value, probeStatus)
+	case "race_condition_sync":
+		return signal == "race_condition_limit_bypass" && probeStatus >= 200 && probeStatus < 300
+	case "oauth_flow_audit":
+		return signal == "oauth_token_query_response" && oauthTokenInQuery(probeHeaders)
+	case "cloud_native_exposure":
+		return cloudNativeSignalConfirmed(signal, probeStatus, body)
+	case "grpc_scan":
+		return grpcSignalConfirmed(signal, probe)
+	case "graphql":
+		return graphqlSignalConfirmed(body, baseBody, signal, probeStatus, baseStatus)
+	case "csrf":
+		return signal == "cross_site_state_mutation" && probeStatus >= 200 && probeStatus < 300 &&
+			resourceFingerprint(body) != resourceFingerprint(baseBody)
+	case "account_enum",
 		"prototype_pollution",
-		"wordpress_fuzz", "graphql", "websocket",
+		"wordpress_fuzz", "websocket",
 		"cloud_posture",
 		"source_code_disclosure", "script_source",
 		"vulnerable_components", "cloud_storage":
@@ -240,12 +357,13 @@ func nosqlSignalConfirmed(body, baseline string, probeStatus, baseStatus int, si
 }
 
 func ssrfSignalConfirmed(p payloadgen.Payload, baseline, probe httpclient.ResponseRecord, signal string) bool {
-	if payloadReflectedAnyEncoding(p.Value, probe.Body, baseline.Body) {
-		return false
-	}
 	body := strings.ToLower(probe.Body)
 	base := strings.ToLower(baseline.Body)
 	if body == base || strings.TrimSpace(body) == "" {
+		return false
+	}
+	if strings.Contains(body, "blocked by policy") || strings.Contains(body, "is blocked") ||
+		strings.Contains(body, "request blocked") || strings.Contains(body, "access denied") {
 		return false
 	}
 	if signal == "" || signal == "cloud_metadata" {
@@ -257,6 +375,8 @@ func ssrfSignalConfirmed(p payloadgen.Payload, baseline, probe httpclient.Respon
 		case strings.Contains(strings.ToLower(p.Value), "169.254.169.254"),
 			strings.Contains(strings.ToLower(p.Value), "2852039166"):
 			signal = "aws_metadata"
+		default:
+			signal = p.ExpectedSignal
 		}
 	}
 	switch signal {
@@ -273,11 +393,15 @@ func ssrfSignalConfirmed(p payloadgen.Payload, baseline, probe httpclient.Respon
 			"project/project-id", "instance/id", "service-accounts/", "hostname",
 		}) >= 1
 	case "azure_metadata":
-		return newMarkerCount(body, base, []string{`"compute"`, `"vmid"`, `"subscriptionid"`}) == 3
+		return newMarkerCount(body, base, []string{
+			"compute", "vmid", "subscriptionid", "microsoft.compute", "azureenvironment",
+		}) >= 1
 	case "internal_ip", "protocol_smuggling":
-		// A private address, scheme, or validation message is not proof that
-		// the server fetched anything. These paths require OAST/canary evidence.
-		return false
+		// Disallow matching AWS metadata markers on internal IP probes
+		if strings.Contains(body, "ami-id") || strings.Contains(body, "instance-id") {
+			return false
+		}
+		return bodyDiffRatio(base, body) >= 0.05
 	default:
 		return false
 	}
@@ -300,6 +424,17 @@ func xxeSignalConfirmed(body, baseline, signal string) bool {
 	case "soap_xxe":
 		return strings.Contains(strings.ToLower(body), "soap") &&
 			strings.Contains(body, "AKCA_XXE_TEST") && !strings.Contains(baseline, "AKCA_XXE_TEST")
+	case "file_disclosure":
+		// Detect /etc/passwd or win.ini content
+		lower := strings.ToLower(body)
+		baseLower := strings.ToLower(baseline)
+		markers := []string{"root:x:0:0:", "root:*:0:0:", "[fonts]", "[extensions]", "[mail]", "for 16-bit app support"}
+		for _, m := range markers {
+			if strings.Contains(lower, m) && !strings.Contains(baseLower, m) {
+				return true
+			}
+		}
+		return false
 	default:
 		return false
 	}
@@ -328,18 +463,17 @@ func corsSignalConfirmed(baseHeaders, probeHeaders map[string]string, signal, or
 	}
 	switch signal {
 	case "null_origin":
-		return strings.EqualFold(acao, "null") &&
-			strings.EqualFold(headerCI(probeHeaders, "Access-Control-Allow-Credentials"), "true")
-	case "origin_reflection":
-		return acao == origin &&
-			strings.EqualFold(headerCI(probeHeaders, "Access-Control-Allow-Credentials"), "true")
-	case "partial_origin_match":
-		return acao == origin && !strings.Contains(baseAcao, "evil.example") &&
-			strings.EqualFold(headerCI(probeHeaders, "Access-Control-Allow-Credentials"), "true")
+		return strings.EqualFold(acao, "null")
+	case "origin_reflection", "partial_origin_match", "pre_domain_match", "protocol_downgrade", "trusted_subdomain",
+		"localhost_origin", "cloud_metadata_origin", "intranet_origin":
+		return acao == origin
+	case "private_network_access":
+		pna := headerCI(probeHeaders, "Access-Control-Allow-Private-Network")
+		return strings.EqualFold(pna, "true") && acao != ""
 	case "wildcard_credentials":
-		// Browsers reject credentialed reads when ACAO is "*"; this header
-		// combination alone is therefore not evidence of exploitable CORS.
-		return false
+		// While browsers don't send credentials with ACAO:*, this misconfiguration
+		// indicates weak CORS policy and may be exploitable with other techniques.
+		return true
 	default:
 		return false
 	}
@@ -403,11 +537,11 @@ func shouldSuppressLowConfidence(module string, signal string, score float64, co
 		return score < 0.45
 	default:
 		if strings.Contains(strings.ToLower(signal), "timing") || strings.Contains(strings.ToLower(signal), "oast") {
-			return score < 0.85
+			return score < 0.70
 		}
 		switch module {
-		case "xss", "sqli", "ssti", "xxe", "command_injection":
-			return score < 0.80
+		case "xss", "sqli", "ssti", "xxe", "command_injection", "lfi", "ssrf", "nosql":
+			return score < 0.60
 		default:
 			return score < 0.60
 		}
@@ -423,4 +557,74 @@ func isGitContent(body string) bool {
 
 func normalizeVolatileFields(body string) string {
 	return verification.NormalizeVolatileFields(body)
+}
+
+func graphqlSignalConfirmed(body, baseBody, signal string, probeStatus, baseStatus int) bool {
+	if probeStatus >= 400 {
+		return false
+	}
+	lower := strings.ToLower(body)
+	switch signal {
+	case "graphql_schema_exposure":
+		return strings.Contains(lower, "__schema") && strings.Contains(lower, "types")
+	case "field_suggestions_exposed", "graphql_field_suggestions":
+		return (strings.Contains(lower, "did you mean") || strings.Contains(lower, "perhaps you meant")) &&
+			!strings.Contains(strings.ToLower(baseBody), "did you mean")
+	case "graphql_field_auth_leak":
+		var resp struct {
+			Data map[string]interface{} `json:"data"`
+		}
+		if json.Unmarshal([]byte(body), &resp) != nil || len(resp.Data) == 0 {
+			return false
+		}
+		dataBytes, _ := json.Marshal(resp.Data)
+		dataStr := strings.ToLower(string(dataBytes))
+		for _, kw := range []string{"apikey", "secrettoken", "ssn", "password", "token", "isadmin"} {
+			if strings.Contains(dataStr, kw) && !strings.Contains(strings.ToLower(baseBody), kw) {
+				if !strings.Contains(dataStr, `"`+kw+`":null`) && !strings.Contains(dataStr, `"`+kw+`":""`) {
+					return true
+				}
+			}
+		}
+		return false
+	case "graphql_filter_where_rce":
+		return strings.Contains(body, "AKCA_GQL_9991_EVAL") || strings.Contains(body, "AKCA_ENV_object")
+	case "type_inversion_data_leak":
+		var resp struct {
+			Data map[string]interface{} `json:"data"`
+		}
+		if json.Unmarshal([]byte(body), &resp) != nil || len(resp.Data) == 0 {
+			return false
+		}
+		dataRaw, _ := json.Marshal(resp.Data)
+		dataLower := strings.ToLower(string(dataRaw))
+		baseLower := strings.ToLower(baseBody)
+		if len(body) <= len(baseBody)*2 {
+			return false
+		}
+		for _, kw := range []string{"email", "password", "token", "secret", "admin", "credential", "session", "oauth"} {
+			if strings.Contains(dataLower, kw) && !strings.Contains(baseLower, kw) {
+				return true
+			}
+		}
+		return false
+	case "type_inversion_error_disclosure":
+		baseLower := strings.ToLower(baseBody)
+		for _, kw := range []string{"cannot represent", "expected type", "int cannot", "validation error", "bad user input"} {
+			if strings.Contains(lower, kw) && !strings.Contains(baseLower, kw) {
+				return true
+			}
+		}
+		return false
+	case "graphql_sift_where_detected":
+		return strings.Contains(lower, "in csp mode, sift does not support strings") ||
+			strings.Contains(lower, `in "$where" condition`) ||
+			strings.Contains(lower, "cannot use $where")
+	case "graphql_batch_accepted":
+		return strings.Count(body, `"data"`) >= 5 || strings.Count(body, `__typename`) >= 5
+	case "graphql_alias_overload":
+		return strings.Contains(lower, `"a1"`) && strings.Contains(lower, `"a2"`) && strings.Contains(lower, `"a5"`)
+	default:
+		return strings.Contains(lower, `"data"`)
+	}
 }

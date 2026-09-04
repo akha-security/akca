@@ -3,8 +3,6 @@ package browserpool
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -159,6 +157,7 @@ type cdpCapture struct {
 	network        map[string]*crawler.BrowserNetworkEvent
 	websockets     map[string]struct{}
 	serviceWorkers map[string]struct{}
+	console        []crawler.BrowserConsoleEntry
 	loaded         bool
 }
 
@@ -187,8 +186,8 @@ func (c *cdpCapture) handle(message cdpMessage) {
 		if json.Unmarshal(message.Params, &event) == nil && event.RequestID != "" {
 			c.network[event.RequestID] = &crawler.BrowserNetworkEvent{
 				RequestID: event.RequestID, URL: event.Request.URL, Method: event.Request.Method,
-				ResourceType: event.Type, RequestHeaders: redactCDPHeaders(stringMap(event.Request.Headers)),
-				RequestBody: redactCDPBody(event.Request.PostData),
+				ResourceType: event.Type, RequestHeaders: stringMap(event.Request.Headers),
+				RequestBody: event.Request.PostData,
 			}
 		}
 	case "Network.responseReceived":
@@ -209,7 +208,7 @@ func (c *cdpCapture) handle(message cdpMessage) {
 			}
 			record.StatusCode = int(event.Response.Status)
 			record.ResourceType = event.Type
-			record.ResponseHeaders = redactCDPHeaders(stringMap(event.Response.Headers))
+			record.ResponseHeaders = stringMap(event.Response.Headers)
 		}
 	case "Network.webSocketCreated":
 		var event struct {
@@ -244,7 +243,79 @@ func (c *cdpCapture) handle(message cdpMessage) {
 				}
 			}
 		}
+	case "Runtime.consoleAPICalled":
+		var event struct {
+			Type string `json:"type"`
+			Args []struct {
+				Type        string      `json:"type"`
+				Value       interface{} `json:"value"`
+				Description string      `json:"description"`
+			} `json:"args"`
+			StackTrace struct {
+				CallFrames []struct {
+					URL        string `json:"url"`
+					LineNumber int    `json:"lineNumber"`
+				} `json:"callFrames"`
+			} `json:"stackTrace"`
+		}
+		if json.Unmarshal(message.Params, &event) == nil {
+			parts := make([]string, 0, len(event.Args))
+			for _, arg := range event.Args {
+				value := fmt.Sprint(arg.Value)
+				if value == "<nil>" || value == "" {
+					value = arg.Description
+				}
+				if value != "" {
+					parts = append(parts, value)
+				}
+			}
+			entry := crawler.BrowserConsoleEntry{Level: event.Type, Text: truncateString(strings.Join(parts, " "), 2048), Source: "console"}
+			if len(event.StackTrace.CallFrames) > 0 {
+				entry.URL = event.StackTrace.CallFrames[0].URL
+				entry.Line = event.StackTrace.CallFrames[0].LineNumber + 1
+			}
+			c.addConsole(entry)
+		}
+	case "Runtime.exceptionThrown":
+		var event struct {
+			ExceptionDetails struct {
+				Text       string `json:"text"`
+				URL        string `json:"url"`
+				LineNumber int    `json:"lineNumber"`
+				Exception  struct {
+					Description string `json:"description"`
+				} `json:"exception"`
+			} `json:"exceptionDetails"`
+		}
+		if json.Unmarshal(message.Params, &event) == nil {
+			text := event.ExceptionDetails.Exception.Description
+			if text == "" {
+				text = event.ExceptionDetails.Text
+			}
+			c.addConsole(crawler.BrowserConsoleEntry{Level: "error", Text: truncateString(text, 2048), Source: "exception", URL: event.ExceptionDetails.URL, Line: event.ExceptionDetails.LineNumber + 1})
+		}
+	case "Log.entryAdded":
+		var event struct {
+			Entry struct {
+				Source     string `json:"source"`
+				Level      string `json:"level"`
+				Text       string `json:"text"`
+				URL        string `json:"url"`
+				LineNumber int    `json:"lineNumber"`
+			} `json:"entry"`
+		}
+		if json.Unmarshal(message.Params, &event) == nil {
+			c.addConsole(crawler.BrowserConsoleEntry{Level: event.Entry.Level, Text: truncateString(event.Entry.Text, 2048), Source: event.Entry.Source, URL: event.Entry.URL, Line: event.Entry.LineNumber})
+		}
 	}
+}
+
+func (c *cdpCapture) addConsole(entry crawler.BrowserConsoleEntry) {
+	if strings.TrimSpace(entry.Text) == "" || len(c.console) >= 200 {
+		return
+	}
+	entry.Text = redactCDPBody(entry.Text)
+	c.console = append(c.console, entry)
 }
 
 func (r *HeadlessRenderer) Capture(ctx context.Context, rawURL string) (crawler.BrowserSnapshot, error) {
@@ -299,7 +370,7 @@ func (r *HeadlessRenderer) Capture(ctx context.Context, rawURL string) (crawler.
 				truncateString(browserErrors.String(), 2048))
 		}
 	}
-	for _, optionalDomain := range []string{"DOMStorage.enable", "ServiceWorker.enable"} {
+	for _, optionalDomain := range []string{"DOMStorage.enable", "ServiceWorker.enable", "Log.enable"} {
 		_ = client.call(captureCtx, optionalDomain, map[string]interface{}{}, nil)
 	}
 	if len(r.headers) > 0 {
@@ -349,6 +420,9 @@ func (r *HeadlessRenderer) cdpArgs(profile string) []string {
 		"--headless=new", "--disable-gpu", "--disable-gpu-sandbox", "--disable-gpu-compositing",
 		"--use-angle=swiftshader-webgl", "--use-gl=angle", "--disable-extensions", "--disable-dev-shm-usage",
 		"--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0",
+		"--disable-background-networking", "--disable-sync", "--disable-component-update", "--disable-default-apps",
+		"--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints,WebOTP,MicrosoftAccount,EdgeSignin,Sync",
+		"--identity-provider-disabled", "--disable-single-click-autofill", "--disable-autofill", "--guest",
 		"--remote-allow-origins=*", "--user-data-dir=" + profile, "about:blank",
 	}
 	if r.proxyURL != "" {
@@ -479,9 +553,20 @@ func (r *HeadlessRenderer) buildCDPSnapshot(ctx context.Context, client *cdpClie
 				!body.Base64Encoded {
 				event.ResponseBody = truncateString(redactCDPBody(body.Body), 4096)
 			}
+			if event.RequestBody == "" && (event.Method == "POST" || event.Method == "PUT" || event.Method == "PATCH") {
+				var postData struct {
+					PostData string `json:"postData"`
+				}
+				if client.call(ctx, "Network.getRequestPostData", map[string]interface{}{"requestId": id}, &postData) == nil && postData.PostData != "" {
+					event.RequestBody = postData.PostData
+				}
+			}
 			calls = append(calls, endpointFromNetwork(*event))
 		}
-		networkEvents = append(networkEvents, *event)
+		redactedEvent := *event
+		redactedEvent.RequestHeaders = event.RequestHeaders
+		redactedEvent.RequestBody = truncateString(event.RequestBody, 16<<10)
+		networkEvents = append(networkEvents, redactedEvent)
 		if len(networkEvents) >= 500 {
 			break
 		}
@@ -502,6 +587,7 @@ func (r *HeadlessRenderer) buildCDPSnapshot(ctx context.Context, client *cdpClie
 	}
 	snapshot := crawler.BuildBrowserSnapshot(rawURL, page.DOM, calls)
 	snapshot.NetworkEvents = networkEvents
+	snapshot.ConsoleEntries = append([]crawler.BrowserConsoleEntry(nil), capture.console...)
 	snapshot.Cookies = cookies
 	snapshot.LocalStorage = page.LocalStorage
 	snapshot.SessionStorage = page.SessionStorage
@@ -558,17 +644,7 @@ func stringMap(values map[string]interface{}) map[string]string {
 }
 
 func redactCDPHeaders(headers map[string]string) map[string]string {
-	out := make(map[string]string, len(headers))
-	for key, value := range headers {
-		switch strings.ToLower(key) {
-		case "authorization", "cookie", "set-cookie", "proxy-authorization", "x-api-key", "x-auth-token",
-			"x-akca-sensor-token":
-			out[key] = "[REDACTED]"
-		default:
-			out[key] = value
-		}
-	}
-	return out
+	return headers
 }
 
 func redactOutboundHeaders(headers map[string]string) map[string]string {
@@ -584,13 +660,6 @@ func redactOutboundHeaders(headers map[string]string) map[string]string {
 }
 
 func redactCDPBody(body string) string {
-	lower := strings.ToLower(body)
-	for _, marker := range []string{"password", "passwd", "access_token", "refresh_token", "client_secret", "api_key"} {
-		if strings.Contains(lower, marker) {
-			sum := sha256.Sum256([]byte(body))
-			return "[REDACTED sha256:" + hex.EncodeToString(sum[:]) + "]"
-		}
-	}
 	return truncateString(body, 16<<10)
 }
 

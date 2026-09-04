@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -71,11 +72,13 @@ func (r *Runner) execute(row storage.ScheduledScanRow) {
 		r.running--
 		r.mu.Unlock()
 	}()
+	// Advance next_run_at immediately so concurrent polls do not re-trigger the same schedule
+	_ = r.db.UpdateScheduledNextRun(row.ID, storage.NextRunEstimate(row.CronExpression))
 	runID, _ := r.db.StartScheduledRun(row.ID)
 	var cfg config.ScanConfig
 	_ = json.Unmarshal([]byte(row.ConfigJSON), &cfg)
 	if cfg.ScanID == "" {
-		cfg.ScanID = "sched-" + row.ID + "-" + time.Now().Format("150405")
+		cfg.ScanID = fmt.Sprintf("sched-%s-%d", row.ID, time.Now().UnixNano())
 	}
 	status := "completed"
 	if r.start != nil {
@@ -84,7 +87,6 @@ func (r *Runner) execute(row storage.ScheduledScanRow) {
 		}
 	}
 	_ = r.db.FinishScheduledRun(runID, cfg.ScanID, status)
-	_ = r.db.UpdateScheduledNextRun(row.ID, storage.NextRunEstimate(row.CronExpression))
 }
 
 func ParseCronPreview(expr string) string {

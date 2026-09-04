@@ -3,6 +3,7 @@ package modules
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"strings"
@@ -14,6 +15,53 @@ import (
 	"github.com/akha-security/akca/engine/internal/storage"
 	"github.com/akha-security/akca/engine/internal/verification"
 )
+
+func TestFinalizeOASTFindingsProcessesCallbacksBeyondFirstPage(t *testing.T) {
+	db, err := storage.Open(t.TempDir() + "/oast-pages.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	const scanID = "scan-oast-pages"
+	if err := db.EnsureScan(scanID); err != nil {
+		t.Fatal(err)
+	}
+
+	registered := time.Now().UTC().Add(-time.Second)
+	valid := oast.CallbackRecord{
+		ScanID: scanID, PayloadID: "old-valid", Protocol: "http",
+		Strength: oast.InteractionStrength("http"), ReceivedAt: time.Now().UTC(),
+		Interaction: oast.Interaction{Protocol: "http", UniqueID: "old-token.oast.test"},
+		Correlation: oast.Correlation{
+			ScanID: scanID, PayloadID: "old-valid", CandidateID: "candidate-old",
+			CorrelationToken: "old-token", Nonce: "nonce-old",
+			EndpointURL: "https://target.test/fetch", Parameter: "url", Location: "query", VulnClass: "ssrf",
+			CallbackURL: "https://old-token.oast.test/", RegisteredAt: registered,
+		},
+	}
+	if err := db.SaveOASTCallback(scanID, valid.PayloadID, valid); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 500; i++ {
+		_, err := db.Conn().Exec(`INSERT INTO oast_callbacks
+(scan_id, payload_id, protocol, source_ip, callback_json, correlation_token, protocol_strength)
+VALUES (?, ?, 'http', '', '{}', ?, 3)`, scanID, fmt.Sprintf("invalid-%d", i), fmt.Sprintf("invalid-token-%d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	findings, err := FinalizeOASTFindings(db, scanID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || findings[0].Evidence.Payload.Value == "" {
+		t.Fatalf("old callback beyond first 500 rows was not finalized: %+v", findings)
+	}
+}
 
 type oastDeliveryErrorClient struct {
 	err error

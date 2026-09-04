@@ -4,6 +4,14 @@ package secrets
 
 import "fmt"
 
+func encodeDiskMasterKey(key []byte) ([]byte, error) {
+	return append([]byte(nil), key...), nil
+}
+
+func decodeDiskMasterKey(encoded []byte) ([]byte, error) {
+	return append([]byte(nil), encoded...), nil
+}
+
 func protectOS(key string, plaintext []byte) (string, error) {
 	return "", fmt.Errorf("os keychain unavailable")
 }

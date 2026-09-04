@@ -88,6 +88,20 @@ func (g *Generator) Run(ctx context.Context, profiles []reflection.ReflectionPro
 		}); err != nil {
 			return nil, fmt.Errorf("failed to emit payloads generated event for parameter %s: %w", profile.Parameter, err)
 		}
+		if result.Shadow.SQLiTestCases > 0 {
+			if err := g.emit("payload_planner_shadow_comparison", profile.Parameter, map[string]interface{}{
+				"scan_id": g.scanID, "endpoint": profile.EndpointURL, "parameter": profile.Parameter,
+				"legacy_payloads":      result.Shadow.LegacyPayloads,
+				"test_cases":           result.Shadow.TestCases,
+				"legacy_budget":        result.Shadow.LegacyBudget,
+				"estimated_requests":   result.Shadow.EstimatedRequests,
+				"sqli_legacy_payloads": result.Shadow.SQLiLegacyPayloads,
+				"sqli_test_cases":      result.Shadow.SQLiTestCases,
+				"orphan_controls":      result.Shadow.OrphanControls,
+			}); err != nil {
+				return nil, fmt.Errorf("failed to emit payload planner shadow comparison for parameter %s: %w", profile.Parameter, err)
+			}
+		}
 	}
 	if err := g.emit("payload_generation_finished", "payload generation finished", map[string]interface{}{
 		"scan_id": g.scanID, "endpoints": len(results),
@@ -113,7 +127,10 @@ func (g *Generator) wafPreferredTechniques(host string) []string {
 }
 
 func lowerPositiveBudget(configured, ceiling int) int {
-	if configured <= 0 || configured > ceiling {
+	if configured < 0 {
+		return configured
+	}
+	if configured == 0 || configured > ceiling {
 		return ceiling
 	}
 	return configured

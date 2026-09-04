@@ -17,6 +17,8 @@ var (
 	loginFormRE     = regexp.MustCompile(`(?is)<form[^>]*(?:login|signin|auth)[^>]*>.*?<input[^>]+type=["']?password`)
 )
 
+const maxComparisonBodyBytes = 128 * 1024
+
 // IsMeaningfulBypass is the cheap first-stage filter. A positive result is
 // only a candidate; Engine still requires a paired negative control and a
 // reproducible second positive response before publishing a finding.
@@ -79,6 +81,7 @@ func bodiesSimilar(a, b string) bool {
 }
 
 func normalizeComparisonBody(body string) string {
+	body = comparisonSample(body)
 	body = strings.ToLower(body)
 	body = compareScriptRE.ReplaceAllString(body, " ")
 	body = compareTagRE.ReplaceAllString(body, " ")
@@ -87,6 +90,14 @@ func normalizeComparisonBody(body string) string {
 	body = compareTimeRE.ReplaceAllString(body, " <time> ")
 	body = compareNumberRE.ReplaceAllString(body, " <number> ")
 	return strings.TrimSpace(compareSpaceRE.ReplaceAllString(body, " "))
+}
+
+func comparisonSample(body string) string {
+	if len(body) <= maxComparisonBodyBytes {
+		return body
+	}
+	half := maxComparisonBodyBytes / 2
+	return body[:half] + " " + body[len(body)-half:]
 }
 
 func tokenSimilarity(a, b string) float64 {
@@ -147,6 +158,24 @@ func looksLikeDeniedOrErrorPage(body string) bool {
 			if strings.Contains(lower, marker) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func looksLikeInfrastructureChallenge(body string) bool {
+	lower := strings.ToLower(comparisonSample(strings.TrimSpace(body)))
+	if lower == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"cf-chl-", "cloudflare ray id", "attention required!", "checking your browser",
+		"akamai bot manager", "incapsula incident id", "imperva incident id",
+		"web application firewall", "captcha", "bot detection", "ddos-guard",
+		"datadome", "perimeterx", "akamai ghost",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
 		}
 	}
 	return false

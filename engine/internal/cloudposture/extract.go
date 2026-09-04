@@ -127,6 +127,7 @@ var TFStatePaths = []string{
 type TFStateFinding struct {
 	ResourceType string `json:"resource_type,omitempty"`
 	Field        string `json:"field,omitempty"`
+	Value        string `json:"value,omitempty"`
 	Redacted     string `json:"redacted,omitempty"`
 	Severity     string `json:"severity"`
 }
@@ -169,6 +170,7 @@ func walkTFValue(resourceType, prefix string, v interface{}, out *[]TFStateFindi
 					*out = append(*out, TFStateFinding{
 						ResourceType: resourceType,
 						Field:        prefix + k,
+						Value:        s,
 						Redacted:     redact(s),
 						Severity:     severityForKey(keyLower),
 					})

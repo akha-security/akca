@@ -393,8 +393,35 @@ func allMigrations() []Migration {
 			Up:          migration015Up,
 			Down:        migration015Down,
 		},
+		{
+			Version:     16,
+			Description: "persist second-order injection markers",
+			Up:          migration016Up,
+			Down:        migration016Down,
+		},
 	}
 }
+
+const migration016Up = `
+CREATE TABLE IF NOT EXISTS second_order_markers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scan_id TEXT NOT NULL,
+  endpoint_url TEXT NOT NULL,
+  parameter TEXT NOT NULL,
+  marker TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_second_order_markers_scan
+  ON second_order_markers(scan_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_second_order_markers_unique
+  ON second_order_markers(scan_id, endpoint_url, parameter, marker);
+`
+
+const migration016Down = `
+DROP INDEX IF EXISTS idx_second_order_markers_unique;
+DROP INDEX IF EXISTS idx_second_order_markers_scan;
+DROP TABLE IF EXISTS second_order_markers;
+`
 
 const migration004Up = `
 DELETE FROM parameters
@@ -498,6 +525,9 @@ CREATE TABLE IF NOT EXISTS scans (
   app_name TEXT,
   status TEXT NOT NULL,
   config_json TEXT NOT NULL,
+  requests_sent INTEGER DEFAULT 0,
+  started_at TEXT,
+  completed_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

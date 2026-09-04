@@ -3,6 +3,7 @@ package report
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -43,11 +44,12 @@ func (b *Builder) BuildMeta(opts Options) (Document, error) {
 	doc.RootCauseGroups = groups
 	doc.APIKeyValidations = b.buildAPIKeySection(opts.ScanID, opts.Redact)
 	doc.TrafficEvidence = b.buildTrafficSection(opts.ScanID, opts.Redact)
+	doc.PathDiscoveries = b.buildPathDiscoverySection(opts.ScanID, opts.Redact)
 	if opts.Template == TemplateInternal || opts.Template == TemplateAppendix {
 		doc.ManualLeads = b.buildManualLeads(opts)
 	}
 	if opts.Template == TemplateAppendix {
-		doc.AppendixNotes = "Technical evidence appendix — raw request/response excerpts are redacted by default."
+		doc.AppendixNotes = "Technical evidence appendix - raw request/response excerpts are preserved."
 	}
 	return doc, nil
 }
@@ -94,6 +96,55 @@ func (b *Builder) buildTrafficSection(scanID string, redact bool) []TrafficEntry
 	return out
 }
 
+func (b *Builder) buildPathDiscoverySection(scanID string, redact bool) []PathDiscoveryEntry {
+	records, err := b.db.ListFuzzResultRecords(scanID, 500)
+	if err != nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]PathDiscoveryEntry, 0, len(records))
+	for _, rec := range records {
+		var result struct {
+			Signal     string `json:"signal"`
+			BodyLength int    `json:"body_length"`
+			IsSoft404  bool   `json:"is_soft_404"`
+			IsArchive  bool   `json:"is_archive"`
+		}
+		_ = json.Unmarshal([]byte(rec.ResultJSON), &result)
+		if result.IsSoft404 || rec.StatusCode == 404 || rec.StatusCode == 410 || rec.StatusCode <= 0 {
+			continue
+		}
+		method := strings.ToUpper(strings.TrimSpace(rec.Method))
+		if method == "" {
+			method = "GET"
+		}
+		urlValue := rec.URL
+		if redact {
+			urlValue = RedactString(urlValue)
+		}
+		key := method + " " + urlValue
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, PathDiscoveryEntry{
+			Method: method, URL: urlValue, StatusCode: rec.StatusCode,
+			Category: rec.Category, Signal: result.Signal, BodyLength: result.BodyLength,
+			IsArchive: result.IsArchive,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].IsArchive != out[j].IsArchive {
+			return out[i].IsArchive
+		}
+		if out[i].StatusCode != out[j].StatusCode {
+			return out[i].StatusCode < out[j].StatusCode
+		}
+		return out[i].URL < out[j].URL
+	})
+	return out
+}
+
 func (b *Builder) buildScope(scanID string) ScopeSection {
 	sec := ScopeSection{ScanID: scanID}
 	cfg, _ := b.db.GetScanConfig(scanID)
@@ -130,6 +181,10 @@ func FindingFromRecord(rec storage.FindingRecord, redact bool) FindingEntry {
 		desc = rec.Summary
 	}
 	httpEv := httpEvidenceFromRecord(rec)
+	if isPassiveVulnClass(rec.VulnClass) || strings.HasPrefix(strings.ToLower(httpEv.Signal), "passive_") {
+		httpEv.ProofSatisfied = true
+	}
+	cwe, owasp := taxonomyFor(rec.VulnClass, httpEv.Signal)
 	entry := FindingEntry{
 		ID:                rec.ID,
 		Title:             findingtext.DisplayTitle(rec.VulnClass, rec.Title),
@@ -140,6 +195,8 @@ func FindingFromRecord(rec storage.FindingRecord, redact bool) FindingEntry {
 		ConfidenceScore:   rec.ConfidenceScore,
 		ConfidenceExplain: confidenceExplanation(rec.Confidence),
 		VulnClass:         rec.VulnClass,
+		CWE:               cwe,
+		OWASPTop102025:    owasp,
 		EndpointURL:       rec.EndpointURL,
 		Parameter:         rec.Parameter,
 		ReproductionSteps: defaultReproduction(rec),
@@ -175,8 +232,24 @@ func (b *Builder) ReportFinding(rec storage.FindingRecord, opts Options) (Findin
 	return entry, reportableFinding(entry, opts.Template)
 }
 
+func isPassiveVulnClass(vulnClass string) bool {
+	switch strings.ToLower(strings.TrimSpace(vulnClass)) {
+	case "secret_exposure", "security_headers", "tls_misconfig", "vulnerable_components",
+		"sensitive_data", "cicd_exposure", "git_recovery", "source_code_disclosure",
+		"graphql", "script_source", "websocket", "cloud_storage", "cloud_posture",
+		"actuator", "backup_archives", "cloud_takeover", "devops_exposure",
+		"api_exposure", "api_versioning", "debug_admin", "wordpress_fuzz":
+		return true
+	default:
+		return false
+	}
+}
+
 func reportableFinding(entry FindingEntry, template TemplateKind) bool {
 	if !entry.HTTPEvidence.ProofSatisfied {
+		if isPassiveVulnClass(entry.VulnClass) && (strings.EqualFold(entry.Confidence, "Confirmed") || strings.EqualFold(entry.Confidence, "HighConfidence")) {
+			return true
+		}
 		return false
 	}
 	if template == TemplateHackerOne || template == TemplateBugcrowd {
@@ -238,20 +311,7 @@ func (b *Builder) Filter(opts Options) storage.FindingsFilter {
 }
 
 func templateTitle(t TemplateKind) string {
-	switch t {
-	case TemplateHackerOne:
-		return "HackerOne Submission Report"
-	case TemplateBugcrowd:
-		return "Bugcrowd Submission Report"
-	case TemplateInternal:
-		return "Akca Security Scanner - Internal Penetration Test Report"
-	case TemplateExecutive:
-		return "Executive Summary"
-	case TemplateAppendix:
-		return "Technical Evidence Appendix"
-	default:
-		return "Akca Security Report"
-	}
+	return ProductName
 }
 
 func templateSummary(t TemplateKind) string {

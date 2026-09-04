@@ -17,6 +17,7 @@ func ScoreEndpoint(ep DiscoveredEndpoint) int {
 	score += keywordBonus(path)
 	score += extensionBonus(path)
 	score += paramBonus(ep.URL)
+	score -= depthPenalty(ep.Depth)
 
 	if ep.Method != "GET" && ep.Method != "" {
 		score += 12
@@ -203,4 +204,15 @@ func staticAssetPenalty(path string) int {
 		}
 	}
 	return 0
+}
+
+func depthPenalty(depth int) int {
+	if depth <= 1 {
+		return 0
+	}
+	penalty := (depth - 1) * 8
+	if penalty > 40 {
+		return 40
+	}
+	return penalty
 }

@@ -10,19 +10,24 @@ func ExtractCorrelationToken(uniqueID, domain string) string {
 		return ""
 	}
 	domain = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(domain), "."))
-	suffix := "." + domain
-	if domain != "" && strings.HasSuffix(uniqueID, suffix) {
-		return strings.TrimSuffix(uniqueID, suffix)
-	}
 	if domain != "" {
-		if !strings.Contains(uniqueID, ".") {
-			return uniqueID
+		suffix := "." + domain
+		if strings.HasSuffix(uniqueID, suffix) {
+			return strings.TrimSuffix(uniqueID, suffix)
 		}
-		return ""
-	}
-	parts := strings.Split(uniqueID, ".")
-	if len(parts) >= 2 {
-		return parts[0] + "." + parts[1]
+		if uniqueID == domain {
+			return ""
+		}
+		parts := strings.Split(domain, ".")
+		if len(parts) > 0 && parts[0] != "" {
+			corrID := parts[0]
+			if strings.HasSuffix(uniqueID, "."+corrID) {
+				return strings.TrimSuffix(uniqueID, "."+corrID)
+			}
+		}
+		if strings.Contains(uniqueID, ".") {
+			return ""
+		}
 	}
 	return uniqueID
 }
@@ -36,21 +41,21 @@ func ExtractPayloadID(correlationToken string) string {
 }
 
 func MatchInteraction(interaction Interaction, domain string, correlations map[string]Correlation) (Correlation, bool) {
-	identifiers := []string{interaction.UniqueID, interaction.FullID}
+	identifiers := []string{interaction.FullID, interaction.UniqueID}
 	for _, identifier := range identifiers {
 		identifier = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(identifier, ".")))
+		if identifier == "" {
+			continue
+		}
 		if c, ok := correlations[identifier]; ok {
 			return c, true
 		}
 		token := ExtractCorrelationToken(identifier, domain)
-		if token == "" {
-			continue
-		}
-		if c, ok := correlations[strings.ToLower(token)]; ok {
-			return c, true
+		if token != "" {
+			if c, ok := correlations[strings.ToLower(token)]; ok {
+				return c, true
+			}
 		}
 	}
-	// Payload IDs and token substrings are deliberately not accepted: they can
-	// repeat across parameters, endpoints, and scans.
 	return Correlation{}, false
 }

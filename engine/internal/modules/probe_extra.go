@@ -2,7 +2,9 @@ package modules
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
@@ -15,8 +17,12 @@ func (r *Runner) probeWithBody(ctx context.Context, target ScanTarget, body stri
 }
 
 func (r *Runner) probeWithBodyForModule(ctx context.Context, module string, target ScanTarget, body string, contentType string, headers map[string]string) (httpclient.RequestResponse, error) {
+	return r.probeWithRawBodyForModule(ctx, module, target, []byte(body), contentType, headers)
+}
+
+func (r *Runner) probeWithRawBodyForModule(ctx context.Context, module string, target ScanTarget, body []byte, contentType string, headers map[string]string) (httpclient.RequestResponse, error) {
 	method := strings.ToUpper(target.Method)
-	if method == "" || method == "GET" {
+	if method == "" {
 		method = "POST"
 	}
 	if headers == nil {
@@ -26,10 +32,9 @@ func (r *Runner) probeWithBodyForModule(ctx context.Context, module string, targ
 		headers["Content-Type"] = contentType
 	}
 	headers = mergeHeaders(headers, r.wafHeadersForModule(module, target.EndpointURL))
-	bodyBytes := []byte(body)
-	headers = sanitizeProbeHeaders(method, bodyBytes, headers)
-	headers = r.registerRuntimeProbe(target, body, headers)
-	return r.client.Do(ctx, method, target.EndpointURL, bodyBytes, headers)
+	headers = sanitizeProbeHeaders(method, body, headers)
+	headers = r.registerRuntimeProbe(target, string(body), headers)
+	return r.client.Do(ctx, method, target.EndpointURL, body, headers)
 }
 
 func (r *Runner) cachedEmptyProbe(ctx context.Context, target ScanTarget) (httpclient.RequestResponse, error) {
@@ -74,6 +79,19 @@ func (r *Runner) probeWithHeaders(ctx context.Context, target ScanTarget, payloa
 	return r.probeWithHeadersForModule(ctx, "", target, payload, headers)
 }
 
+// probeHeadersOnlyForModule preserves the discovered HTTP method and request
+// URL exactly. It is intended for endpoint/header tests where upgrading GET to
+// POST or injecting an empty parameter would change the tested behavior.
+func (r *Runner) probeHeadersOnlyForModule(ctx context.Context, module string, target ScanTarget, headers map[string]string) (httpclient.RequestResponse, error) {
+	method := strings.ToUpper(strings.TrimSpace(target.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+	headers = mergeHeaders(headers, r.wafHeadersForModule(module, target.EndpointURL))
+	headers = sanitizeProbeHeaders(method, nil, headers)
+	return r.client.Do(ctx, method, target.EndpointURL, nil, headers)
+}
+
 func (r *Runner) probeWithHeadersForModule(ctx context.Context, module string, target ScanTarget, payload string, headers map[string]string) (httpclient.RequestResponse, error) {
 	if module != "" && len(headers) > 0 && !moduleAllowsHeaderPayloads(module) {
 		headers = nil
@@ -92,12 +110,25 @@ func (r *Runner) probeWithHeadersForModule(ctx context.Context, module string, t
 	return r.client.Do(ctx, method, rawURL, nil, headers)
 }
 
-func (r *Runner) recordFinding(out *[]ModuleFinding, f *ModuleFinding, module, signal string) {
+func (r *Runner) recordFinding(_ context.Context, out *[]ModuleFinding, f *ModuleFinding, module, signal string) bool {
 	if f == nil || !findingProofEligible(*f) {
-		return
+		return false
 	}
-	_ = r.persistFinding(*f, module, signal)
+	if err := r.persistFinding(*f, module, signal); err != nil {
+		if errors.Is(err, errDuplicateFinding) {
+			return false
+		}
+		r.executionErrors.Add(1)
+		if r.emit != nil {
+			_ = r.emit("scan_error", "finding could not be persisted: "+err.Error(), map[string]interface{}{
+				"scan_id": r.scanID, "module": module, "endpoint": f.Endpoint,
+				"parameter": f.Parameter, "vuln_class": f.VulnClass,
+			})
+		}
+		return false
+	}
 	*out = append(*out, *f)
+	return true
 }
 
 func findingProofEligible(f ModuleFinding) bool {
@@ -108,7 +139,7 @@ func findingProofEligible(f ModuleFinding) bool {
 	return result.ProofSatisfied &&
 		result.ProofPolicy == verification.CurrentProofPolicyVersion &&
 		len(result.Observations) > 0 &&
-		verification.ValidateObservations(result.Observations)
+		!result.Suppressed
 }
 
 func defaultPayload(vulnClass, variant, value, signal string) payloadgen.Payload {

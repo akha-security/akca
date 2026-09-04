@@ -87,7 +87,7 @@ func issuePayloads(findings []report.FindingEntry, provider string) []map[string
 	issues := make([]map[string]any, 0, len(findings))
 	for _, finding := range findings {
 		body := strings.Join([]string{
-			"Confirmed by Akca proof policy.",
+			"Confirmed by " + report.ProductName + " proof policy.",
 			"",
 			"Severity: " + finding.Severity,
 			"Class: " + finding.VulnClass,
@@ -117,7 +117,7 @@ func issuePayloads(findings []report.FindingEntry, provider string) []map[string
 func slackPayload(findings []report.FindingEntry) map[string]any {
 	blocks := []map[string]any{{
 		"type": "header", "text": map[string]string{"type": "plain_text",
-			"text": fmt.Sprintf("Akca: %d confirmed finding(s)", len(findings))},
+			"text": fmt.Sprintf("%s: %d confirmed finding(s)", report.ProductName, len(findings))},
 	}}
 	for _, finding := range findings {
 		text := fmt.Sprintf("*%s* · %s\n%s\n`%s`", strings.ToUpper(finding.Severity),
@@ -132,7 +132,7 @@ func slackPayload(findings []report.FindingEntry) map[string]any {
 func teamsPayload(findings []report.FindingEntry) map[string]any {
 	body := []map[string]any{{
 		"type": "TextBlock", "size": "Large", "weight": "Bolder",
-		"text": fmt.Sprintf("Akca: %d confirmed finding(s)", len(findings)),
+		"text": fmt.Sprintf("%s: %d confirmed finding(s)", report.ProductName, len(findings)),
 	}}
 	for _, finding := range findings {
 		body = append(body, map[string]any{
@@ -156,7 +156,7 @@ func defectDojoPayload(findings []report.FindingEntry) map[string]any {
 			"active": true, "verified": true, "false_p": false,
 		})
 	}
-	return map[string]any{"scan_type": "Akca Scan", "findings": out}
+	return map[string]any{"scan_type": report.ProductName, "findings": out}
 }
 
 func wafPayload(findings []report.FindingEntry) map[string]any {
@@ -179,8 +179,8 @@ func wafPayload(findings []report.FindingEntry) map[string]any {
 			target += ":" + wafToken(finding.Parameter)
 		}
 		rule := fmt.Sprintf(
-			`SecRule %s "@contains %s" "id:%d,phase:2,log,pass,t:none,tag:'akca-candidate',msg:'Akca confirmed %s; review before deny mode'"`,
-			target, modSecurityQuote(finding.HTTPEvidence.Payload), id, wafToken(finding.VulnClass))
+			`SecRule %s "@contains %s" "id:%d,phase:2,log,pass,t:none,tag:'akca-candidate',msg:'%s confirmed %s; review before deny mode'"`,
+			target, modSecurityQuote(finding.HTTPEvidence.Payload), id, report.ProductName, wafToken(finding.VulnClass))
 		rules = append(rules, map[string]any{
 			"id": id, "mode": "monitor_only", "requires_human_approval": true,
 			"finding_id": finding.ID, "rule": rule,

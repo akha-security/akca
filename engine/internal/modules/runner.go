@@ -3,7 +3,12 @@ package modules
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/akha-security/akca/engine/internal/config"
@@ -14,6 +19,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/reflection"
 	"github.com/akha-security/akca/engine/internal/safemutation"
 	"github.com/akha-security/akca/engine/internal/scope"
+	"github.com/akha-security/akca/engine/internal/secretscan"
 	"github.com/akha-security/akca/engine/internal/sensor"
 	"github.com/akha-security/akca/engine/internal/storage"
 	"github.com/akha-security/akca/engine/internal/verification"
@@ -55,6 +61,7 @@ type ScanTarget struct {
 	RecommendedModules []string
 	Priority           int
 	BodyTemplate       string
+	RequestTemplate    reflection.RequestTemplate
 }
 
 type Evidence struct {
@@ -64,6 +71,7 @@ type Evidence struct {
 	Parameter       string                    `json:"parameter,omitempty"`
 	Location        string                    `json:"location,omitempty"`
 	ResponseMarkers []string                  `json:"response_markers,omitempty"`
+	MethodVariants  []MethodVariantEvidence   `json:"method_variants,omitempty"`
 	Request         httpclient.RequestRecord  `json:"request"`
 	Response        httpclient.ResponseRecord `json:"response"`
 	Verification    verification.Result       `json:"verification"`
@@ -71,6 +79,15 @@ type Evidence struct {
 	StoredMarker    string                    `json:"stored_marker,omitempty"`
 	ReplayPlan      []ReplayStep              `json:"replay_plan,omitempty"`
 	DetectedAt      time.Time                 `json:"detected_at"`
+}
+
+type MethodVariantEvidence struct {
+	Method   string                    `json:"method"`
+	Location string                    `json:"location"`
+	Signal   string                    `json:"signal"`
+	Payload  payloadgen.Payload        `json:"payload"`
+	Request  httpclient.RequestRecord  `json:"request"`
+	Response httpclient.ResponseRecord `json:"response"`
 }
 
 type ReplayStep struct {
@@ -94,34 +111,56 @@ type ModuleFinding struct {
 
 type EventSink func(eventType, message string, payload map[string]interface{}) error
 
+var errDuplicateFinding = errors.New("duplicate canonical finding")
+
 type Runner struct {
-	scanID        string
-	client        HTTPDoer
-	scope         *scope.Engine
-	db            *storage.DB
-	verifier      *verification.Engine
-	oast          OASTClient
-	roles         RoleComparer
-	authResolve   AuthProfileResolver
-	browser       BrowserRenderer
-	tlsInspector  TLSInspector
-	websocket     WebSocketProber
-	smuggling     SmugglingProber
-	runtimeSensor *sensor.Collector
-	mutationGuard *safemutation.Guard
-	emit          EventSink
-	cfg           config.ScanConfig
-	storedMu      sync.Mutex
-	stored        map[string]string
-	baselineMu    sync.Mutex
-	baselineCache map[string]httpclient.RequestResponse
-	timingMu      sync.Mutex
-	delayedTiming []delayedTimingProbe
-	noticeMu      sync.Mutex
-	notices       map[string]struct{}
-	oastBlocked   bool
-	tlsMu         sync.Mutex
-	tlsReported   map[string]struct{}
+	scanID          string
+	client          HTTPDoer
+	scope           *scope.Engine
+	db              *storage.DB
+	verifier        *verification.Engine
+	oast            OASTClient
+	roles           RoleComparer
+	authResolve     AuthProfileResolver
+	browser         BrowserRenderer
+	tlsInspector    TLSInspector
+	websocket       WebSocketProber
+	smuggling       SmugglingProber
+	runtimeSensor   *sensor.Collector
+	mutationGuard   *safemutation.Guard
+	emit            EventSink
+	cfg             config.ScanConfig
+	storedMu        sync.Mutex
+	stored          map[string]string
+	baselineMu      sync.Mutex
+	baselineCache   map[string]httpclient.RequestResponse
+	secretScanMu    sync.Mutex
+	secretScanCache map[string][]secretscan.Match
+	sqliBaselineMu  sync.Mutex
+	sqliBaselines   map[string]*sqliBaselineCacheEntry
+	timingMu        sync.Mutex
+	delayedTiming   []delayedTimingProbe
+	noticeMu        sync.Mutex
+	notices         map[string]struct{}
+	oastBlocked     bool
+	tlsMu           sync.Mutex
+	tlsReported     map[string]struct{}
+	moduleSeenMu    sync.Mutex
+	moduleSeen      map[string]struct{}
+	findingMu       sync.Mutex
+	findingSeen     map[string]int64
+	budgetExhausted atomic.Bool
+	probeCount      atomic.Int64
+	executionErrors atomic.Int64
+}
+
+// ProbeCount reports vulnerability-module probe attempts independently from
+// crawler and bootstrap traffic, so the CLI can show real payload progress.
+func (r *Runner) ProbeCount() int64 {
+	if r == nil {
+		return 0
+	}
+	return r.probeCount.Load()
 }
 
 func NewRunner(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *storage.DB,
@@ -129,10 +168,14 @@ func NewRunner(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *st
 	r := &Runner{
 		scanID: scanID, client: client, scope: scopeEngine, db: db,
 		verifier: verifier, oast: oastClient, emit: emit, cfg: cfg,
-		stored:        make(map[string]string),
-		baselineCache: make(map[string]httpclient.RequestResponse),
-		notices:       make(map[string]struct{}),
-		tlsReported:   make(map[string]struct{}),
+		stored:          make(map[string]string),
+		baselineCache:   make(map[string]httpclient.RequestResponse),
+		secretScanCache: make(map[string][]secretscan.Match),
+		sqliBaselines:   make(map[string]*sqliBaselineCacheEntry),
+		notices:         make(map[string]struct{}),
+		tlsReported:     make(map[string]struct{}),
+		moduleSeen:      make(map[string]struct{}),
+		findingSeen:     make(map[string]int64),
 	}
 	r.tlsInspector = newNetworkTLSInspector(cfg)
 	r.websocket = newNetworkWebSocketProber(cfg, scopeEngine)
@@ -150,7 +193,129 @@ func NewRunner(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *st
 	for _, opt := range opts {
 		opt(r)
 	}
+	r.loadStoredMarkers()
+	r.loadExistingFindingKeys()
 	return r
+}
+
+func (r *Runner) loadStoredMarkers() {
+	if r.db == nil || !r.cfg.EnableSecondOrderTracking {
+		return
+	}
+	markers, err := r.db.ListSecondOrderMarkers(r.scanID)
+	if err != nil {
+		r.emitOnce("second_order_marker_load_failed", "coverage_gap", "Second-order stored marker cache could not be loaded", map[string]interface{}{
+			"scan_id": r.scanID, "error": err.Error(),
+		})
+		return
+	}
+	if len(markers) == 0 {
+		return
+	}
+	r.storedMu.Lock()
+	defer r.storedMu.Unlock()
+	for _, marker := range markers {
+		if marker.EndpointURL == "" || marker.Parameter == "" || marker.Marker == "" {
+			continue
+		}
+		r.stored[marker.EndpointURL+"::"+marker.Parameter] = marker.Marker
+	}
+}
+
+func (r *Runner) loadExistingFindingKeys() {
+	if r.db == nil || r.scanID == "" {
+		return
+	}
+	_ = r.db.IterateFindings(r.scanID, func(rec storage.FindingRecord) error {
+		f := ModuleFinding{
+			Title: rec.Title, VulnClass: rec.VulnClass, Endpoint: rec.EndpointURL, Parameter: rec.Parameter,
+		}
+		if rec.EvidenceJSON != "" {
+			_ = json.Unmarshal([]byte(rec.EvidenceJSON), &f.Evidence)
+		}
+		key := r.findingKey(f)
+		if key == "" {
+			return nil
+		}
+		r.findingMu.Lock()
+		if r.findingSeen == nil {
+			r.findingSeen = make(map[string]int64)
+		}
+		r.findingSeen[key] = rec.ID
+		r.findingMu.Unlock()
+		return nil
+	})
+}
+
+// endpointModuleOnce prevents endpoint-level modules from running once per
+// discovered parameter. Query values are excluded because these modules act on
+// the route/resource, not on an individual injection surface.
+func (r *Runner) endpointModuleOnce(module string, target ScanTarget) bool {
+	raw := target.EndpointURL
+	if parsed, err := url.Parse(raw); err == nil {
+		if originScopedModule(module) {
+			raw = parsed.Scheme + "://" + parsed.Host
+		} else {
+			parsed.RawQuery = ""
+			parsed.Fragment = ""
+			raw = parsed.String()
+		}
+	}
+	key := module + "::" + strings.ToUpper(strings.TrimSpace(target.Method)) + "::" + raw
+	r.moduleSeenMu.Lock()
+	defer r.moduleSeenMu.Unlock()
+	if _, exists := r.moduleSeen[key]; exists {
+		return false
+	}
+	r.moduleSeen[key] = struct{}{}
+	return true
+}
+
+// contentModuleOnce prevents passive response analyzers from re-reading and
+// re-scanning the same concrete URL for every discovered parameter surface.
+func (r *Runner) contentModuleOnce(module string, target ScanTarget) bool {
+	raw := target.EndpointURL
+	if parsed, err := url.Parse(raw); err == nil {
+		parsed.Fragment = ""
+		raw = parsed.String()
+	}
+	key := module + "::" + strings.ToUpper(strings.TrimSpace(target.Method)) + "::" + raw
+	r.moduleSeenMu.Lock()
+	defer r.moduleSeenMu.Unlock()
+	if _, exists := r.moduleSeen[key]; exists {
+		return false
+	}
+	r.moduleSeen[key] = struct{}{}
+	return true
+}
+
+func originScopedModule(module string) bool {
+	switch module {
+	case "actuator", "devops_exposure", "backup_archives", "security_headers", "tls_misconfig", "cloud_takeover",
+		"iis_discovery", "firebase_misconfig", "spring_cloud_jolokia", "saas_exposure", "grpc_scan",
+		"cicd_exposure", "git_recovery", "source_code_disclosure", "cloud_storage", "cloud_posture",
+		"cloud_native_exposure", "host_poisoning", "wordpress_fuzz", "nginx_alias",
+		"nextjs_bypass", "framework_debug", "cpdos", "proxy_path_confusion", "ws_cswsh", "react_rsc_rce",
+		"swagger_exposure", "sensitive_file_discovery", "http_smuggling", "debug_admin",
+		"vulnerable_components", "known_cve":
+		return true
+	default:
+		return false
+	}
+}
+
+func originScanTarget(target ScanTarget) (ScanTarget, bool) {
+	parsed, err := url.Parse(target.EndpointURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ScanTarget{}, false
+	}
+	target.EndpointURL = parsed.Scheme + "://" + parsed.Host
+	target.Method = "GET"
+	target.Parameter = ""
+	target.Location = ""
+	target.BodyTemplate = ""
+	target.RequestTemplate = reflection.RequestTemplate{}
+	return target, true
 }
 
 func (r *Runner) safeMutationGuard() *safemutation.Guard {
@@ -231,52 +396,64 @@ func (r *Runner) RunGroupA(ctx context.Context, targets []ScanTarget) ([]ModuleF
 	var mu sync.Mutex
 	var findings []ModuleFinding
 
-	targetCh := make(chan ScanTarget, len(targets))
-	for _, t := range targets {
-		targetCh <- t
-	}
-	close(targetCh)
+	targetCh := make(chan ScanTarget, moduleQueueCapacity(workers, len(targets)))
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if rec := recover(); rec != nil {
+					_ = r.emit("log", fmt.Sprintf("RunGroupA worker recovered from panic: %v", rec), map[string]interface{}{"scan_id": r.scanID})
+				}
+			}()
 			for target := range targetCh {
 				if ctx.Err() != nil {
 					return
 				}
+				if r.budgetExhausted.Load() {
+					continue
+				}
 				if !r.scope.IsInScope(target.EndpointURL) {
 					continue
 				}
-				var localFindings []ModuleFinding
-				if r.cfg.AllowsModule("xss") {
-					localFindings = append(localFindings, r.runXSS(ctx, target)...)
-				}
-				if r.cfg.AllowsModule("blind_xss") {
-					localFindings = append(localFindings, r.runBlindXSS(ctx, target)...)
-				}
-				if r.cfg.AllowsModule("sqli") {
-					localFindings = append(localFindings, r.runSQLi(ctx, target)...)
-				}
-				if r.cfg.AllowsModule("nosql") {
-					localFindings = append(localFindings, r.runNoSQLi(ctx, target)...)
-				}
-				if r.cfg.AllowsModule("ssti") {
-					localFindings = append(localFindings, r.runSSTI(ctx, target)...)
-				}
-				if r.cfg.AllowsModule("command_injection") {
-					localFindings = append(localFindings, r.runCommandInjection(ctx, target)...)
-				}
+				func() {
+					defer func() {
+						if rec := recover(); rec != nil {
+							_ = r.emit("log", fmt.Sprintf("RunGroupA target %s recovered from panic: %v", target.EndpointURL, rec), map[string]interface{}{"scan_id": r.scanID})
+						}
+					}()
+					var localFindings []ModuleFinding
+					if r.cfg.AllowsModule("xss") {
+						localFindings = append(localFindings, r.runXSS(ctx, target)...)
+					}
+					if r.cfg.AllowsModule("blind_xss") {
+						localFindings = append(localFindings, r.runBlindXSS(ctx, target)...)
+					}
+					if r.cfg.AllowsModule("sqli") {
+						localFindings = append(localFindings, r.runSQLi(ctx, target)...)
+					}
+					if r.cfg.AllowsModule("nosql") {
+						localFindings = append(localFindings, r.runNoSQLi(ctx, target)...)
+					}
+					if r.cfg.AllowsModule("ssti") {
+						localFindings = append(localFindings, r.runSSTI(ctx, target)...)
+					}
+					if r.cfg.AllowsModule("command_injection") {
+						localFindings = append(localFindings, r.runCommandInjection(ctx, target)...)
+					}
 
-				if len(localFindings) > 0 {
-					mu.Lock()
-					findings = append(findings, localFindings...)
-					mu.Unlock()
-				}
+					if len(localFindings) > 0 {
+						mu.Lock()
+						findings = append(findings, localFindings...)
+						mu.Unlock()
+					}
+				}()
 			}
 		}()
 	}
+	feedModuleTargets(ctx, targetCh, targets)
 	wg.Wait()
 
 	_ = r.emit("vuln_modules_finished", "Injection vulnerability scanning finished", map[string]interface{}{
@@ -284,6 +461,34 @@ func (r *Runner) RunGroupA(ctx context.Context, targets []ScanTarget) ([]ModuleF
 	})
 	findings = append(findings, r.flushDelayedTimingVerifications(ctx)...)
 	return findings, nil
+}
+
+// moduleQueueCapacity keeps large target sets from being duplicated in a
+// channel buffer. The source slice is already resident; only a small working
+// set needs to be queued for active workers.
+func moduleQueueCapacity(workers, targets int) int {
+	capacity := workers * 2
+	if capacity < 1 {
+		capacity = 1
+	}
+	if capacity > 256 {
+		capacity = 256
+	}
+	if targets > 0 && capacity > targets {
+		capacity = targets
+	}
+	return capacity
+}
+
+func feedModuleTargets(ctx context.Context, targetCh chan<- ScanTarget, targets []ScanTarget) {
+	defer close(targetCh)
+	for _, target := range targets {
+		select {
+		case targetCh <- target:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (r *Runner) persistFinding(f ModuleFinding, eventContext ...string) error {
@@ -295,6 +500,14 @@ func (r *Runner) persistFinding(f ModuleFinding, eventContext ...string) error {
 	}
 	ev, _ := json.Marshal(f.Evidence)
 	evJSON := string(ev)
+	key, existingID, duplicate := r.claimFinding(f)
+	if duplicate {
+		if existingID > 0 {
+			_ = r.db.SaveEvidenceForFinding(r.scanID, existingID, f.VulnClass+"_variant_signal", evJSON)
+			_ = r.saveVerificationObservations(existingID, f)
+		}
+		return errDuplicateFinding
+	}
 	desc := f.Description + "\n\nevidence: " + evJSON
 	conf := f.Evidence.Verification.Score
 	if conf <= 0 {
@@ -302,8 +515,10 @@ func (r *Runner) persistFinding(f ModuleFinding, eventContext ...string) error {
 	}
 	findingID, err := r.db.SaveFinding(r.scanID, f.Title, f.Severity, f.VulnClass, desc, f.Endpoint, f.Parameter, conf, evJSON)
 	if err != nil {
+		r.releaseFindingKey(key)
 		return err
 	}
+	r.finishFindingKey(key, findingID)
 	module := f.Evidence.Module
 	signal := f.Evidence.Signal
 	if len(eventContext) > 0 && eventContext[0] != "" {
@@ -316,6 +531,51 @@ func (r *Runner) persistFinding(f ModuleFinding, eventContext ...string) error {
 	if err := r.db.SaveEvidenceForFinding(r.scanID, findingID, f.VulnClass+"_signal", evJSON); err != nil {
 		return err
 	}
+	if err := r.saveVerificationObservations(findingID, f); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *Runner) claimFinding(f ModuleFinding) (string, int64, bool) {
+	key := r.findingKey(f)
+	if key == "" {
+		return "", 0, false
+	}
+	r.findingMu.Lock()
+	defer r.findingMu.Unlock()
+	if r.findingSeen == nil {
+		r.findingSeen = make(map[string]int64)
+	}
+	if existingID, exists := r.findingSeen[key]; exists {
+		return key, existingID, true
+	}
+	r.findingSeen[key] = 0
+	return key, 0, false
+}
+
+func (r *Runner) finishFindingKey(key string, findingID int64) {
+	if key == "" {
+		return
+	}
+	r.findingMu.Lock()
+	if r.findingSeen == nil {
+		r.findingSeen = make(map[string]int64)
+	}
+	r.findingSeen[key] = findingID
+	r.findingMu.Unlock()
+}
+
+func (r *Runner) releaseFindingKey(key string) {
+	if key == "" {
+		return
+	}
+	r.findingMu.Lock()
+	delete(r.findingSeen, key)
+	r.findingMu.Unlock()
+}
+
+func (r *Runner) saveVerificationObservations(findingID int64, f ModuleFinding) error {
 	for _, observation := range f.Evidence.Verification.Observations {
 		record := storage.VerificationObservationRecord{
 			ID: observation.ID, FindingID: findingID, ScanID: observation.ScanID,
@@ -336,6 +596,75 @@ func (r *Runner) persistFinding(f ModuleFinding, eventContext ...string) error {
 		}
 	}
 	return nil
+}
+
+func (r *Runner) findingKey(f ModuleFinding) string {
+	module := strings.ToLower(strings.TrimSpace(f.Evidence.Module))
+	if module == "" {
+		module = strings.ToLower(strings.TrimSpace(f.VulnClass))
+	}
+	if module == "" {
+		module = strings.ToLower(strings.TrimSpace(f.Title))
+	}
+	endpoint := canonicalFindingEndpoint(f.Endpoint)
+	if endpoint == "" && f.Evidence.Request.URL != "" {
+		endpoint = canonicalFindingEndpoint(f.Evidence.Request.URL)
+	}
+	if endpoint == "" {
+		return ""
+	}
+	method := strings.ToUpper(strings.TrimSpace(f.Evidence.Request.Method))
+	if method == "" {
+		method = "GET"
+	}
+	parameter := strings.ToLower(strings.TrimSpace(f.Parameter))
+	if parameter == "" {
+		parameter = strings.ToLower(strings.TrimSpace(f.Evidence.Parameter))
+	}
+	location := strings.ToLower(strings.TrimSpace(f.Location))
+	if location == "" {
+		location = strings.ToLower(strings.TrimSpace(f.Evidence.Location))
+	}
+	if module == "security_headers" || module == "tls_misconfig" {
+		if u, err := url.Parse(endpoint); err == nil && u.Scheme != "" && u.Host != "" {
+			endpoint = u.Scheme + "://" + u.Host
+		}
+		parameter = ""
+	}
+	if module == "cookie_security" {
+		if u, err := url.Parse(endpoint); err == nil && u.Scheme != "" && u.Host != "" {
+			endpoint = u.Scheme + "://" + u.Host
+		}
+		if parameter == "" && f.Evidence.Payload.Value != "" {
+			parameter = strings.ToLower(f.Evidence.Payload.Value)
+		}
+	}
+	signal := strings.ToLower(strings.TrimSpace(f.Evidence.Signal))
+	if collapsePayloadVariants(module, parameter) {
+		signal = ""
+	}
+	return strings.Join([]string{r.scanID, module, method, endpoint, parameter, location, signal}, "\x1f")
+}
+
+func collapsePayloadVariants(module, parameter string) bool {
+	if strings.TrimSpace(parameter) == "" {
+		return false
+	}
+	return module != ""
+}
+
+func canonicalFindingEndpoint(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return strings.TrimSpace(raw)
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.Fragment = ""
+	if parsed.RawQuery != "" {
+		parsed.RawQuery = parsed.Query().Encode()
+	}
+	return parsed.String()
 }
 
 func (r *Runner) recordLearning(endpointURL, family string, outcome learning.Outcome) {

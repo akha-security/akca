@@ -19,6 +19,7 @@ const (
 	FormatGraphQL            Format = "graphql"
 	FormatProto              Format = "grpc_proto"
 	FormatAsyncAPI           Format = "asyncapi"
+	FormatRAML               Format = "raml"
 )
 
 type Parameter struct {
@@ -59,6 +60,10 @@ type Inventory struct {
 type ImportOptions struct {
 	BaseURL     string
 	Environment map[string]string
+	// SourcePath and ExternalFiles allow a RAML/OpenAPI bundle to resolve
+	// sibling definitions without granting the parser arbitrary filesystem access.
+	SourcePath    string
+	ExternalFiles map[string][]byte
 }
 
 func (op Operation) ResolveURL(baseURL string) string {

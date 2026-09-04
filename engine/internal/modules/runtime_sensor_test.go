@@ -153,6 +153,7 @@ func TestRuntimeSinkClassMapping(t *testing.T) {
 		{"ldap_xpath_injection", "ldap"},
 		{"ldap_xpath_injection", "xpath"},
 		{"deserialization", "deserialization"},
+		{"react_rsc_rce", "deserialization"},
 	} {
 		if !runtimeSinkMatchesModule(test.module, test.sink) {
 			t.Fatalf("runtime sink %s was not mapped to %s", test.sink, test.module)

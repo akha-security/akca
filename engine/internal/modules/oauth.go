@@ -44,50 +44,100 @@ func (r *Runner) runOAuth(ctx context.Context, target ScanTarget) []ModuleFindin
 	if err != nil {
 		return nil
 	}
-	malicious := "https://akca.invalid/oauth-callback"
-	probe, err := r.probe(ctx, target, malicious)
-	if err != nil || !oauthRedirectHeaderConfirmed(probe.Response.Headers, malicious) {
-		return nil
-	}
-	if oauthRedirectState(probe.Response.Headers) != nativeState {
-		return nil
-	}
-	control, err := r.probe(ctx, target, "akca-not-a-valid-uri")
-	if err != nil || oauthRedirectHeaderConfirmed(control.Response.Headers, "akca-not-a-valid-uri") {
-		return nil
-	}
-	var replays []httpclient.RequestResponse
-	for index := 0; index < 2; index++ {
-		replay, replayErr := r.probe(ctx, target, malicious)
-		if replayErr != nil || !oauthRedirectHeaderConfirmed(replay.Response.Headers, malicious) ||
-			oauthRedirectState(replay.Response.Headers) != nativeState {
-			return nil
-		}
-		replays = append(replays, replay)
-	}
-	payload := defaultPayload("oauth", "redirect_uri_exact_match", malicious, "redirect_uri_location_confirmed")
-	finding := r.verifyAndBuildWithCandidate(ctx, "oauth", target, payload, baseline, probe,
-		"redirect_uri_location_confirmed", false, false, "", "", func(candidate *verification.Candidate) {
-			candidate.RequestedProofType = verification.ProofDifferentialReplay
-			// OAuth redirect proof lives in Location while response bodies are
-			// commonly both empty. Body equivalence must not suppress a
-			// replayed, state-bound attacker redirect.
-			candidate.ExpectedEquivalent = true
-			candidate.NegativeControlSet = true
-			candidate.NegativeControlOK = true
-			candidate.TypedReplayHits = []bool{true, true, true}
-			candidate.Observations = append(candidate.Observations,
-				r.observation("oauth", target, verification.RoleNegativeControl, 1, control),
-				r.observation("oauth", target, verification.RolePositiveReplay, 2, replays[0]),
-				r.observation("oauth", target, verification.RolePositiveReplay, 3, replays[1]),
-			)
+	origParsed, _ := url.Parse(original)
+	var candidates []struct{ uri, variant, desc string }
+	candidates = append(candidates, struct{ uri, variant, desc string }{
+		"https://akca.invalid/oauth-callback", "redirect_uri_exact_match",
+		"The authorization response sent a code/token to an arbitrary attacker-controlled redirect host.",
+	})
+	candidates = append(candidates, struct{ uri, variant, desc string }{
+		"http://localhost:8080/callback", "redirect_uri_localhost_bypass",
+		"The authorization server permitted redirection to localhost without restriction.",
+	})
+	if origParsed != nil && origParsed.Host != "" {
+		candidates = append(candidates, struct{ uri, variant, desc string }{
+			origParsed.Scheme + "://" + origParsed.Host + ".akca.invalid/oauth-callback", "redirect_uri_subdomain_bypass",
+			"The authorization server allowed a subdomain-suffix bypass on redirect_uri.",
 		})
-	if finding == nil {
-		return nil
+		candidates = append(candidates, struct{ uri, variant, desc string }{
+			original + "/..%2f..%2fakca.invalid", "redirect_uri_path_traversal",
+			"The authorization server allowed a path traversal bypass on redirect_uri.",
+		})
+		candidates = append(candidates, struct{ uri, variant, desc string }{
+			origParsed.Scheme + "://" + origParsed.Host + "%23@akca.invalid/callback", "redirect_uri_fragment_bypass",
+			"The authorization server allowed a URL fragment bypass on redirect_uri.",
+		})
+		candidates = append(candidates, struct{ uri, variant, desc string }{
+			origParsed.Scheme + "://" + origParsed.Host + "%2523@akca.invalid/callback", "redirect_uri_double_encode_bypass",
+			"The authorization server allowed a double URL-encoded fragment bypass on redirect_uri.",
+		})
+		candidates = append(candidates, struct{ uri, variant, desc string }{
+			origParsed.Scheme + "://" + origParsed.Host + "%5C@akca.invalid", "redirect_uri_backslash_bypass",
+			"The authorization server allowed a backslash authority bypass on redirect_uri.",
+		})
+		candidates = append(candidates, struct{ uri, variant, desc string }{
+			origParsed.Scheme + "://" + origParsed.Host + "@akca.invalid/callback", "redirect_uri_userinfo_bypass",
+			"The authorization server allowed an authority/userinfo confusion bypass on redirect_uri.",
+		})
+		candidates = append(candidates, struct{ uri, variant, desc string }{
+			"javascript:/*" + origParsed.Host + "*/alert(1)", "redirect_uri_javascript_scheme",
+			"The authorization server allowed a javascript: scheme execution via redirect_uri.",
+		})
 	}
-	finding.Description = "The authorization response sent a code/token to an attacker-controlled exact redirect host; a malformed URI control was not accepted."
+
 	var out []ModuleFinding
-	r.recordFinding(&out, finding, "oauth", "redirect_uri_location_confirmed")
+	for _, cand := range candidates {
+		malicious := cand.uri
+		probe, err := r.probe(ctx, target, malicious)
+		if err != nil || !oauthRedirectHeaderConfirmed(probe.Response.Headers, malicious) {
+			continue
+		}
+		if oauthRedirectState(probe.Response.Headers) != nativeState {
+			continue
+		}
+		control, err := r.probe(ctx, target, "akca-not-a-valid-uri")
+		if err != nil || oauthRedirectHeaderConfirmed(control.Response.Headers, "akca-not-a-valid-uri") {
+			continue
+		}
+		var replays []httpclient.RequestResponse
+		replayOK := true
+		for index := 0; index < 2; index++ {
+			replay, replayErr := r.probe(ctx, target, malicious)
+			if replayErr != nil || !oauthRedirectHeaderConfirmed(replay.Response.Headers, malicious) ||
+				oauthRedirectState(replay.Response.Headers) != nativeState {
+				replayOK = false
+				break
+			}
+			replays = append(replays, replay)
+		}
+		if !replayOK || len(replays) < 2 {
+			continue
+		}
+		payload := defaultPayload("oauth", cand.variant, malicious, "redirect_uri_location_confirmed")
+		finding := r.verifyAndBuildWithCandidate(ctx, "oauth", target, payload, baseline, probe,
+			"redirect_uri_location_confirmed", false, false, "", "", func(candidate *verification.Candidate) {
+				candidate.RequestedProofType = verification.ProofDifferentialReplay
+				// OAuth redirect proof lives in Location while response bodies are
+				// commonly both empty. Body equivalence must not suppress a
+				// replayed, state-bound attacker redirect.
+				candidate.ExpectedEquivalent = true
+				candidate.NegativeControlSet = true
+				candidate.NegativeControlOK = true
+				candidate.TypedReplayHits = []bool{true, true, true}
+				candidate.Observations = append(candidate.Observations,
+					r.observation("oauth", target, verification.RoleNegativeControl, 1, control),
+					r.observation("oauth", target, verification.RolePositiveReplay, 2, replays[0]),
+					r.observation("oauth", target, verification.RolePositiveReplay, 3, replays[1]),
+				)
+			})
+		if finding != nil {
+			finding.Title = "OAuth / OIDC redirect URI validation flaw (" + cand.variant + ")"
+			finding.Severity = "critical"
+			finding.Description = cand.desc
+			r.recordFinding(ctx, &out, finding, "oauth", "redirect_uri_location_confirmed")
+			break
+		}
+	}
 	return out
 }
 

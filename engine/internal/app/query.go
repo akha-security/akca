@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/akha-security/akca/engine/internal/modules"
@@ -471,7 +473,7 @@ func (e *Engine) exportReportQuery(input CommandInput, params map[string]interfa
 		Template:    report.TemplateKind(strParam(params, "template")),
 		Format:      report.Format(strParam(params, "format")),
 		Partial:     boolParam(params, "partial"),
-		Redact:      true,
+		Redact:      false,
 		Severities:  strSlice(params, "severities"),
 		Confidences: strSlice(params, "confidences"),
 	}
@@ -489,6 +491,10 @@ func (e *Engine) exportReportQuery(input CommandInput, params map[string]interfa
 	case report.FormatMarkdown:
 		ext = "md"
 	}
+	validScanID := regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+	if !validScanID.MatchString(opts.ScanID) {
+		return fmt.Errorf("invalid scan id for export: %q", opts.ScanID)
+	}
 	filename := fmt.Sprintf("akca-report-%s.%s", opts.ScanID, ext)
 
 	dataDir, err := e.GetDataDirectory()
@@ -500,6 +506,10 @@ func (e *Engine) exportReportQuery(input CommandInput, params map[string]interfa
 		return err
 	}
 	outPath := filepath.Join(exportDir, filename)
+	rel, relErr := filepath.Rel(exportDir, outPath)
+	if relErr != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return fmt.Errorf("invalid export report path: %q", outPath)
+	}
 	f, err := os.Create(outPath)
 	if err != nil {
 		return err
@@ -536,7 +546,7 @@ func (e *Engine) generateReportQuery(input CommandInput, params map[string]inter
 		Template:    report.TemplateKind(strParam(params, "template")),
 		Format:      report.Format(strParam(params, "format")),
 		Partial:     boolParam(params, "partial"),
-		Redact:      true,
+		Redact:      false,
 		Severities:  strSlice(params, "severities"),
 		Confidences: strSlice(params, "confidences"),
 	}

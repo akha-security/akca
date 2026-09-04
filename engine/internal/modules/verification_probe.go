@@ -16,6 +16,13 @@ import (
 func (r *Runner) probePayload(ctx context.Context, target ScanTarget, p payloadgen.Payload) (httpclient.RequestResponse, error) {
 	switch p.VulnClass {
 	case "xxe":
+		if carrier, ok := xxeCarrierFromEncoding(p.Encoding); ok {
+			body, contentType, err := buildXXECarrierRequest(carrier, target, p, false, "")
+			if err != nil {
+				return httpclient.RequestResponse{}, err
+			}
+			return r.probeWithRawBodyForModule(ctx, "xxe", target, body, contentType, nil)
+		}
 		ct := "application/xml"
 		if p.ExpectedSignal == "soap_xxe" {
 			ct = "text/xml"
@@ -114,7 +121,8 @@ func usesModuleManagedProof(module string) bool {
 	switch module {
 	case "client_ssti", "idor", "bfla", "mass_assignment", "jwt", "oauth",
 		"rate_limit", "account_enum", "race_condition", "business_logic", "file_upload",
-		"cache_poisoning", "cache_deception", "broken_auth", "csrf", "smuggling", "websocket":
+		"cache_poisoning", "cache_deception", "cpdos", "broken_auth", "csrf", "smuggling", "websocket", "http_methods",
+		"account_recovery", "webhook_security", "tenant_isolation", "session_lifecycle", "secret_exposure":
 		return true
 	case "hpp":
 		return true
@@ -149,7 +157,7 @@ func (r *Runner) replayControl(ctx context.Context, module string, target ScanTa
 func supportsRecordedNegativeControl(module string) bool {
 	switch module {
 	case "nosql", "ssrf", "open_redirect", "host_header", "cors", "jwt", "oauth",
-		"ldap_xpath_injection", "crlf", "debug_admin", "prototype_pollution":
+		"host_poisoning", "ldap", "xpath", "ldap_xpath_injection", "crlf", "debug_admin", "prototype_pollution":
 		return true
 	default:
 		return false

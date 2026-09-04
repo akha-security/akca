@@ -30,7 +30,7 @@ func fixtureFindings() []report.FindingEntry {
 	}
 }
 
-func TestAllIntegrationsShareProofGateAndRedaction(t *testing.T) {
+func TestAllIntegrationsShareProofGateAndPreserveRawEvidence(t *testing.T) {
 	for _, kind := range []Kind{Jira, GitHubIssues, Slack, Teams, DefectDojo, WAF} {
 		raw, err := Export(kind, fixtureFindings())
 		if err != nil {
@@ -43,8 +43,8 @@ func TestAllIntegrationsShareProofGateAndRedaction(t *testing.T) {
 		if envelope.ConfirmedCount != 1 || envelope.FilteredCount != 2 {
 			t.Fatalf("%s proof gate failed: %+v", kind, envelope)
 		}
-		if strings.Contains(string(raw), "secret-token-123") || strings.Contains(string(raw), "Heuristic only") {
-			t.Fatalf("%s leaked secret or unproven finding: %s", kind, raw)
+		if strings.Contains(string(raw), "[REDACTED]") || strings.Contains(string(raw), "Heuristic only") {
+			t.Fatalf("%s redaction/proof gate mismatch: %s", kind, raw)
 		}
 	}
 }

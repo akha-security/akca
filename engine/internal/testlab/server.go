@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/akha-security/akca/engine/internal/branding"
 	"github.com/akha-security/akca/engine/internal/testfixtures"
 )
 
@@ -144,7 +145,7 @@ func (s *Server) setWAFHeaders(w http.ResponseWriter) {
 func (s *Server) serveIndex(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = io.WriteString(w, `<!doctype html><html><body>
-<h1>Akca Lab Target</h1>
+<h1>`+html.EscapeString(branding.ProductName)+` Lab Target</h1>
 <a href="/search?q=hello">search</a>
 <a href="/api/users?id=1">users</a>
 <a href="/redirect?url=/home">redirect</a>
@@ -355,7 +356,7 @@ func (s *Server) serveParityProfile(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"name": "alice", "role": role})
-	case http.MethodPost:
+	case http.MethodPatch:
 		var body map[string]interface{}
 		if json.Unmarshal([]byte(readBody(r)), &body) != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)

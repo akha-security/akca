@@ -3,7 +3,9 @@ package waf
 import "github.com/akha-security/akca/engine/internal/models"
 
 // TrafficBudget is the effective upper bound used after WAF fingerprinting.
-// Values are caps: an operator-provided value that is already lower is kept.
+// Passive vendor/CDN fingerprints do not prove that a target is blocking or
+// rate-limiting traffic, so only an observed challenge or 429 response lowers
+// the operator's configured rates.
 type TrafficBudget struct {
 	GlobalRateLimit    float64 `json:"global_rate_limit"`
 	PerHostRateLimit   float64 `json:"per_host_rate_limit"`
@@ -22,15 +24,17 @@ func RecommendTrafficBudget(profile models.WAFProfile, globalRate, perHostRate f
 		return budget
 	}
 
-	globalCap, hostCap := 3.0, 1.0
-	maxWorkers, hostWorkers := 4, 1
-	budget.Reason = "waf_detected"
-	if profile.RateLimitDetected || profile.ChallengePageDetected {
-		globalCap, hostCap = 1.0, 0.5
-		maxWorkers, hostWorkers = 2, 1
-		budget.Reason = "active_waf_challenge_or_rate_limit"
+	budget.Reason = "passive_waf_observed"
+	if !profile.RateLimitDetected && !profile.ChallengePageDetected {
+		return budget
 	}
 
+	// When active WAF protection (rate-limiting or challenge pages) is detected,
+	// aggressively throttle to avoid IP bans. The HTTP client still reacts to
+	// subsequent 429/52x responses with dynamic slowdown and circuit breaking.
+	globalCap, hostCap := 3.0, 2.0
+	maxWorkers, hostWorkers := 4, 2
+	budget.Reason = "active_waf_challenge_or_rate_limit"
 	budget.GlobalRateLimit = capPositiveFloat(globalRate, globalCap)
 	budget.PerHostRateLimit = capPositiveFloat(perHostRate, hostCap)
 	budget.MaxConcurrency = capPositiveInt(maxConcurrency, maxWorkers)

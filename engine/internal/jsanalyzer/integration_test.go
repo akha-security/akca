@@ -22,6 +22,11 @@ func TestAnalyzerUsesCentralHTTPClient(t *testing.T) {
 			_, _ = w.Write([]byte(jsBody))
 			return
 		}
+		if r.URL.Path == "/leak.map" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"version":3,"sources":["src/app.ts"],"mappings":""}`))
+			return
+		}
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer srv.Close()

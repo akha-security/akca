@@ -3,6 +3,9 @@ package storage
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
 )
 
 type EvidenceLimits struct {
@@ -100,6 +103,7 @@ type FuzzResultRecord struct {
 }
 
 type OASTCallbackRecord struct {
+	ID           int64  `json:"id"`
 	PayloadID    string `json:"payload_id"`
 	Protocol     string `json:"protocol,omitempty"`
 	SourceIP     string `json:"source_ip,omitempty"`
@@ -374,9 +378,26 @@ FROM fuzz_results WHERE scan_id = ? AND category = ? ORDER BY id DESC LIMIT ?`, 
 }
 
 func (db *DB) ListOASTCallbackRecords(scanID string, limit int) ([]OASTCallbackRecord, error) {
-	rows, err := db.conn.Query(`
-SELECT payload_id, COALESCE(protocol,''), COALESCE(source_ip,''), callback_json, received_at
-FROM oast_callbacks WHERE scan_id = ? ORDER BY id DESC LIMIT ?`, scanID, limit)
+	return db.ListOASTCallbackRecordsPage(scanID, 0, limit)
+}
+
+// ListOASTCallbackRecordsPage uses an ID cursor so finalization can consume
+// every callback without OFFSET drift while callbacks are still arriving.
+func (db *DB) ListOASTCallbackRecordsPage(scanID string, beforeID int64, limit int) ([]OASTCallbackRecord, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	query := `
+SELECT id, payload_id, COALESCE(protocol,''), COALESCE(source_ip,''), callback_json, received_at
+FROM oast_callbacks WHERE scan_id = ?`
+	args := []interface{}{scanID}
+	if beforeID > 0 {
+		query += ` AND id < ?`
+		args = append(args, beforeID)
+	}
+	query += ` ORDER BY id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := db.conn.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -384,7 +405,7 @@ FROM oast_callbacks WHERE scan_id = ? ORDER BY id DESC LIMIT ?`, scanID, limit)
 	var out []OASTCallbackRecord
 	for rows.Next() {
 		var rec OASTCallbackRecord
-		if err := rows.Scan(&rec.PayloadID, &rec.Protocol, &rec.SourceIP, &rec.CallbackJSON, &rec.ReceivedAt); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.PayloadID, &rec.Protocol, &rec.SourceIP, &rec.CallbackJSON, &rec.ReceivedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, rec)
@@ -696,6 +717,10 @@ type DashboardMetrics struct {
 	EvidenceCount int            `json:"evidence_count"`
 	OASTCallbacks int            `json:"oast_callbacks"`
 	EndpointCount int            `json:"endpoint_count"`
+	TotalRequests int            `json:"total_requests"`
+	StartedAt     string         `json:"started_at,omitempty"`
+	FinishedAt    string         `json:"finished_at,omitempty"`
+	Duration      string         `json:"duration,omitempty"`
 }
 
 func (db *DB) DashboardMetrics(scanID string) (DashboardMetrics, error) {
@@ -741,7 +766,159 @@ func (db *DB) DashboardMetrics(scanID string) (DashboardMetrics, error) {
 	_ = db.conn.QueryRow(`SELECT COUNT(*) FROM evidence WHERE scan_id = ?`, scanID).Scan(&m.EvidenceCount)
 	_ = db.conn.QueryRow(`SELECT COUNT(*) FROM oast_callbacks WHERE scan_id = ?`, scanID).Scan(&m.OASTCallbacks)
 	_ = db.conn.QueryRow(`SELECT COUNT(*) FROM endpoints WHERE scan_id = ?`, scanID).Scan(&m.EndpointCount)
+
+	// Total Requests computation:
+	var reqRecs, obsCount, fuzzCount, scansReqs int
+	_ = db.conn.QueryRow(`SELECT COUNT(*) FROM request_records WHERE scan_id = ?`, scanID).Scan(&reqRecs)
+	_ = db.conn.QueryRow(`SELECT COUNT(*) FROM verification_observations WHERE scan_id = ?`, scanID).Scan(&obsCount)
+	_ = db.conn.QueryRow(`SELECT COUNT(*) FROM fuzz_results WHERE scan_id = ?`, scanID).Scan(&fuzzCount)
+	_ = db.conn.QueryRow(`SELECT COALESCE(requests_sent, 0) FROM scans WHERE id = ?`, scanID).Scan(&scansReqs)
+
+	totalRequests := reqRecs + obsCount + fuzzCount
+	if scansReqs > totalRequests {
+		totalRequests = scansReqs
+	}
+	if totalRequests == 0 && reqRecs > 0 {
+		totalRequests = reqRecs
+	}
+	m.TotalRequests = totalRequests
+
+	// Timestamps:
+	var scanStarted, scanCompleted, scanCreated, scanUpdated sql.NullString
+	_ = db.conn.QueryRow(`SELECT started_at, completed_at, created_at, updated_at FROM scans WHERE id = ?`, scanID).
+		Scan(&scanStarted, &scanCompleted, &scanCreated, &scanUpdated)
+
+	var minObs, maxObs sql.NullString
+	_ = db.conn.QueryRow(`SELECT MIN(created_at), MAX(created_at) FROM verification_observations WHERE scan_id = ?`, scanID).Scan(&minObs, &maxObs)
+
+	var minReq, maxReq sql.NullString
+	_ = db.conn.QueryRow(`SELECT MIN(created_at), MAX(created_at) FROM request_records WHERE scan_id = ?`, scanID).Scan(&minReq, &maxReq)
+
+	var minFuzz, maxFuzz sql.NullString
+	_ = db.conn.QueryRow(`SELECT MIN(created_at), MAX(created_at) FROM fuzz_results WHERE scan_id = ?`, scanID).Scan(&minFuzz, &maxFuzz)
+
+	var minFinding, maxFinding sql.NullString
+	_ = db.conn.QueryRow(`SELECT MIN(created_at), MAX(created_at) FROM findings WHERE scan_id = ?`, scanID).Scan(&minFinding, &maxFinding)
+
+	var minTimeline, maxTimeline sql.NullString
+	_ = db.conn.QueryRow(`SELECT MIN(created_at), MAX(created_at) FROM timeline_events WHERE scan_id = ?`, scanID).Scan(&minTimeline, &maxTimeline)
+
+	startTime := ""
+	if scanStarted.Valid && strings.TrimSpace(scanStarted.String) != "" {
+		startTime = scanStarted.String
+	} else {
+		startTime = pickEarliestTimestamp(scanCreated, minReq, minObs, minFuzz, minFinding, minTimeline)
+	}
+
+	endTime := ""
+	if scanCompleted.Valid && strings.TrimSpace(scanCompleted.String) != "" {
+		endTime = scanCompleted.String
+	} else {
+		endTime = pickLatestTimestamp(scanUpdated, maxReq, maxObs, maxFuzz, maxFinding, maxTimeline)
+	}
+
+	if startTime == "" {
+		startTime = time.Now().UTC().Format("2006-01-02 15:04:05")
+	}
+	if endTime == "" {
+		endTime = startTime
+	}
+
+	m.StartedAt = startTime
+	m.FinishedAt = endTime
+	m.Duration = calculateFormattedDuration(startTime, endTime)
+
 	return m, nil
+}
+
+func parseAnyTime(s string) (time.Time, bool) {
+	layouts := []string{
+		"2006-01-02 15:04:05",
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05.999999999Z07:00",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05 -0700 MST",
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false
+	}
+	for _, l := range layouts {
+		if t, err := time.Parse(l, s); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func pickEarliestTimestamp(values ...sql.NullString) string {
+	var earliest time.Time
+	var earliestStr string
+	for _, v := range values {
+		if !v.Valid || strings.TrimSpace(v.String) == "" {
+			continue
+		}
+		if t, ok := parseAnyTime(v.String); ok {
+			if earliest.IsZero() || t.Before(earliest) {
+				earliest = t
+				earliestStr = t.Format("2006-01-02 15:04:05")
+			}
+		}
+	}
+	return earliestStr
+}
+
+func pickLatestTimestamp(values ...sql.NullString) string {
+	var latest time.Time
+	var latestStr string
+	for _, v := range values {
+		if !v.Valid || strings.TrimSpace(v.String) == "" {
+			continue
+		}
+		if t, ok := parseAnyTime(v.String); ok {
+			if latest.IsZero() || t.After(latest) {
+				latest = t
+				latestStr = t.Format("2006-01-02 15:04:05")
+			}
+		}
+	}
+	return latestStr
+}
+
+func calculateFormattedDuration(startStr, endStr string) string {
+	t1, ok1 := parseAnyTime(startStr)
+	t2, ok2 := parseAnyTime(endStr)
+	if !ok1 || !ok2 || t2.Before(t1) {
+		return "< 1s"
+	}
+	diff := t2.Sub(t1)
+	if diff < time.Second {
+		return "< 1s"
+	}
+	diffSec := int64(diff.Seconds())
+	if diffSec < 60 {
+		return fmt.Sprintf("%ds", diffSec)
+	}
+	if diffSec < 3600 {
+		mins := diffSec / 60
+		secs := diffSec % 60
+		if secs == 0 {
+			return fmt.Sprintf("%dm", mins)
+		}
+		return fmt.Sprintf("%dm %ds", mins, secs)
+	}
+	hours := diffSec / 3600
+	mins := (diffSec % 3600) / 60
+	secs := diffSec % 60
+	if mins == 0 && secs == 0 {
+		return fmt.Sprintf("%dh", hours)
+	}
+	if secs == 0 {
+		return fmt.Sprintf("%dh %dm", hours, mins)
+	}
+	return fmt.Sprintf("%dh %dm %ds", hours, mins, secs)
 }
 
 func (db *DB) SearchFindings(scanID, query string, limit, offset int) ([]FindingRecord, error) {

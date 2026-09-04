@@ -86,7 +86,7 @@ func (e *Exporter) ExportSARIF(w io.Writer, opts Options) error {
 		Runs:    []sarifRun{{}},
 	}
 	run := &document.Runs[0]
-	run.Tool.Driver = sarifDriver{Name: "Akca", InformationURI: "https://github.com/"}
+	run.Tool.Driver = sarifDriver{Name: ProductName, InformationURI: "https://github.com/"}
 	ruleSeen := map[string]struct{}{}
 	filter := e.builder.Filter(opts)
 	err := e.builder.db.IterateFindingsFiltered(filter, func(rec storage.FindingRecord) error {
@@ -107,7 +107,7 @@ func (e *Exporter) ExportSARIF(w io.Writer, opts Options) error {
 			Properties: map[string]interface{}{
 				"confidence": entry.Confidence, "confidenceScore": entry.ConfidenceScore,
 				"proofType": entry.HTTPEvidence.ProofType, "proofPolicy": entry.HTTPEvidence.ProofPolicy,
-				"replayCommand": entry.ReplayCommand,
+				"replayCommand": entry.ReplayCommand, "cwe": entry.CWE, "owaspTop10_2025": entry.OWASPTop102025,
 			},
 		}
 		if entry.EndpointURL != "" {
@@ -189,6 +189,11 @@ func (e *Exporter) ExportHTML(w io.Writer, opts Options) error {
 			return err
 		}
 	}
+	if len(meta.PathDiscoveries) > 0 && opts.Template != TemplateExecutive {
+		if err := renderHTMLSection(w, "path-discovery", "Directory & Path Discovery", pathDiscoveryHTML(meta.PathDiscoveries)); err != nil {
+			return err
+		}
+	}
 	if opts.Template == TemplateAppendix {
 		e.emit(opts, "appendix", 90, 0)
 		if _, err := io.WriteString(w, `<section class="report-section"><h2>Appendix</h2><div class="card"><p>`+template.HTMLEscapeString(meta.AppendixNotes)+`</p></div></section>`); err != nil {
@@ -208,7 +213,8 @@ func (e *Exporter) streamFindingsHTML(w io.Writer, opts Options, kind TemplateKi
 		return err
 	}
 	filterControls := `<div class="filter-controls">
-		<input type="text" id="vulnSearch" placeholder="Search findings by title or class..." oninput="applyFilters()">
+		<input type="text" id="vulnSearch" placeholder="🔍 Search findings by title, endpoint, parameter, or vulnerability class..." oninput="applyFilters()">
+		<span id="filterStatus" class="filter-status">` + fmt.Sprintf("%d findings shown", total) + `</span>
 		<div class="filter-buttons">
 			<button class="filter-btn active" onclick="setSeverityFilter('all', this)">All</button>
 			<button class="filter-btn" data-sev="critical" onclick="setSeverityFilter('critical', this)">Critical</button>
@@ -216,6 +222,8 @@ func (e *Exporter) streamFindingsHTML(w io.Writer, opts Options, kind TemplateKi
 			<button class="filter-btn" data-sev="medium" onclick="setSeverityFilter('medium', this)">Medium</button>
 			<button class="filter-btn" data-sev="low" onclick="setSeverityFilter('low', this)">Low</button>
 			<button class="filter-btn" data-sev="info" onclick="setSeverityFilter('info', this)">Info</button>
+			<button class="filter-btn" onclick="toggleAllDetails(true)">📂 Expand All</button>
+			<button class="filter-btn" onclick="toggleAllDetails(false)">📁 Collapse All</button>
 		</div>
 	</div>`
 	if _, err := io.WriteString(w, `<section class="report-section"><h2>Findings</h2>`+filterControls+`<div class="findings-list">`); err != nil {
@@ -275,20 +283,21 @@ func (e *Exporter) ExportJSON(w io.Writer, opts Options) error {
 	e.emit(opts, "header", 10, 0)
 
 	type headerDoc struct {
-		SchemaVersion     string            `json:"schema_version"`
-		GeneratedAt       interface{}       `json:"generated_at"`
-		Template          TemplateKind      `json:"template"`
-		Format            Format            `json:"format"`
-		Partial           bool              `json:"partial"`
-		Title             string            `json:"title"`
-		Summary           string            `json:"summary"`
-		Scope             ScopeSection      `json:"scope"`
-		Metrics           interface{}       `json:"metrics"`
-		RootCauseGroups   interface{}       `json:"root_cause_groups,omitempty"`
-		APIKeyValidations []APIKeySection   `json:"api_key_validations,omitempty"`
-		TrafficEvidence   []TrafficEntry    `json:"traffic_evidence,omitempty"`
-		ManualLeads       []ManualLeadEntry `json:"manual_leads,omitempty"`
-		AppendixNotes     string            `json:"appendix_notes,omitempty"`
+		SchemaVersion     string               `json:"schema_version"`
+		GeneratedAt       interface{}          `json:"generated_at"`
+		Template          TemplateKind         `json:"template"`
+		Format            Format               `json:"format"`
+		Partial           bool                 `json:"partial"`
+		Title             string               `json:"title"`
+		Summary           string               `json:"summary"`
+		Scope             ScopeSection         `json:"scope"`
+		Metrics           interface{}          `json:"metrics"`
+		RootCauseGroups   interface{}          `json:"root_cause_groups,omitempty"`
+		APIKeyValidations []APIKeySection      `json:"api_key_validations,omitempty"`
+		TrafficEvidence   []TrafficEntry       `json:"traffic_evidence,omitempty"`
+		PathDiscoveries   []PathDiscoveryEntry `json:"path_discoveries,omitempty"`
+		ManualLeads       []ManualLeadEntry    `json:"manual_leads,omitempty"`
+		AppendixNotes     string               `json:"appendix_notes,omitempty"`
 	}
 	hdr := headerDoc{
 		SchemaVersion: meta.SchemaVersion,
@@ -297,6 +306,7 @@ func (e *Exporter) ExportJSON(w io.Writer, opts Options) error {
 		Metrics: meta.Metrics, RootCauseGroups: meta.RootCauseGroups,
 		APIKeyValidations: meta.APIKeyValidations, AppendixNotes: meta.AppendixNotes,
 		TrafficEvidence: meta.TrafficEvidence,
+		PathDiscoveries: meta.PathDiscoveries,
 		ManualLeads:     meta.ManualLeads,
 	}
 	hdrBytes, err := json.Marshal(hdr)
@@ -345,7 +355,7 @@ func (e *Exporter) ExportJSON(w io.Writer, opts Options) error {
 func (e *Exporter) ExportCSV(w io.Writer, opts Options) error {
 	cols := opts.CSVColumns
 	if len(cols) == 0 {
-		cols = []string{"id", "title", "severity", "confidence", "vuln_class", "endpoint_url", "parameter", "description"}
+		cols = []string{"id", "title", "severity", "confidence", "vuln_class", "cwe", "owasp_top_10_2025", "endpoint_url", "parameter", "description"}
 	}
 	cw := csv.NewWriter(w)
 	if err := cw.Write(cols); err != nil {
@@ -387,7 +397,24 @@ func (e *Exporter) ExportMarkdown(w io.Writer, opts Options) error {
 	if _, err := fmt.Fprintf(w, "# %s\n\n%s\n\n", meta.Title, meta.Summary); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "## Scope\n\nScan ID: `%s`\n\n", meta.Scope.ScanID); err != nil {
+	startedStr := meta.Metrics.StartedAt
+	if startedStr == "" {
+		startedStr = meta.GeneratedAt.Format("2006-01-02 15:04:05 UTC")
+	}
+	finishedStr := meta.Metrics.FinishedAt
+	if finishedStr == "" {
+		finishedStr = meta.GeneratedAt.Format("2006-01-02 15:04:05 UTC")
+	}
+	durationStr := meta.Metrics.Duration
+	if durationStr == "" {
+		durationStr = "< 1s"
+	}
+
+	if _, err := fmt.Fprintf(w, "## Scan Information\n\n- **Scan ID:** `%s`\n- **Started At:** %s\n- **Finished At:** %s\n- **Duration:** %s\n- **Total Requests / Probes Sent:** %d\n- **Report Generated:** %s\n\n",
+		meta.Scope.ScanID, startedStr, finishedStr, durationStr, meta.Metrics.TotalRequests, meta.GeneratedAt.Format("2006-01-02 15:04 UTC")); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "## Scope\n\n"); err != nil {
 		return err
 	}
 	for _, t := range meta.Scope.Targets {
@@ -435,6 +462,16 @@ func (e *Exporter) ExportMarkdown(w io.Writer, opts Options) error {
 			}
 		}
 	}
+	if err == nil && len(meta.PathDiscoveries) > 0 {
+		if _, writeErr := io.WriteString(w, "\n## Directory & Path Discovery\n\n"); writeErr != nil {
+			return writeErr
+		}
+		for _, entry := range meta.PathDiscoveries {
+			if _, writeErr := fmt.Fprintf(w, "- `%s %s` -> HTTP %d (%s)\n", entry.Method, entry.URL, entry.StatusCode, entry.Signal); writeErr != nil {
+				return writeErr
+			}
+		}
+	}
 	e.emit(opts, "footer", 100, written)
 	return err
 }
@@ -453,6 +490,10 @@ func csvRow(entry FindingEntry, cols []string) []string {
 			row[i] = entry.Confidence
 		case "vuln_class":
 			row[i] = entry.VulnClass
+		case "cwe":
+			row[i] = strings.Join(entry.CWE, "; ")
+		case "owasp_top_10_2025":
+			row[i] = strings.Join(entry.OWASPTop102025, "; ")
 		case "endpoint_url":
 			row[i] = entry.EndpointURL
 		case "parameter":

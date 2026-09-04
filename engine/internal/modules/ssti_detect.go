@@ -141,6 +141,19 @@ func bodyDiffRatio(a, b string) float64 {
 // is (len(a)+len(b)-distance)/2.
 func myersInsertDeleteDistance(a, b string) int {
 	n, m := len(a), len(b)
+	// Cap input to prevent O(D²) blowup on very large response diffs.
+	// The prefix/suffix trimming in bodyDiffRatio already removes equal
+	// edges, so the middle section is typically small. For the rare case
+	// where it isn't, truncation gives a good-enough approximation.
+	const maxLen = 10000
+	if n > maxLen {
+		a = a[:maxLen]
+		n = maxLen
+	}
+	if m > maxLen {
+		b = b[:maxLen]
+		m = maxLen
+	}
 	if n == 0 {
 		return m
 	}
