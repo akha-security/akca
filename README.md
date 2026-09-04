@@ -1,5 +1,6 @@
+<p align="center">
 # AKCA Advanced Web Security Scanner
-
+</p>
 <p align="center">
   <strong>Evidence-driven dynamic application security testing, built in Go.</strong><br>
   Discover the real attack surface. Verify the behavior. Report the evidence.
