@@ -516,8 +516,8 @@ func printHelpSection(title string, entries []helpEntry) {
 func printShortUsage() {
 	printCompactBanner()
 	fmt.Fprintf(os.Stderr, "\n%sUSAGE%s\n", bLavender, rst)
-	fmt.Fprintf(os.Stderr, "  %sakca scan -u <url> [options]%s\n", bCloud, rst)
-	fmt.Fprintf(os.Stderr, "  %sakca scan -d <domain> [options]%s\n", bCloud, rst)
+	fmt.Fprintf(os.Stderr, "  %sakca -u <url> [options]%s\n", bCloud, rst)
+	fmt.Fprintf(os.Stderr, "  %sakca -d <domain> [options]%s\n", bCloud, rst)
 	fmt.Fprintf(os.Stderr, "  %sakca <url> [options]%s\n\n", bCloud, rst)
 
 	printHelpSection("Core options", []helpEntry{
@@ -536,8 +536,8 @@ func printShortUsage() {
 	})
 
 	fmt.Fprintf(os.Stderr, "%sExamples%s\n", bLavender, rst)
-	fmt.Fprintf(os.Stderr, "  %sakca scan -u https://example.com -m sql,xss%s\n", cSilver, rst)
-	fmt.Fprintf(os.Stderr, "  %sakca scan -d example.com -m passive -v%s\n", cSilver, rst)
+	fmt.Fprintf(os.Stderr, "  %sakca -u https://example.com -m sql,xss%s\n", cSilver, rst)
+	fmt.Fprintf(os.Stderr, "  %sakca -d example.com -m passive -v%s\n", cSilver, rst)
 	fmt.Fprintf(os.Stderr, "  %sakca replay --finding 42%s\n\n", cSilver, rst)
 	fmt.Fprintf(os.Stderr, "%sUse 'akca --help' for every scan budget and advanced option.%s\n\n", cSlate, rst)
 }
@@ -550,8 +550,8 @@ func printDetailedUsage() {
 	}
 
 	fmt.Fprintf(os.Stderr, "%sUSAGE%s\n", bLavender, rst)
-	fmt.Fprintf(os.Stderr, "  %sakca scan -u <url> [options]%s\n", bCloud, rst)
-	fmt.Fprintf(os.Stderr, "  %sakca scan -d <domain> [options]%s\n", bCloud, rst)
+	fmt.Fprintf(os.Stderr, "  %sakca -u <url> [options]%s\n", bCloud, rst)
+	fmt.Fprintf(os.Stderr, "  %sakca -d <domain> [options]%s\n", bCloud, rst)
 	fmt.Fprintf(os.Stderr, "  %sakca <url> [options]%s\n\n", bCloud, rst)
 
 	printHelpSection("Target and authentication", []helpEntry{
@@ -616,7 +616,6 @@ func printDetailedUsage() {
 	})
 
 	printHelpSection("Commands", []helpEntry{
-		{"scan", "Start a scan; optional for backward compatibility"},
 		{"replay --finding <id>", "Replay and re-verify stored evidence"},
 		{"benchmark [--strict]", "Run the observed quality gate benchmark"},
 		{"help", "Print this command reference"},
@@ -624,7 +623,7 @@ func printDetailedUsage() {
 	})
 
 	printHelpSection("Examples", []helpEntry{
-		{"akca scan -u https://target.test", "Full assessment"},
+		{"akca -u https://target.test", "Full assessment"},
 		{"akca -u https://target.test -m sql,xss", "Combined injection modes"},
 		{"akca -d example.com -m passive -v", "Verbose passive domain reconnaissance"},
 		{"akca -u target.test -p http://127.0.0.1:8080 -k", "Proxy-routed test"},

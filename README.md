@@ -131,7 +131,7 @@ Release binaries, when published, are available from
 
 ```bash
 # Full scan
-./akca scan -u https://staging.example.com
+./akca -u https://staging.example.com
 
 # Focused SQL/NoSQL injection scan
 ./akca -u https://staging.example.com -m sql
