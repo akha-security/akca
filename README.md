@@ -1,4 +1,5 @@
 # AKCA Advanced Web Security Scanner
+<img width="2172" height="724" alt="banner" src="https://github.com/user-attachments/assets/aa8571ac-4c65-44a6-b723-abe53450e8bf" />
 
 <p align="center">
   <strong>Evidence-driven dynamic application security testing, built in Go.</strong><br>
