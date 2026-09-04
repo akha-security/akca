@@ -1,5 +1,4 @@
-<p align="center">
-# AKCA Advanced Web Security Scanner
+<p align="center"> AKCA Advanced Web Security Scanner
 </p>
 <p align="center">
   <strong>Evidence-driven dynamic application security testing, built in Go.</strong><br>
