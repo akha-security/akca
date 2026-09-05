@@ -163,7 +163,11 @@ AKCA's noise controls are evidence checks—not censorship controls:
 - Version-bound CVE matching; unknown versions do not become CVE findings
 
 WAF intelligence can reduce concurrency or reorder payloads, but it does not
-remove vulnerability classes from the scanner.
+remove vulnerability classes from the scanner. Furthermore, when a WAF is identified
+(Cloudflare, AWS WAF, Akamai, Imperva, ModSecurity, etc.), AKCA automatically derives
+vendor-adapted payload mutations using intelligent encoding strategies—such as URL / double-URL
+encoding, Unicode NFKC normalization, comment-splitting, case alternation, and HTML entity
+transformations—to ensure vulnerabilities are not hidden behind superficial payload filtering.
 
 Recent hardening also reduced unnecessary work without narrowing the detector
 set: request-smuggling controls are reused per route, unsupported HTTP/2 ALPN is

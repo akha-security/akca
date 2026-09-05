@@ -36,6 +36,10 @@ and stores the evidence used to reach its decision.
   WSDL, GraphQL, protobuf, and AsyncAPI definitions—including POST request bodies.
 - **False-positive resistance without disabling capabilities.** WAF awareness
   changes pacing and payload ordering; it does not silently remove scan modules.
+  When a WAF is detected (Cloudflare, AWS WAF, Akamai, ModSecurity, Imperva, etc.),
+  AKCA automatically generates vendor-tailored bypass mutations (URL/double-URL encoding,
+  Unicode NFKC normalization, comment-splitting, case-mixing, IFS substitution, and HTML entities)
+  to test whether security controls remain effective against obfuscated variants.
 - **Operationally useful output.** SQLite checkpoints, scan resume, finding replay,
   root-cause grouping, redaction, and HTML/JSON/Markdown/CSV/SARIF reports.
 - **A broad security surface.** The current module catalog registers 80+ checks
