@@ -148,3 +148,35 @@ func TestFalsePositiveRegressionFromClientJS(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenAIAndOktaFalsePositiveRegressions(t *testing.T) {
+	fpSamples := []string{
+		`sk-8030-kablosuz-cam-govde-su-isitici-sk-7338-p-367682`,
+		`000-adet-nostalji-oyun-3-5inc-ipsekran-mp3`,
+		`000000000000000000000000000000000000000000`,
+		`sk-something-short`,
+	}
+	for _, sample := range fpSamples {
+		matches := Detect(sample)
+		for _, m := range matches {
+			if m.Kind == "openai_key" || m.Kind == "okta_api_token" {
+				t.Fatalf("false positive detected for %q: kind=%s value=%s", sample, m.Kind, m.Value)
+			}
+		}
+	}
+
+	// Valid Okta token: 00 + 40 mixed-case base62 high-entropy chars
+	validOkta := "00aB3dE5gH7jK9mN1pQ3rS5tU7vW9xY1zA2bC4dE6f"
+	matches := Detect("auth = \"" + validOkta + "\"")
+	foundOkta := false
+	for _, m := range matches {
+		if m.Kind == "okta_api_token" {
+			foundOkta = true
+			break
+		}
+	}
+	if !foundOkta {
+		t.Fatalf("expected genuine okta_api_token to be detected in %q, got %+v", validOkta, matches)
+	}
+}
+

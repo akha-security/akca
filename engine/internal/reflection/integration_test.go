@@ -105,3 +105,41 @@ func TestAnalyzerUsesPOSTForFormReflection(t *testing.T) {
 		t.Fatalf("profile location = %q, want form", profile.ParameterLocation)
 	}
 }
+
+type noReflectionDoer struct {
+	requestCount int
+}
+
+func (r *noReflectionDoer) Do(_ context.Context, _, rawURL string, _ []byte, _ map[string]string) (httpclient.RequestResponse, error) {
+	r.requestCount++
+	return httpclient.RequestResponse{
+		Request:  httpclient.RequestRecord{URL: rawURL},
+		Response: httpclient.ResponseRecord{StatusCode: 200, Body: "<html><body>Welcome! No canary here</body></html>", Headers: map[string]string{"Content-Type": "text/html"}},
+	}, nil
+}
+
+func TestAnalyzerSkipsReprobeOnNoReflection(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	client := &noReflectionDoer{}
+	analyzer := NewAnalyzer(
+		"scan-norefl", client, scope.NewEngine(cfg), nil,
+		func(string, string, map[string]interface{}) error { return nil },
+	)
+
+	profile, err := analyzer.AnalyzeParameter(
+		context.Background(), "http://example.com/search", http.MethodGet, "q", "query",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.requestCount != 1 {
+		t.Fatalf("expected exactly 1 request when no reflection is observed, got %d", client.requestCount)
+	}
+	if profile.ReflectionKind != ReflectionRemoved {
+		t.Fatalf("expected ReflectionRemoved, got %s", profile.ReflectionKind)
+	}
+	if profile.Stable {
+		t.Fatal("expected Stable to be false when unreflected")
+	}
+}
+

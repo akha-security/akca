@@ -264,3 +264,53 @@ func (c *activeDynamicClient) Do(_ context.Context, method, rawURL string, _ []b
 		Response: resp,
 	}, nil
 }
+
+func TestAPIVersioningRedirectAndHTMLRejection(t *testing.T) {
+	c := &activeDynamicClient{
+		handler: func(method, rawURL string, headers map[string]string) httpclient.ResponseRecord {
+			switch {
+			case strings.HasSuffix(rawURL, "/api/v1"):
+				// Genuine API version returning JSON
+				return httpclient.ResponseRecord{
+					StatusCode: 200,
+					Body:       `{"status":"ok","version":"1.0","routes":["/users","/items"]}`,
+					Headers:    map[string]string{"Content-Type": "application/json"},
+				}
+			case strings.HasSuffix(rawURL, "/v1"):
+				// Simulates 302 redirect to /login which returned 200 HTML
+				return httpclient.ResponseRecord{
+					StatusCode:    200,
+					InitialStatus: 302,
+					Redirected:    true,
+					FinalURL:      "https://example.com/login",
+					Body:          "<!DOCTYPE html><html><body>Login Page</body></html>",
+					Headers:       map[string]string{"Content-Type": "text/html"},
+				}
+			case strings.HasSuffix(rawURL, "/v2"):
+				// Direct 200 but HTML SPA landing / custom 404
+				return httpclient.ResponseRecord{
+					StatusCode: 200,
+					Body:       "<html><head><title>App</title></head><body>SPA Root</body></html>",
+					Headers:    map[string]string{"Content-Type": "text/html; charset=utf-8"},
+				}
+			default:
+				return httpclient.ResponseRecord{StatusCode: 404, Body: "not found"}
+			}
+		},
+	}
+
+	cfg := config.DefaultScanConfig()
+	cfg.EnableInformationalChecks = true
+	cfg.IncludeDomains = []string{"example.com"}
+	r := NewRunner("scan-active-test", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
+	target := ScanTarget{EndpointURL: "https://example.com", Method: "GET"}
+	findings := r.runAPIVersioning(context.Background(), target)
+
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 API versioning finding (/api/v1), got %d: %+v", len(findings), findings)
+	}
+	if findings[0].Evidence.Payload.Value != "/api/v1" {
+		t.Fatalf("expected finding for /api/v1, got %s", findings[0].Evidence.Payload.Value)
+	}
+}
+

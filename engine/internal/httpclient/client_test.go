@@ -284,3 +284,46 @@ func TestWAFBypassHeadersDefaultOnAndCanBeDisabled(t *testing.T) {
 		t.Fatalf("explicitly enabled WAF evasion should add bypass headers: %v", got)
 	}
 }
+
+func TestHTTPClientRedirectTracking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1" {
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+		if r.URL.Path == "/login" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html><body>Login Page</body></html>"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	cfg := config.DefaultScanConfig()
+	cfg.FollowRedirects = true
+	cfg.IncludeDomains = []string{srv.URL}
+	scopeEngine := scope.NewEngine(cfg)
+	client, err := New(cfg, scopeEngine, ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr, err := client.Do(context.Background(), "GET", srv.URL+"/v1", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rr.Response.Redirected {
+		t.Fatal("expected Redirected to be true")
+	}
+	if rr.Response.InitialStatus != 302 {
+		t.Fatalf("expected InitialStatus = 302, got %d", rr.Response.InitialStatus)
+	}
+	if rr.Response.StatusCode != 200 {
+		t.Fatalf("expected final StatusCode = 200, got %d", rr.Response.StatusCode)
+	}
+	if !strings.HasSuffix(rr.Response.FinalURL, "/login") {
+		t.Fatalf("expected FinalURL to end with /login, got %s", rr.Response.FinalURL)
+	}
+}
+

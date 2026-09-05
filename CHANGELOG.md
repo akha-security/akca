@@ -5,6 +5,23 @@ All notable changes to AKCA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] - 2026-09-05
+
+### Fixed
+
+- **Secret Scan False Positives**:
+  - Tightened OpenAI API key detection: classic keys (`sk-`) now strictly require alphanumeric base62 strings without hyphens (`sk-[A-Za-z0-9]{32,64}`), and `Detect()` enforces entropy/character diversity filters. Model numbers and kebab-case product slugs (e.g. `sk-8030-...`) are no longer flagged.
+  - Corrected Okta API token pattern: removed hyphens and underscores (`00[A-Za-z0-9]{40}`) and added entropy and character complexity checks to prevent false alarms on e-commerce slugs (e.g. `000-adet-nostalji-...`) and repeated zero sequences.
+- **API Versioning Redirect False Positives**:
+  - HTTP client now records redirect telemetry (`Redirected`, `FinalURL`, `InitialStatus`).
+  - `api_versioning` module rejects responses that resulted from 302/3xx redirects to different endpoints (such as `/login` or root `/`) as well as HTML responses (`<html`, `<!doctype`).
+
+### Optimized
+
+- **Reflection Analysis Performance**:
+  - Skipped redundant stability reprobe requests (`rr2`) when no canary reflection is observed (`ReflectionRemoved`), cutting HTTP requests by up to ~50% across targets.
+  - Implemented concurrent worker pool in `Analyzer.Run()` with configurable concurrency (tied to `MaxConcurrency`), drastically reducing reflection phase execution time.
+
 ## [0.1.2] - 2026-09-05
 
 ### Added

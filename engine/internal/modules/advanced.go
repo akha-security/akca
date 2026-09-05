@@ -391,6 +391,22 @@ func (r *Runner) runAPIVersioning(ctx context.Context, target ScanTarget) []Modu
 		if err != nil || rr.Response.StatusCode != 200 {
 			continue
 		}
+		// If the response was redirected (e.g. 302 to login or root page) and is not
+		// simply a trailing slash canonicalization of the version path, reject it.
+		if rr.Response.Redirected {
+			if rr.Response.InitialStatus >= 300 && rr.Response.InitialStatus <= 308 {
+				finalClean := strings.TrimRight(rr.Response.FinalURL, "/")
+				origClean := strings.TrimRight(u, "/")
+				if finalClean != origClean {
+					continue
+				}
+			}
+		}
+		// Reject HTML web pages (login pages, custom 404s, SPA entrypoints)
+		lowerBody := strings.ToLower(rr.Response.Body)
+		if strings.Contains(lowerBody, "<!doctype") || strings.Contains(lowerBody, "<html") {
+			continue
+		}
 		p := defaultPayload("api_versioning", "version_discovered", version, "version_discovered")
 		f := r.verifyAndBuild(ctx, "api_versioning", target, p, baseline, rr, "version_discovered", false, false, "", "")
 		r.recordFinding(ctx, &out, f, "api_versioning", "version_discovered")

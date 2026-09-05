@@ -12,6 +12,9 @@ func (e *Engine) runReflectionPayloadPhase(ctx context.Context) error {
 	_ = e.Emit("phase_started", "reflection and payload generation", map[string]interface{}{"phase": "reflection"})
 
 	ra := reflection.NewAnalyzer(e.session.ID, e.client, e.scope, e.db, e.Emit)
+	if e.session.Config.MaxConcurrency > 0 {
+		ra.SetConcurrency(e.session.Config.MaxConcurrency)
+	}
 	limit := e.session.Config.ReflectionProfileLimit()
 	ra.SetMaxParams(limit)
 	if e.session.Config.RequestBudget > 0 && (limit <= 0 || e.session.Config.RequestBudget < limit) {

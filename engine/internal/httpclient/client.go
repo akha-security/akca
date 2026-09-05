@@ -33,6 +33,9 @@ type ResponseRecord struct {
 	Body          string            `json:"body,omitempty"`
 	BodyTruncated bool              `json:"body_truncated,omitempty"`
 	Duration      time.Duration     `json:"duration"`
+	FinalURL      string            `json:"final_url,omitempty"`
+	Redirected    bool              `json:"redirected,omitempty"`
+	InitialStatus int               `json:"initial_status,omitempty"`
 }
 
 type RequestResponse struct {
@@ -326,6 +329,25 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 		bodyTruncated = true
 	}
 
+	redirected := false
+	initialStatus := resp.StatusCode
+	finalURL := rawURL
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL.String()
+	}
+	if resp.Request != nil && resp.Request.Response != nil {
+		redirected = true
+		cur := resp.Request.Response
+		for cur != nil {
+			initialStatus = cur.StatusCode
+			if cur.Request != nil && cur.Request.Response != nil {
+				cur = cur.Request.Response
+			} else {
+				break
+			}
+		}
+	}
+
 	requestHeaders := cloneHeaders(req.Header)
 	if req.Host != "" && !strings.EqualFold(req.Host, req.URL.Host) {
 		requestHeaders["Host"] = req.Host
@@ -343,6 +365,9 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 			Body:          string(respBody),
 			BodyTruncated: bodyTruncated,
 			Duration:      time.Since(start),
+			FinalURL:      finalURL,
+			Redirected:    redirected,
+			InitialStatus: initialStatus,
 		},
 	}
 	return rr, nil

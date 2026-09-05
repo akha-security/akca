@@ -84,7 +84,7 @@ var patterns = []pattern{
 	{kind: "postmark_token", re: regexp.MustCompile(`(?i)postmark[a-z_ \-]*\s*[:=]\s*["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']`), confidence: 0.7, valueGroup: 1},
 	{kind: "twilio_account_sid", re: regexp.MustCompile(`\bAC[0-9a-fA-F]{32}\b`), confidence: 0.7},
 	{kind: "twilio_api_key", re: regexp.MustCompile(`\bSK[0-9a-fA-F]{32}\b`), confidence: 0.7},
-	{kind: "openai_key", re: regexp.MustCompile(`\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_\-]{20,}\b`), confidence: 0.8},
+	{kind: "openai_key", re: regexp.MustCompile(`\bsk-(?:(?:proj-|svcacct-|admin-)[A-Za-z0-9_\-]{30,}|[A-Za-z0-9]{32,64})\b`), confidence: 0.8},
 	{kind: "anthropic_key", re: regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_\-]{20,}\b`), confidence: 0.85},
 	{kind: "huggingface_token", re: regexp.MustCompile(`\bhf_[A-Za-z0-9]{30,}\b`), confidence: 0.8},
 	{kind: "mapbox_token", re: regexp.MustCompile(`\b(?:pk|sk)\.eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}`), confidence: 0.7},
@@ -103,7 +103,7 @@ var patterns = []pattern{
 	{kind: "groq_api_key", re: regexp.MustCompile(`\bgsk_[a-zA-Z0-9]{52}\b`), confidence: 0.9},
 	{kind: "perplexity_api_key", re: regexp.MustCompile(`\bpplx-[a-f0-9]{48}\b`), confidence: 0.9},
 	{kind: "replicate_api_token", re: regexp.MustCompile(`\br8_[A-Za-z0-9]{37}\b`), confidence: 0.9},
-	{kind: "okta_api_token", re: regexp.MustCompile(`\b00[A-Za-z0-9_\-]{40}\b`), confidence: 0.85},
+	{kind: "okta_api_token", re: regexp.MustCompile(`\b00[A-Za-z0-9]{40}\b`), confidence: 0.85},
 	{kind: "doppler_token", re: regexp.MustCompile(`\bdp\.st\.[a-z0-9_\-]{40,}\b`), confidence: 0.9},
 	{kind: "postman_api_key", re: regexp.MustCompile(`\bPMAK-[a-f0-9]{24}-[a-f0-9]{34}\b`), confidence: 0.9},
 	{kind: "tailscale_auth_key", re: regexp.MustCompile(`\btskey-auth-[A-Za-z0-9_\-]{30,}\b`), confidence: 0.9},
@@ -181,6 +181,24 @@ func Detect(content string) []Match {
 					if strings.Contains(tokenBody, "_") || !hasDigits(tokenBody) || !hasLowerAndUpper(tokenBody) || shannonEntropy(tokenBody) < 3.3 {
 						continue
 					}
+				}
+			}
+			if p.kind == "openai_key" {
+				body := raw[3:]
+				for _, pfx := range []string{"proj-", "svcacct-", "admin-"} {
+					if strings.HasPrefix(body, pfx) {
+						body = body[len(pfx):]
+						break
+					}
+				}
+				if !hasDigits(body) || (!hasLowerAndUpper(body) && shannonEntropy(body) < 3.2) || shannonEntropy(body) < 2.8 {
+					continue
+				}
+			}
+			if p.kind == "okta_api_token" {
+				tokenBody := raw[2:]
+				if !hasDigits(tokenBody) || !hasLowerAndUpper(tokenBody) || shannonEntropy(tokenBody) < 3.2 {
+					continue
 				}
 			}
 			if p.generic {

@@ -18,24 +18,31 @@ type HTTPDoer interface {
 }
 
 type Analyzer struct {
-	scanID    string
-	client    HTTPDoer
-	scope     *scope.Engine
-	db        *storage.DB
-	emit      EventSink
-	maxParams int
-	mu        sync.Mutex
+	scanID      string
+	client      HTTPDoer
+	scope       *scope.Engine
+	db          *storage.DB
+	emit        EventSink
+	maxParams   int
+	concurrency int
+	mu          sync.Mutex
 }
 
 func NewAnalyzer(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *storage.DB, emit EventSink) *Analyzer {
 	return &Analyzer{
 		scanID: scanID, client: client, scope: scopeEngine, db: db, emit: emit,
-		maxParams: 0,
+		maxParams: 0, concurrency: 6,
 	}
 }
 
 func (a *Analyzer) SetMaxParams(n int) {
 	a.maxParams = n
+}
+
+func (a *Analyzer) SetConcurrency(n int) {
+	if n > 0 {
+		a.concurrency = n
+	}
 }
 
 func (a *Analyzer) Run(ctx context.Context, limit int) ([]ReflectionProfile, error) {
@@ -50,27 +57,67 @@ func (a *Analyzer) Run(ctx context.Context, limit int) ([]ReflectionProfile, err
 		return nil, err
 	}
 
-	var profiles []ReflectionProfile
+	var validTargets []storage.ParameterTarget
 	for _, target := range params {
-		if !a.scope.IsInScope(target.EndpointURL) {
-			continue
+		if a.scope.IsInScope(target.EndpointURL) {
+			validTargets = append(validTargets, target)
 		}
-		profile, err := a.AnalyzeParameterWithTemplate(ctx, RequestTemplate{
-			Method: target.Method, URL: target.EndpointURL, Headers: target.Headers,
-			Body: target.BodyTemplate, ContentType: target.ContentType,
-		}, target.Parameter, target.Location)
-		if err != nil {
-			continue
-		}
-		profiles = append(profiles, profile)
-		if err := a.db.SaveReflectionProfileContext(ctx, a.scanID, profile); err != nil {
-			return nil, fmt.Errorf("save reflection profile for %s (%s): %w",
-				profile.EndpointURL, profile.Parameter, err)
-		}
-		_ = a.emit("reflection_analyzed", profile.Parameter, map[string]interface{}{
-			"scan_id": a.scanID, "profile": profile,
-		})
 	}
+
+	if len(validTargets) == 0 {
+		_ = a.emit("reflection_finished", "reflection analysis finished", map[string]interface{}{
+			"scan_id": a.scanID, "count": 0,
+		})
+		return nil, nil
+	}
+
+	concurrency := a.concurrency
+	if concurrency <= 0 {
+		concurrency = 6
+	}
+	if concurrency > len(validTargets) {
+		concurrency = len(validTargets)
+	}
+
+	jobs := make(chan storage.ParameterTarget, len(validTargets))
+	for _, t := range validTargets {
+		jobs <- t
+	}
+	close(jobs)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var profiles []ReflectionProfile
+
+	for w := 0; w < concurrency; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for target := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				profile, err := a.AnalyzeParameterWithTemplate(ctx, RequestTemplate{
+					Method: target.Method, URL: target.EndpointURL, Headers: target.Headers,
+					Body: target.BodyTemplate, ContentType: target.ContentType,
+				}, target.Parameter, target.Location)
+				if err != nil {
+					continue
+				}
+				if a.db != nil {
+					_ = a.db.SaveReflectionProfileContext(ctx, a.scanID, profile)
+				}
+				mu.Lock()
+				profiles = append(profiles, profile)
+				mu.Unlock()
+				_ = a.emit("reflection_analyzed", profile.Parameter, map[string]interface{}{
+					"scan_id": a.scanID, "profile": profile,
+				})
+			}
+		}()
+	}
+	wg.Wait()
+
 	_ = a.emit("reflection_finished", "reflection analysis finished", map[string]interface{}{
 		"scan_id": a.scanID, "count": len(profiles),
 	})
@@ -125,13 +172,16 @@ func (a *Analyzer) AnalyzeParameterWithTemplate(ctx context.Context, template Re
 		}
 	}
 
-	rr2, err := a.client.Do(ctx, probe.Method, probe.URL, probe.Body, probe.Headers)
-	stable := err == nil &&
-		ClassifyReflectionKind(rr2.Response.Body, canary) == kind &&
-		func() bool {
-			ctx2, _ := ClassifyContext(rr2.Response.Body, canary, responseContentType)
-			return ctx2 == ctxType
-		}()
+	var stable bool
+	if kind != ReflectionRemoved {
+		rr2, err := a.client.Do(ctx, probe.Method, probe.URL, probe.Body, probe.Headers)
+		stable = err == nil &&
+			ClassifyReflectionKind(rr2.Response.Body, canary) == kind &&
+			func() bool {
+				ctx2, _ := ClassifyContext(rr2.Response.Body, canary, responseContentType)
+				return ctx2 == ctxType
+			}()
+	}
 
 	profile := ReflectionProfile{
 		ScanID: a.scanID, EndpointURL: template.URL, Method: probe.Method,
