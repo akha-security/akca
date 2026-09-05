@@ -5,6 +5,15 @@ All notable changes to AKCA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] - 2026-09-05
+
+### Added
+
+- **Dynamic Character Pre-flight Matrix**: Calibration phase now probes critical syntactic characters (`'`, `"`, `<`, `;`, `|`) to map blocked characters and dynamically discover successful bypass encodings per WAF.
+- **Context-Aware WAF Mutations**: Adapted mutations now respect reflection context (JSON, JavaScript, HTML attributes, XML), preventing parser syntax breakdown and avoiding false negatives.
+- **Paired Mutated Negative Controls**: Every WAF-adapted offensive payload is paired with an identically encoded negative control to eliminate false positives caused by unparsed garbage input.
+- **Character Block-Aware Payload Ranking**: Payload scoring now rewards encodings that conceal WAF-blocked characters and penalizes unencoded blocked tokens under budget constraints.
+
 ## [0.1.1] - 2026-09-05
 
 ### Fixed
