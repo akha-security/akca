@@ -189,61 +189,107 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 	}
 
 	// Phase 1: Fast single-probe pass across all candidates so all wordlist items (url, category, webhook, etc.) get tested
+	// Run probes concurrently using a worker pool to avoid sequential HTTP latency bottleneck.
 	jsonPotentialHits := map[string]struct{}{}
-	for _, candidate := range wordlist {
-		if (d.maxProbes > 0 && probes >= d.maxProbes) || (d.maxHits > 0 && len(confirmedHits) >= d.maxHits) {
-			break
-		}
+	var hitMu sync.Mutex
 
-		if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
-			// GET query probe matched against GET baseline
-			if probeURL, body := buildCustomQueryProbe(requestURL, candidate, "akca_probe"); d.scope.IsInScope(probeURL) {
-				if rr, perr := d.client.Do(ctx, http.MethodGet, probeURL, body, requestHeaders); perr == nil {
-					probes++
-					fp := Fingerprint(rr.Response.StatusCode, rr.Response.Body, rr.Response.Duration.Milliseconds(), rr.Response.Headers)
-					baseFP, baseOK := baselines["GET"]
-					if !baseOK {
-						baseFP = Fingerprint(baselineRR.Response.StatusCode, baselineRR.Response.Body, baselineRR.Response.Duration.Milliseconds(), baselineRR.Response.Headers)
-					}
-					baseBody := baselineBodies["GET"]
-					if baseBody == "" {
-						baseBody = baselineRR.Response.Body
-					}
-					if isParameterHitWithControl(baseFP, fp, randCtrlFP, baseBody, rr.Response.Body, randCtrlBody,
-						candidate, randParam, "akca_probe", isDynamic, noiseThreshold) {
-						recordHit(candidate, "query")
+	workerCount := d.parallelism
+	if workerCount <= 0 {
+		workerCount = 8
+	}
+	if workerCount > 10 {
+		workerCount = 10
+	}
+
+	type candidateTask struct {
+		candidate string
+	}
+	tasks := make(chan candidateTask, len(wordlist))
+	for _, c := range wordlist {
+		tasks <- candidateTask{candidate: c}
+	}
+	close(tasks)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workerCount; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for t := range tasks {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				hitMu.Lock()
+				if (d.maxProbes > 0 && probes >= d.maxProbes) || (d.maxHits > 0 && len(confirmedHits) >= d.maxHits) {
+					hitMu.Unlock()
+					return
+				}
+				hitMu.Unlock()
+
+				cand := t.candidate
+				if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
+					// GET query probe matched against GET baseline
+					if probeURL, body := buildCustomQueryProbe(requestURL, cand, "akca_probe"); d.scope.IsInScope(probeURL) {
+						if rr, perr := d.client.Do(ctx, http.MethodGet, probeURL, body, requestHeaders); perr == nil {
+							fp := Fingerprint(rr.Response.StatusCode, rr.Response.Body, rr.Response.Duration.Milliseconds(), rr.Response.Headers)
+							baseFP, baseOK := baselines["GET"]
+							if !baseOK {
+								baseFP = Fingerprint(baselineRR.Response.StatusCode, baselineRR.Response.Body, baselineRR.Response.Duration.Milliseconds(), baselineRR.Response.Headers)
+							}
+							baseBody := baselineBodies["GET"]
+							if baseBody == "" {
+								baseBody = baselineRR.Response.Body
+							}
+							isHit := isParameterHitWithControl(baseFP, fp, randCtrlFP, baseBody, rr.Response.Body, randCtrlBody,
+								cand, randParam, "akca_probe", isDynamic, noiseThreshold)
+
+							hitMu.Lock()
+							probes++
+							if isHit {
+								recordHit(cand, "query")
+							}
+							hitMu.Unlock()
+						}
 					}
 				}
-			}
-		}
 
-		// Mutate the captured native body while preserving the original method,
-		// headers and sibling fields. This keeps authenticated/API requests valid.
-		if method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch {
-			if body, location, ok := mutateNativeBody(template, candidate, "akca_probe"); ok && d.scope.IsInScope(requestURL) {
-				headers := bodyProbeHeaders(requestHeaders, location)
-				if rr, perr := d.client.Do(ctx, method, requestURL, body, headers); perr == nil {
-					probes++
-					fp := Fingerprint(rr.Response.StatusCode, rr.Response.Body, rr.Response.Duration.Milliseconds(), rr.Response.Headers)
-					baseFP, baseOK := baselines[method+"_native"]
-					if !baseOK {
-						baseFP = Fingerprint(baselineRR.Response.StatusCode, baselineRR.Response.Body, baselineRR.Response.Duration.Milliseconds(), baselineRR.Response.Headers)
-					}
-					baseBody := baselineBodies[method+"_native"]
-					if baseBody == "" {
-						baseBody = baselineRR.Response.Body
-					}
-					if isParameterHitWithControl(baseFP, fp, randCtrlFP, baseBody, rr.Response.Body, randCtrlBody,
-						candidate, randParam, "akca_probe", isDynamic, noiseThreshold) {
-						recordHit(candidate, string(location))
-						if location == LocationJSON {
-							jsonPotentialHits[candidate] = struct{}{}
+				// Mutate the captured native body while preserving the original method,
+				// headers and sibling fields. This keeps authenticated/API requests valid.
+				if method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch {
+					if body, location, ok := mutateNativeBody(template, cand, "akca_probe"); ok && d.scope.IsInScope(requestURL) {
+						headers := bodyProbeHeaders(requestHeaders, location)
+						if rr, perr := d.client.Do(ctx, method, requestURL, body, headers); perr == nil {
+							fp := Fingerprint(rr.Response.StatusCode, rr.Response.Body, rr.Response.Duration.Milliseconds(), rr.Response.Headers)
+							baseFP, baseOK := baselines[method+"_native"]
+							if !baseOK {
+								baseFP = Fingerprint(baselineRR.Response.StatusCode, baselineRR.Response.Body, baselineRR.Response.Duration.Milliseconds(), baselineRR.Response.Headers)
+							}
+							baseBody := baselineBodies[method+"_native"]
+							if baseBody == "" {
+								baseBody = baselineRR.Response.Body
+							}
+							isHit := isParameterHitWithControl(baseFP, fp, randCtrlFP, baseBody, rr.Response.Body, randCtrlBody,
+								cand, randParam, "akca_probe", isDynamic, noiseThreshold)
+
+							hitMu.Lock()
+							probes++
+							if isHit {
+								recordHit(cand, string(location))
+								if location == LocationJSON {
+									jsonPotentialHits[cand] = struct{}{}
+								}
+							}
+							hitMu.Unlock()
 						}
 					}
 				}
 			}
-		}
+		}()
 	}
+	wg.Wait()
 
 	// Phase 2: Detailed type-mutation pass ONLY for candidates showing potential hits or remaining budget
 	if (d.maxProbes <= 0 || probes < d.maxProbes) && (d.maxHits <= 0 || len(confirmedHits) < d.maxHits) {
@@ -305,16 +351,6 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 		}
 		differential = append(differential, p)
 		_ = d.persist(endpointID, p)
-
-		// Persist camelCase/kebab-case variants without inflating candidate hit count
-		for _, variant := range paramVariants(name) {
-			if variant != name {
-				vp := p
-				vp.Name = variant
-				vp.Priority -= 5
-				_ = d.persist(endpointID, vp)
-			}
-		}
 	}
 
 	for _, p := range templateParams {

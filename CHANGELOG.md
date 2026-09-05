@@ -5,6 +5,20 @@ All notable changes to AKCA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.4] - 2026-09-05
+
+### Optimized
+
+- **Headless Browser & Crawler Performance**:
+  - Increased default Chromium pool concurrency from 2 to 6 slots (`NewHeadlessRendererWithPoolSize`, `CrawlerBrowser.SetConcurrency`), allowing proper parallel headless rendering matching crawler worker counts.
+  - Dynamically configured browser worker pool size based on session configuration (`BrowserWorkerPoolSize` / `MaxConcurrency`).
+  - Tuned page settling delay in CDP navigation from 1500ms down to 500ms, removing an unnecessary 1-second idle wait per page.
+  - Added script detection guard in crawler: pages without `<script` tags skip headless Chromium rendering entirely, preventing slow browser rendering on purely static HTML responses.
+- **Hidden Parameter Discovery Parallelism**:
+  - Replaced sequential single-threaded wordlist candidate probing in Phase 1 with a concurrent worker pool (8–10 workers), eliminating the latency bottleneck of probing 64–160+ items sequentially per endpoint.
+- **Eliminated Downstream Parameter Target Inflation**:
+  - Removed unverified heuristic variant generation (`paramVariants`) from SQLite parameter persistence during differential discovery. Only confirmed parameters are persisted, preventing downstream test amplification in reflection and vulnerability analysis modules.
+
 ## [0.1.3] - 2026-09-05
 
 ### Fixed

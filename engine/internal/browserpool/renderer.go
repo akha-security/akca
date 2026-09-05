@@ -26,13 +26,27 @@ func NewHeadlessRenderer() *HeadlessRenderer {
 }
 
 func NewHeadlessRendererWithProxy(proxyURL string, insecureTLS bool) *HeadlessRenderer {
+	return NewHeadlessRendererWithPoolSize(proxyURL, insecureTLS, 6)
+}
+
+func NewHeadlessRendererWithPoolSize(proxyURL string, insecureTLS bool, poolSize int) *HeadlessRenderer {
+	if poolSize <= 0 {
+		poolSize = 6
+	}
 	if path := findBrowserBinary(); path != "" {
 		return &HeadlessRenderer{
-			binary: path, sem: make(chan struct{}, 2),
+			binary: path, sem: make(chan struct{}, poolSize),
 			proxyURL: browserProxyURL(proxyURL), insecureTLS: insecureTLS,
 		}
 	}
 	return &HeadlessRenderer{proxyURL: browserProxyURL(proxyURL), insecureTLS: insecureTLS}
+}
+
+func (r *HeadlessRenderer) SetConcurrency(n int) {
+	if r == nil || n <= 0 {
+		return
+	}
+	r.sem = make(chan struct{}, n)
 }
 
 func findBrowserBinary() string {

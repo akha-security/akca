@@ -31,13 +31,21 @@ func (e *Engine) runCrawlerPhase(ctx context.Context, targets []string) error {
 		// not. Without a pool the bridge still executes the local renderer and
 		// falls back to the authenticated HTTP fetcher only when Chromium is
 		// genuinely unavailable.
-		c.SetBrowser(browserpool.NewCrawlerBrowserWithSession(
+		browserPoolSize := e.session.Config.BrowserWorkerPoolSize
+		if browserPoolSize <= 0 {
+			browserPoolSize = 6
+		}
+		if e.session.Config.MaxConcurrency > 0 && browserPoolSize > e.session.Config.MaxConcurrency {
+			browserPoolSize = e.session.Config.MaxConcurrency
+		}
+		c.SetBrowser(browserpool.NewCrawlerBrowserWithSessionAndPoolSize(
 			pool,
 			browserpool.HTTPPageFetcher(doFn),
 			e.session.Config.ProxyURL,
 			e.session.Config.InsecureSkipVerify,
 			browserHeaders,
 			browserCookies,
+			browserPoolSize,
 		))
 	}
 

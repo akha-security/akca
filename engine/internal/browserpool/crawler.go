@@ -27,12 +27,23 @@ func NewCrawlerBrowserWithProxy(pool *Pool, do PageFetcher, proxyURL string, ins
 
 func NewCrawlerBrowserWithSession(pool *Pool, do PageFetcher, proxyURL string, insecureTLS bool,
 	headers, cookies map[string]string) *CrawlerBrowser {
+	return NewCrawlerBrowserWithSessionAndPoolSize(pool, do, proxyURL, insecureTLS, headers, cookies, 6)
+}
+
+func NewCrawlerBrowserWithSessionAndPoolSize(pool *Pool, do PageFetcher, proxyURL string, insecureTLS bool,
+	headers, cookies map[string]string, poolSize int) *CrawlerBrowser {
 	if pool != nil {
 		pool.SetPageFetcher(do)
 	}
-	renderer := NewHeadlessRendererWithProxy(proxyURL, insecureTLS)
+	renderer := NewHeadlessRendererWithPoolSize(proxyURL, insecureTLS, poolSize)
 	renderer.SetSession(headers, cookies)
 	return &CrawlerBrowser{pool: pool, do: do, renderer: renderer}
+}
+
+func (b *CrawlerBrowser) SetConcurrency(n int) {
+	if b != nil && b.renderer != nil {
+		b.renderer.SetConcurrency(n)
+	}
 }
 
 func (b *CrawlerBrowser) Fetch(ctx context.Context, url string) (string, []crawler.DiscoveredEndpoint, error) {

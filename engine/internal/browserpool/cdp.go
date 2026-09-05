@@ -406,7 +406,7 @@ collect:
 			}
 			state.handle(event)
 			if state.loaded && settle == nil {
-				timer := time.NewTimer(1500 * time.Millisecond)
+				timer := time.NewTimer(500 * time.Millisecond)
 				defer timer.Stop()
 				settle = timer.C
 			}

@@ -447,7 +447,8 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 	}
 
 	var browserState *BrowserSnapshot
-	if isHTML && c.cfg.EnableHeadlessCrawler && c.browser != nil {
+	hasScripts := strings.Contains(strings.ToLower(body), "<script")
+	if isHTML && hasScripts && c.cfg.EnableHeadlessCrawler && c.browser != nil {
 		if instrumented, ok := c.browser.(InstrumentedBrowserFetcher); ok {
 			snapshot, browserErr := instrumented.FetchInstrumented(ctx, rawURL)
 			if browserErr == nil {
