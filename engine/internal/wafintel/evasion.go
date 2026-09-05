@@ -61,12 +61,40 @@ type LearningProfile struct {
 	StrategyScores   map[string]int `json:"strategy_scores"`
 	TechniqueScores  map[string]int `json:"technique_scores,omitempty"`
 	BlockedEncodings []string       `json:"blocked_encodings"`
+	BlockedChars     []string       `json:"blocked_chars,omitempty"`
+	AllowedChars     []string       `json:"allowed_chars,omitempty"`
 	LastSuccessful   string         `json:"last_successful"`
 	LastTechnique    string         `json:"last_technique,omitempty"`
 }
 
 func NewLearningProfile(domain string) LearningProfile {
-	return LearningProfile{Domain: domain, StrategyScores: map[string]int{}, TechniqueScores: map[string]int{}}
+	return LearningProfile{
+		Domain:          domain,
+		StrategyScores:  map[string]int{},
+		TechniqueScores: map[string]int{},
+	}
+}
+
+func RecordCharResult(learn LearningProfile, charToken string, allowed bool) LearningProfile {
+	charToken = strings.TrimSpace(charToken)
+	if charToken == "" {
+		return learn
+	}
+	if allowed {
+		learn.AllowedChars = appendUniqueString(learn.AllowedChars, charToken)
+	} else {
+		learn.BlockedChars = appendUniqueString(learn.BlockedChars, charToken)
+	}
+	return learn
+}
+
+func appendUniqueString(list []string, item string) []string {
+	for _, s := range list {
+		if s == item {
+			return list
+		}
+	}
+	return append(list, item)
 }
 
 func SelectStrategy(vendor string, learn LearningProfile) Strategy {

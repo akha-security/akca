@@ -78,3 +78,16 @@ func TestAllEncodingTypes(t *testing.T) {
 		}
 	}
 }
+
+func TestCharacterPreflightProbing(t *testing.T) {
+	learn := wafintel.NewLearningProfile("example.com")
+	learn = wafintel.RecordCharResult(learn, "single_quote", false)
+	learn = wafintel.RecordCharResult(learn, "semicolon", true)
+
+	if len(learn.BlockedChars) != 1 || learn.BlockedChars[0] != "single_quote" {
+		t.Fatalf("expected single_quote in blocked chars: %#v", learn.BlockedChars)
+	}
+	if len(learn.AllowedChars) != 1 || learn.AllowedChars[0] != "semicolon" {
+		t.Fatalf("expected semicolon in allowed chars: %#v", learn.AllowedChars)
+	}
+}

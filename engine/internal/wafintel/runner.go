@@ -58,6 +58,9 @@ func (r *Runner) CalibrateWithOptions(ctx context.Context, targets []string, opt
 		probeURL := calibrationURL(target)
 		baselineStatus, baselineBody := r.probe(ctx, probeURL, "akca-baseline", nil)
 
+		// Character Pre-flight Matrix: probe critical separator/injection characters
+		learn = r.probeCharacterMatrix(ctx, probeURL, baselineStatus, baselineBody, learn)
+
 		strategies := vendorStrategies[strings.ToLower(strings.TrimSpace(waf.Vendor))]
 		if len(strategies) == 0 {
 			strategies = defaultStrategies()
@@ -126,6 +129,55 @@ func (r *Runner) probe(ctx context.Context, rawURL, payload string, headers map[
 		return 0, ""
 	}
 	return status, body
+}
+
+// probeCharacterMatrix sends harmless single characters or minimal probes to map
+// which syntactic characters trigger WAF blocks and which encodings bypass them.
+func (r *Runner) probeCharacterMatrix(ctx context.Context, probeURL string, baseStatus int, baseBody string, learn LearningProfile) LearningProfile {
+	if r.client == nil {
+		return learn
+	}
+
+	charTests := []struct {
+		token string
+		char  string
+	}{
+		{"single_quote", "'"},
+		{"double_quote", `"`},
+		{"angle_bracket", "<"},
+		{"semicolon", ";"},
+		{"pipe", "|"},
+	}
+
+	sep := "?"
+	if strings.Contains(probeURL, "?") {
+		sep = "&"
+	}
+
+	for _, ct := range charTests {
+		if ctx.Err() != nil {
+			break
+		}
+		testURL := probeURL + sep + "akca_char_probe=" + url.QueryEscape("akca_"+ct.char)
+		status, body := r.probe(ctx, testURL, ct.char, nil)
+		blocked := isWAFBlocked(baseStatus, baseBody, status, body)
+		learn = RecordCharResult(learn, ct.token, !blocked)
+
+		// If a character was blocked, immediately test if double-url or unicode bypasses it
+		if blocked {
+			doubleEscaped := url.QueryEscape(url.QueryEscape("akca_" + ct.char))
+			statusDbl, bodyDbl := r.probe(ctx, probeURL+sep+"akca_char_probe="+doubleEscaped, ct.char, nil)
+			if !isWAFBlocked(baseStatus, baseBody, statusDbl, bodyDbl) {
+				learn = RecordTechniqueResult(learn, "double_url", true)
+			}
+			unicodeEscaped := url.QueryEscape(unicodeEscape(ct.char))
+			statusUni, bodyUni := r.probe(ctx, probeURL+sep+"akca_char_probe="+unicodeEscaped, ct.char, nil)
+			if !isWAFBlocked(baseStatus, baseBody, statusUni, bodyUni) {
+				learn = RecordTechniqueResult(learn, "unicode", true)
+			}
+		}
+	}
+	return learn
 }
 
 func calibrationURL(target string) string {

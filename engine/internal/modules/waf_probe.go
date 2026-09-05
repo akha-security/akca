@@ -73,6 +73,7 @@ func (r *Runner) modulePayloads(target ScanTarget, vulnClass, oastURL string) []
 	}
 	vendor := ""
 	var preferred []string
+	var blockedChars, allowedChars []string
 	if r.db != nil {
 		host := wafintel.HostFromTarget(target.EndpointURL)
 		if waf, err := r.db.GetWAFProfile(r.scanID, host); err == nil {
@@ -82,11 +83,14 @@ func (r *Runner) modulePayloads(target ScanTarget, vulnClass, oastURL string) []
 			learn := wafintel.NewLearningProfile(host)
 			if json.Unmarshal([]byte(raw), &learn) == nil {
 				preferred = wafintel.PreferredTechniques(learn)
+				blockedChars = learn.BlockedChars
+				allowedChars = learn.AllowedChars
 			}
 		}
 	}
 	return dedupePayloads(payloadgen.GenerateGroupB(vulnClass, oastURL, payloadgen.WAFHints{
-		Vendor: vendor, AllowEvasion: r.cfg.EnableWAFBypassHeaders && moduleAllowsHeaderPayloads(vulnClass), PreferredTechniques: preferred,
+		Vendor: vendor, AllowEvasion: r.cfg.EnableWAFBypassHeaders && moduleAllowsHeaderPayloads(vulnClass),
+		PreferredTechniques: preferred, BlockedChars: blockedChars, AllowedChars: allowedChars,
 	}))
 }
 

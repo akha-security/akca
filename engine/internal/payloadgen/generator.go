@@ -254,7 +254,42 @@ func rankForTech(pl Payload, tech TechHints) Payload {
 }
 
 func rankForWAFLearning(pl Payload, waf WAFHints) Payload {
-	if !pl.WAFAdapted || len(waf.PreferredTechniques) == 0 {
+	if !pl.WAFAdapted {
+		return pl
+	}
+	// If a payload contains characters known to be blocked by the WAF in raw form,
+	// and this payload is NOT encoded to conceal them, penalize it.
+	// If it encodes them safely, boost it.
+	if len(waf.BlockedChars) > 0 {
+		for _, bc := range waf.BlockedChars {
+			rawChar := ""
+			switch bc {
+			case "single_quote":
+				rawChar = "'"
+			case "double_quote":
+				rawChar = `"`
+			case "angle_bracket":
+				rawChar = "<"
+			case "semicolon":
+				rawChar = ";"
+			case "pipe":
+				rawChar = "|"
+			}
+			if rawChar != "" && strings.Contains(pl.Value, rawChar) {
+				// Contains raw blocked character without encoding
+				if pl.Encoding == "none" || pl.Encoding == "" {
+					pl.Priority -= 15
+					pl.SelectionReason += "; deprioritized due to WAF blocked character (" + bc + ")"
+				}
+			} else if rawChar != "" && !strings.Contains(pl.Value, rawChar) && (pl.Encoding == "double_url" || pl.Encoding == "unicode" || pl.Encoding == "unicode_url" || pl.Encoding == "json_unicode") {
+				// Successfully encoded past blocked character
+				pl.Priority += 5
+			}
+		}
+	}
+
+	if len(waf.PreferredTechniques) == 0 {
+		pl.Priority = clampPriority(pl.Priority)
 		return pl
 	}
 	encoding := strings.ToLower(strings.TrimSpace(pl.Encoding))
@@ -673,9 +708,8 @@ func isWindowsTech(tech TechHints) bool {
 // ---------------------------------------------------------------------------
 
 // wafEvasionVariants produces WAF-adapted clones of offensive payloads using the
-// detected vendor's preferred encodings/transforms. Each variant keeps the
-// original detection signal so verification still works, but carries a distinct
-// semantic key so it survives dedupe and is actually sent on the wire.
+// detected vendor's preferred encodings/transforms and generates corresponding
+// negative controls with identical encoding to prevent false positives.
 func wafEvasionVariants(in Input, base []Payload) []Payload {
 	if !in.WAF.AllowEvasion {
 		return nil
@@ -696,7 +730,7 @@ func wafEvasionVariants(in Input, base []Payload) []Payload {
 			p.Family != "ssrf" && p.Family != "lfi" && p.Family != "xxe" && p.Family != "nosql" {
 			continue
 		}
-		for _, variant := range wafVariantsForPayload(p.Value, p.Family, vendor) {
+		for _, variant := range wafVariantsForPayload(p.Value, p.Family, vendor, in.Profile.Context) {
 			variant.value, variant.enc = adjustWAFForTransport(p.Value, variant.value, variant.enc, in.Profile.ParameterLocation)
 			if variant.value == p.Value || variant.value == "" {
 				continue
@@ -712,12 +746,64 @@ func wafEvasionVariants(in Input, base []Payload) []Payload {
 			v.SelectionReason = p.SelectionReason + "; WAF bypass for " + vendor + " (" + variant.enc + ")"
 			v.SemanticKey = semanticKey(p) + "|waf:" + sanitizeVendor(vendor) + ":" + variant.enc
 			out = append(out, v)
+
+			// Generate paired mutated negative control to ensure WAF bypass is verified
+			// against backend acceptance rather than unparsed garbage input.
+			if negControl, ok := wafNegativeControlFor(v, in.Profile); ok {
+				out = append(out, negControl)
+			}
 		}
 	}
 	return out
 }
 
-func wafVariantsForPayload(value, family, vendor string) []struct {
+func wafNegativeControlFor(adapted Payload, profile reflection.ReflectionProfile) (Payload, bool) {
+	benignValue := "akca_neg_test"
+	switch adapted.Family {
+	case "sqli", "nosql":
+		benignValue = "' AND '1'='2"
+	case "xss":
+		benignValue = "<!--akca_benign-->"
+	case "ssti":
+		benignValue = "{{0}}"
+	case "command_injection":
+		benignValue = ";echo akca"
+	default:
+		benignValue = "akca_control_safe"
+	}
+	encVal := wafintel.ApplyEncoding(benignValue, adapted.Encoding)
+	if encVal == "" {
+		return Payload{}, false
+	}
+	encVal, _ = adjustWAFForTransport(benignValue, encVal, adapted.Encoding, profile.ParameterLocation)
+	if encVal == "" {
+		return Payload{}, false
+	}
+	return Payload{
+		Value:                encVal,
+		VulnClass:            adapted.VulnClass,
+		Variant:              adapted.Variant + "_neg_control",
+		Family:               adapted.Family,
+		ExpectedSignal:       "no_reflection",
+		Encoding:             adapted.Encoding,
+		Priority:             adapted.Priority - 5,
+		NoiseLevel:           "low",
+		BudgetCost:           1,
+		VerificationStrategy: "negative_control",
+		SelectionReason:      "mutated negative control for " + adapted.Variant,
+		RequiredContext:      adapted.RequiredContext,
+		RiskLevel:            "safe",
+		IsNegativeControl:    true,
+		WAFAdapted:           true,
+		WAFVendor:            adapted.WAFVendor,
+		ControlFor:           adapted.SemanticKey,
+		SemanticKey:          adapted.SemanticKey + "|neg_control",
+		Technique:            TechniqueWAFMutation,
+		ProbeRole:            ProbeRoleNegative,
+	}, true
+}
+
+func wafVariantsForPayload(value, family, vendor string, ctx reflection.ContextType) []struct {
 	value string
 	enc   string
 } {
@@ -747,16 +833,30 @@ func wafVariantsForPayload(value, family, vendor string) []struct {
 		}
 		add(wafintel.ApplyEncoding(value, "url"), "url")
 	case "xss", "ssti":
-		add(wafintel.ApplyEncoding(value, "unicode_nfkc"), "unicode_nfkc")
-		switch {
-		case strings.Contains(v, "cloudflare") || strings.Contains(v, "imperva"):
+		// Context-aware mutations:
+		// In JSON context, HTML entities break JSON parser syntax; use Unicode escapes instead.
+		// In HTML attribute context, HTML entities and URL encodings are ideal.
+		switch ctx {
+		case reflection.ContextJSON:
 			add(wafintel.ApplyEncoding(value, "unicode"), "unicode")
-			add(wafintel.EncodingCascade(value, "unicode", "url"), "unicode_url")
-		case strings.Contains(v, "akamai"):
-			add(wafintel.ApplyEncoding(value, "html_entity"), "html_entity")
-		default:
-			add(wafintel.ApplyEncoding(value, "html_entity"), "html_entity")
+			add(wafintel.ApplyEncoding(value, "json_unicode"), "json_unicode")
 			add(wafintel.ApplyEncoding(value, "url"), "url")
+		case reflection.ContextJavaScript:
+			add(wafintel.ApplyEncoding(value, "unicode"), "unicode")
+			add(wafintel.ApplyEncoding(value, "js_hex_escape"), "js_hex_escape")
+			add(wafintel.EncodingCascade(value, "unicode", "url"), "unicode_url")
+		default:
+			add(wafintel.ApplyEncoding(value, "unicode_nfkc"), "unicode_nfkc")
+			switch {
+			case strings.Contains(v, "cloudflare") || strings.Contains(v, "imperva"):
+				add(wafintel.ApplyEncoding(value, "unicode"), "unicode")
+				add(wafintel.EncodingCascade(value, "unicode", "url"), "unicode_url")
+			case strings.Contains(v, "akamai"):
+				add(wafintel.ApplyEncoding(value, "html_entity"), "html_entity")
+			default:
+				add(wafintel.ApplyEncoding(value, "html_entity"), "html_entity")
+				add(wafintel.ApplyEncoding(value, "url"), "url")
+			}
 		}
 	case "ssrf", "lfi":
 		add(wafintel.ApplyEncoding(value, "url"), "url")
@@ -824,7 +924,7 @@ func looksLikeWindowsCommand(value string) bool {
 // transformForWAF returns a vendor/family-appropriate, transport-safe evasion of
 // the payload along with a short encoding label.
 func transformForWAF(value, family, vendor string) (string, string) {
-	variants := wafVariantsForPayload(value, family, vendor)
+	variants := wafVariantsForPayload(value, family, vendor, reflection.ContextUnknown)
 	if len(variants) == 0 {
 		return "", ""
 	}
@@ -1172,7 +1272,12 @@ func sortPayloads(payloads []Payload) {
 func selectPayloads(payloads []Payload, limit int) ([]Payload, int) {
 	selected := make([]Payload, 0, len(payloads))
 	offensive := make([]Payload, 0, len(payloads))
+	adaptedNegControls := map[string]Payload{}
 	for _, p := range payloads {
+		if p.IsNegativeControl && p.WAFAdapted && p.ControlFor != "" {
+			adaptedNegControls[p.ControlFor] = p
+			continue
+		}
 		if p.IsControl || p.IsNegativeControl {
 			selected = append(selected, p)
 			continue
@@ -1181,6 +1286,9 @@ func selectPayloads(payloads []Payload, limit int) ([]Payload, int) {
 	}
 	if limit <= 0 {
 		selected = append(selected, offensive...)
+		for _, neg := range adaptedNegControls {
+			selected = append(selected, neg)
+		}
 		used := payloadCost(offensive)
 		sortPayloads(selected)
 		return selected, used
@@ -1255,6 +1363,14 @@ func selectPayloads(payloads []Payload, limit int) ([]Payload, int) {
 			}
 		}
 	}
+	// Append the corresponding mutated negative control for any selected WAF-adapted payload
+	for _, p := range selected {
+		if p.WAFAdapted && !p.IsNegativeControl {
+			if neg, ok := adaptedNegControls[p.SemanticKey]; ok {
+				selected = append(selected, neg)
+			}
+		}
+	}
 	sortPayloads(selected)
 	return selected, used
 }
@@ -1289,6 +1405,9 @@ func findOriginalForWAFAdapted(adapted Payload, offensive []Payload) (Payload, b
 
 func baseVariantKey(p Payload) string {
 	variant := p.Variant
+	if idx := strings.Index(variant, "_neg_control"); idx >= 0 {
+		variant = variant[:idx]
+	}
 	if idx := strings.Index(variant, "_waf_"); idx >= 0 {
 		variant = variant[:idx]
 	}

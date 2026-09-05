@@ -597,6 +597,60 @@ func TestWAFLearningPrioritizesSuccessfulTechnique(t *testing.T) {
 	}
 }
 
+func TestWAFContextAwareMutations(t *testing.T) {
+	// In JSON context, XSS payloads should use unicode or json_unicode escaping, not raw HTML entities
+	jsonResult := Generate(Input{
+		Profile: reflection.ReflectionProfile{
+			ScanID: "scan-json", EndpointURL: "https://example.com/api", Parameter: "name",
+			Context: reflection.ContextJSON, ParameterLocation: "json",
+		},
+		WAF:    WAFHints{Vendor: "Cloudflare", AllowEvasion: true},
+		Budget: -1,
+	})
+	for _, p := range jsonResult.Payloads {
+		if p.WAFAdapted && p.Family == "xss" && !p.IsNegativeControl {
+			if p.Encoding == "html_entity" {
+				t.Fatalf("HTML entities should not be generated in JSON context: %+v", p)
+			}
+		}
+	}
+}
+
+func TestWAFMutatedNegativeControls(t *testing.T) {
+	result := Generate(Input{
+		Profile: reflection.ReflectionProfile{
+			ScanID: "scan-nc", EndpointURL: "https://example.com/item", Parameter: "id",
+			Context: reflection.ContextHTML, ParameterLocation: "body",
+		},
+		Tech:   TechHints{Database: "mysql"},
+		WAF:    WAFHints{Vendor: "Cloudflare", AllowEvasion: true},
+		Budget: -1,
+	})
+	hasAdaptedOffensive := false
+	hasAdaptedNegative := false
+	for _, p := range result.Payloads {
+		if p.WAFAdapted {
+			if p.IsNegativeControl {
+				hasAdaptedNegative = true
+				if p.ControlFor == "" {
+					t.Fatalf("adapted negative control must specify ControlFor: %+v", p)
+				}
+				if p.Encoding == "none" || p.Encoding == "" {
+					t.Fatalf("adapted negative control must retain encoding: %+v", p)
+				}
+			} else {
+				hasAdaptedOffensive = true
+			}
+		}
+	}
+	if !hasAdaptedOffensive {
+		t.Fatal("expected at least one adapted offensive payload")
+	}
+	if !hasAdaptedNegative {
+		t.Fatal("expected at least one adapted negative control payload")
+	}
+}
+
 func TestQueryWAFEncodingAccountsForTransportLayer(t *testing.T) {
 	original := `' OR 11=11-- -`
 	doubleEncoded := wafintelValueForTest(original, "double_url")
@@ -610,7 +664,7 @@ func TestQueryWAFEncodingAccountsForTransportLayer(t *testing.T) {
 }
 
 func wafintelValueForTest(value, encoding string) string {
-	for _, variant := range wafVariantsForPayload(value, "sqli", "Cloudflare") {
+	for _, variant := range wafVariantsForPayload(value, "sqli", "Cloudflare", reflection.ContextUnknown) {
 		if variant.enc == encoding {
 			return variant.value
 		}
