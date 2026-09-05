@@ -279,10 +279,10 @@ func (r *Runner) runRateLimitThresholdDiscovery(ctx context.Context, target Scan
 				}
 			})
 		if finding != nil {
-			finding.Title = fmt.Sprintf("Rate Limit Threshold Discovered: Blocked After %d Requests", blockedIndex-1)
-			finding.Severity = "medium"
-			finding.Description = fmt.Sprintf("Dynamic rate limit threshold discovery determined that %s triggers HTTP %d / rate limit block after exactly %d consecutive requests.",
-				target.EndpointURL, blockedRR.Response.StatusCode, blockedIndex-1)
+			finding.Title = fmt.Sprintf("Rate Limit Enforced: Blocked After %d Requests", blockedIndex-1)
+			finding.Severity = "info"
+			finding.Description = fmt.Sprintf("Rate limit policy verification confirmed that %s enforces throttling after %d consecutive requests (defense active).",
+				target.EndpointURL, blockedIndex-1)
 			r.recordFinding(ctx, &out, finding, "rate_limit", "rate_limit_threshold_discovered")
 		}
 	} else if len(attempts) >= maxBurst {

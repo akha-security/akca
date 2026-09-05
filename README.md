@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/akha-security/akca/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/akha-security/akca/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/akha-security/akca/releases"><img alt="Version" src="https://img.shields.io/badge/version-v0.1.0-6f42c1"></a>
+  <a href="https://github.com/akha-security/akca/releases"><img alt="Version" src="https://img.shields.io/badge/version-v0.1.1-6f42c1"></a>
   <a href="https://go.dev/"><img alt="Go" src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
 </p>
@@ -20,7 +20,7 @@ baseline, exercises a targeted probe, applies vulnerability-specific controls,
 and stores the evidence used to reach its decision.
 
 > [!IMPORTANT]
-> AKCA is currently an early `v0.1.0` release. Use it on systems you own or are
+> AKCA is currently an early `v0.1.1` release. Use it on systems you own or are
 > explicitly authorized to test, validate findings before acting on them, and
 > avoid production-impacting scan profiles without an agreed test window.
 

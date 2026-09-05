@@ -37,7 +37,7 @@ var (
 	ipv6Internal       = regexp.MustCompile(`(?i)\b(?:fe80|fc00|fd00):[0-9a-f:]+\b`)
 	dbDumpRe           = regexp.MustCompile(`(?i)(?:CREATE TABLE\s+[a-zA-Z0-9_"` + "`" + `]+|INSERT INTO\s+[a-zA-Z0-9_"` + "`" + `]+\s+VALUES)`)
 	graphqlSchema      = regexp.MustCompile(`(?i)type\s+(?:Query|Mutation|Subscription)\s*\{`)
-	piiKeywordRe       = regexp.MustCompile(`(?i)\b(?:date of birth|medical record|driver.?s license|social security|passport number|tc kimlik|anne kizlik)\b`)
+	piiKeywordRe       = regexp.MustCompile(`(?i)\b(?:date[ _-]of[ _-]birth|medical[ _-]record|driver[._]?[s]?[ _-]license|social[ _-]security|passport[ _-]number|tc[ _-]kimlik|anne[ _-]kizlik)\b`)
 )
 
 // Analyze scans response bodies for semantically sensitive data exposure.
@@ -73,10 +73,15 @@ func Analyze(body string) []Finding {
 		}
 	}
 	if piiKeywordRe.MatchString(body) {
-		add("pii_context", piiKeywordRe.FindString(body), "[PII keyword]", "medium", 0.7)
+		lowerBody := strings.ToLower(body)
+		isHTML := strings.Contains(lowerBody, "<html") || strings.Contains(lowerBody, "<!doctype")
+		// Only alert on PII keywords in JSON/API payloads or non-HTML data, not bare HTML form labels or policy text
+		if !isHTML || strings.Contains(lowerBody, "application/json") {
+			add("pii_context", piiKeywordRe.FindString(body), "[PII keyword]", "medium", 0.7)
+		}
 	}
 	for _, m := range emailRe.FindAllString(body, 5) {
-		if strings.Contains(strings.ToLower(m), "example.com") {
+		if strings.Contains(strings.ToLower(m), "example.com") || isPublicRoleEmail(m) {
 			continue
 		}
 		add("pii_email", m, redactEmail(m), "medium", 0.55)
@@ -103,10 +108,9 @@ func Analyze(body string) []Finding {
 	}
 	for _, m := range internalIPRe.FindAllString(body, 5) {
 		if m == "127.0.0.1" {
-			add("internal_ip", m, m, "medium", 0.6)
-		} else {
-			add("internal_ip", m, m, "high", 0.8)
+			continue
 		}
+		add("internal_ip", m, m, "high", 0.8)
 	}
 	for _, m := range phoneRe.FindAllString(body, 3) {
 		add("pii_phone", m, redactToken(m), "medium", 0.7)
@@ -341,4 +345,19 @@ func tcknValid(digits string) bool {
 
 	c11 := (oddSum + evenSum + d[9]) % 10
 	return d[10] == c11
+}
+
+func isPublicRoleEmail(email string) bool {
+	lower := strings.ToLower(email)
+	prefix := lower
+	if idx := strings.Index(lower, "@"); idx != -1 {
+		prefix = lower[:idx]
+	}
+	roles := []string{"support", "info", "contact", "sales", "help", "hello", "press", "billing", "privacy", "security", "jobs", "careers", "marketing", "admin", "team", "service", "inquiry", "feedback"}
+	for _, r := range roles {
+		if prefix == r || strings.HasPrefix(prefix, r+".") || strings.HasPrefix(prefix, r+"-") || strings.HasPrefix(prefix, r+"_") {
+			return true
+		}
+	}
+	return false
 }

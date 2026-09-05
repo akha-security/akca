@@ -118,3 +118,44 @@ func TestLuhnInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestPublicEmailIgnored(t *testing.T) {
+	findings := Analyze("Contact us at support@mycompany.org or info@mycompany.org for help")
+	for _, f := range findings {
+		if f.Kind == "pii_email" {
+			t.Fatalf("public support email must not be flagged as PII leak: %+v", f)
+		}
+	}
+	personalFindings := Analyze("Personal contact: john.doe@company.org")
+	found := false
+	for _, f := range personalFindings {
+		if f.Kind == "pii_email" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("personal email should be flagged")
+	}
+}
+
+func TestHTMLPIILabelIgnored(t *testing.T) {
+	htmlPage := `<html><body><form><label>Date of Birth</label><input type="text"/></form></body></html>`
+	findings := Analyze(htmlPage)
+	for _, f := range findings {
+		if f.Kind == "pii_context" {
+			t.Fatalf("bare HTML label for Date of Birth must not be flagged: %+v", f)
+		}
+	}
+	apiPayload := `{"date_of_birth": "1990-01-01"}`
+	apiFindings := Analyze(apiPayload)
+	found := false
+	for _, f := range apiFindings {
+		if f.Kind == "pii_context" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("API payload with PII field should be flagged")
+	}
+}
+

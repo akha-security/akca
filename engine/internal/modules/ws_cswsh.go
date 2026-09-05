@@ -49,9 +49,16 @@ func (r *Runner) runCrossSiteWebSocketHijack(ctx context.Context, target ScanTar
 		p := defaultPayload("ws_cswsh", signal, "Origin: https://attacker-evil-origin.example.com", signal)
 		f := r.verifyAndBuild(ctx, "ws_cswsh", target, p, baseline, rr, signal, false, false, "", "")
 		if f != nil {
-			f.Severity = "high"
-			f.Title = "Cross-Site WebSocket Hijacking (CSWSH) Vulnerability"
-			f.Description = fmt.Sprintf("WebSocket endpoint '%s' accepted cross-origin upgrade handshake (Status: 101 Switching Protocols) from an arbitrary untrusted Origin without origin validation.", target.EndpointURL)
+			hasAuth := len(r.cfg.SessionCookies) > 0 || len(r.cfg.Authentication) > 0 || len(r.cfg.CustomHeaders) > 0 || len(target.RequestTemplate.Headers) > 0
+			if hasAuth {
+				f.Severity = "high"
+				f.Title = "Cross-Site WebSocket Hijacking (CSWSH) with Ambient Credentials"
+				f.Description = fmt.Sprintf("WebSocket endpoint '%s' accepted cross-origin upgrade handshake (Status: 101 Switching Protocols) using authenticated session cookies from an untrusted Origin.", target.EndpointURL)
+			} else {
+				f.Severity = "info"
+				f.Title = "Cross-Site WebSocket Hijacking (CSWSH) - Public Service Allowed"
+				f.Description = fmt.Sprintf("WebSocket endpoint '%s' accepted cross-origin upgrade handshake (Status: 101 Switching Protocols) without origin validation. No ambient credentials were configured on this probe.", target.EndpointURL)
+			}
 			r.recordFinding(ctx, &out, f, "ws_cswsh", signal)
 		}
 	}

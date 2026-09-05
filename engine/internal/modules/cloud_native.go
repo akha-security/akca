@@ -29,7 +29,9 @@ var cloudNativeProbes = []cloudNativeProbe{
 		check: func(status int, body string) bool {
 			lower := strings.ToLower(body)
 			return status == 200 && strings.HasPrefix(strings.TrimSpace(body), "[") &&
-				(strings.Contains(lower, "image") || strings.Contains(lower, "command") || strings.Contains(lower, "created"))
+				strings.Contains(lower, `"id"`) &&
+				(strings.Contains(lower, `"image"`) || strings.Contains(lower, `"imageid"`)) &&
+				(strings.Contains(lower, `"command"`) || strings.Contains(lower, `"created"`) || strings.Contains(lower, `"names"`))
 		},
 	},
 	{
@@ -135,6 +137,14 @@ func (r *Runner) runCloudNativeExposure(ctx context.Context, target ScanTarget) 
 	baseline, err := r.cachedEmptyProbe(ctx, target)
 	if err != nil {
 		baseline = httpclient.RequestResponse{Response: httpclient.ResponseRecord{StatusCode: 404, Body: "not found"}}
+	}
+
+	// Wildcard / SPA pre-check
+	wildcardURL := baseURL + "/akca-cloudnative-check-" + randomProbeToken()
+	wRR, err := r.client.Do(ctx, "GET", wildcardURL, nil, nil)
+	if err == nil && wRR.Response.StatusCode == 200 && len(wRR.Response.Body) > 100 {
+		r.emitSkip("cloud_native_exposure", target, "wildcard/SPA catch-all detected")
+		return nil
 	}
 
 	var out []ModuleFinding

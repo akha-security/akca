@@ -3,11 +3,14 @@ package modules
 import (
 	"context"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
 )
+
+var htpasswdEntryRe = regexp.MustCompile(`(?m)^[a-zA-Z0-9_.-]+:(?:\$apr1\$|\$2[aby]\$|\{SHA\}|[a-zA-Z0-9./]{13})`)
 
 type sensitiveFileDef struct {
 	path        string
@@ -49,7 +52,7 @@ var sensitiveFileDefs = []sensitiveFileDef{
 		kind:        "dockerenv_leak",
 		title:       "Docker Container Environment Indicator Disclosed",
 		severity:    "low",
-		fingerprint: ``,
+		fingerprint: `docker`,
 		desc:        "Docker container indicator file was discovered on the server.",
 	},
 	{
@@ -57,7 +60,7 @@ var sensitiveFileDefs = []sensitiveFileDef{
 		kind:        "docker_compose_leak",
 		title:       "Docker Compose Infrastructure File Disclosed",
 		severity:    "high",
-		fingerprint: `version:`,
+		fingerprint: `services:`,
 		desc:        "Docker Compose orchestration configuration file is publicly accessible, revealing backend service topology and passwords.",
 	},
 	// Package Managers & Dependencies
@@ -107,7 +110,7 @@ var sensitiveFileDefs = []sensitiveFileDef{
 		kind:        "htpasswd_leak",
 		title:       "Apache .htpasswd Password Hash File Disclosed",
 		severity:    "critical",
-		fingerprint: `:`,
+		fingerprint: `$`,
 		desc:        "Apache .htpasswd file containing HTTP Basic authentication user password hashes was accessed.",
 	},
 	{
@@ -230,13 +233,19 @@ func sensitiveFileFingerprintMatches(sf sensitiveFileDef, response httpclient.Re
 	if sf.kind == "exposed_installer" {
 		return installerFingerprintMatches(response)
 	}
+	if sf.kind == "htpasswd_leak" {
+		return htpasswdEntryRe.MatchString(body)
+	}
 	if sf.kind == "dockerenv_leak" {
 		contentType := strings.ToLower(response.Headers["Content-Type"])
 		trimmed := strings.TrimSpace(body)
-		return len(body) <= 128 &&
+		return len(trimmed) <= 128 &&
 			!strings.Contains(contentType, "html") &&
 			!strings.Contains(contentType, "json") &&
-			(trimmed == "" || strings.Contains(strings.ToLower(trimmed), "docker"))
+			(len(trimmed) == 0 || strings.Contains(strings.ToLower(trimmed), "docker"))
+	}
+	if sf.kind == "docker_compose_leak" {
+		return strings.Contains(body, "services:") && (strings.Contains(body, "version:") || strings.Contains(body, "image:"))
 	}
 	return sf.fingerprint == "" || strings.Contains(body, sf.fingerprint)
 }

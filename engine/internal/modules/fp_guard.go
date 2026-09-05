@@ -255,7 +255,7 @@ func moduleSignalConfirmed(
 	case "framework_debug":
 		return frameworkDebugSignalConfirmed(signal, body, probeStatus)
 	case "iis_discovery":
-		return (signal == "iis_shortname" && (probeStatus != baseStatus || (probeStatus == 404 && baseStatus == 404))) ||
+		return (signal == "iis_shortname" && probeStatus != baseStatus && probeStatus > 0 && baseStatus > 0) ||
 			(signal == "iis_source_disclosure" && probeStatus == 200 &&
 				(strings.Contains(body, "<%@") || strings.Contains(body, "<script runat") || strings.Contains(body, "<?php")))
 	case "firebase_misconfig":
@@ -625,6 +625,6 @@ func graphqlSignalConfirmed(body, baseBody, signal string, probeStatus, baseStat
 	case "graphql_alias_overload":
 		return strings.Contains(lower, `"a1"`) && strings.Contains(lower, `"a2"`) && strings.Contains(lower, `"a5"`)
 	default:
-		return strings.Contains(lower, `"data"`)
+		return false
 	}
 }

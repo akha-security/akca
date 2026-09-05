@@ -72,7 +72,8 @@ func (r *Runner) runDevOpsExposure(ctx context.Context, target ScanTarget) []Mod
 			title:    "Unauthenticated Private Docker Registry API",
 			severity: "critical",
 			verifier: func(body string, status int) bool {
-				return strings.Contains(body, `"repositories"`)
+				trimmed := strings.TrimSpace(body)
+				return strings.Contains(body, `"repositories"`) && strings.HasPrefix(trimmed, "{")
 			},
 		},
 		{
@@ -106,7 +107,7 @@ func (r *Runner) runDevOpsExposure(ctx context.Context, target ScanTarget) []Mod
 			title:    "Unauthenticated Elasticsearch Cluster API",
 			severity: "critical",
 			verifier: func(body string, status int) bool {
-				return strings.Contains(body, "health") && strings.Contains(body, "status") && strings.Contains(body, "index")
+				return strings.Contains(body, "health") && strings.Contains(body, "status") && strings.Contains(body, "index") && strings.Contains(body, "docs.count")
 			},
 		},
 		{
@@ -296,6 +297,14 @@ func (r *Runner) runDevOpsExposure(ctx context.Context, target ScanTarget) []Mod
 		baseline = httpclient.RequestResponse{Response: httpclient.ResponseRecord{StatusCode: 404, Body: "not found"}}
 	}
 	base := strings.TrimRight(originTarget.EndpointURL, "/")
+
+	// Wildcard / SPA check
+	wildcardURL := base + "/akca-devops-check-" + randomProbeToken()
+	wRR, err := r.client.Do(ctx, "GET", wildcardURL, nil, nil)
+	if err == nil && wRR.Response.StatusCode == 200 && len(wRR.Response.Body) > 100 {
+		r.emitSkip("devops_exposure", target, "wildcard/SPA catch-all detected")
+		return nil
+	}
 
 	for _, dt := range targets {
 		if ctx.Err() != nil {

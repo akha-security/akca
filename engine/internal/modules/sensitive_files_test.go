@@ -19,3 +19,18 @@ func TestInstallerFingerprintRequiresIndependentSignals(t *testing.T) {
 		t.Fatal("documentation page must not match as an exposed installer")
 	}
 }
+
+func TestHtpasswdFingerprintRejectsGenericColon(t *testing.T) {
+	htDef := sensitiveFileDef{path: "/.htpasswd", kind: "htpasswd_leak", fingerprint: "$"}
+	randomColon := httpclient.ResponseRecord{StatusCode: 200, Headers: map[string]string{"Content-Type": "text/plain"}, Body: `error: not found`}
+	if sensitiveFileFingerprintMatches(htDef, randomColon) {
+		t.Fatal("random colon in plain text error must not match htpasswd")
+	}
+	validHtpasswd := httpclient.ResponseRecord{StatusCode: 200, Headers: map[string]string{"Content-Type": "text/plain"}, Body: "admin:$apr1$xyz$abc1234567890\n"}
+	if !sensitiveFileFingerprintMatches(htDef, validHtpasswd) {
+		t.Fatal("valid htpasswd hash must match")
+	}
+}
+
+
+

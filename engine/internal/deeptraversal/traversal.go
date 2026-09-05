@@ -99,11 +99,11 @@ func MergeBalanced(linux, windows []Payload) []Payload {
 }
 
 var (
-	linuxMarkers       = []string{"root:", "daemon:", "/bin/bash", "/sbin/nologin", "/bin/sh", "version=", "id=debian", "id=ubuntu", "id=alpine", "http_user_agent", "path="}
+	linuxMarkers       = []string{"root:x:0:0:", "root:*:0:0:", "root:", "daemon:", "/bin/bash", "/sbin/nologin", "/bin/sh", "id=debian", "id=ubuntu", "id=alpine"}
 	linuxBase64Markers = []string{"cm9vdDo", "cm9vdDox", "cm9vdDp4"}
-	linuxProcMarkers   = []string{"linux version", "gcc", "swapfile", "heap", "stack", "/lib/", "/usr/"}
+	linuxProcMarkers   = []string{"linux version ", "/proc/version", "swapfile", "sys_clone", "sys_execve"}
 	winMarkers         = []string{"[fonts]", "[extensions]", "for 16-bit app support", "[boot loader]", "[operating systems]"}
-	winHosts           = []string{"127.0.0.1", "localhost", "# copyright"}
+	winHosts           = []string{"127.0.0.1 localhost", "127.0.0.1\tlocalhost", "# localhost name resolution", "::1 localhost"}
 )
 
 // DetectSignal reports whether a traversal probe succeeded against baseline.
@@ -147,6 +147,10 @@ func DetectSignal(body, baseline, signal string) bool {
 				return true
 			}
 		}
+		if (strings.Contains(lower, "127.0.0.1") || strings.Contains(lower, "::1")) &&
+			strings.Contains(lower, "microsoft corp") && !strings.Contains(base, "microsoft corp") {
+			return true
+		}
 	case strings.HasPrefix(signal, "windows"):
 		for _, m := range winMarkers {
 			if strings.Contains(lower, m) && !strings.Contains(base, m) {
@@ -164,6 +168,10 @@ func DetectSignal(body, baseline, signal string) bool {
 			if strings.Contains(lower, m) && !strings.Contains(base, m) {
 				return true
 			}
+		}
+		if (strings.Contains(lower, "127.0.0.1") || strings.Contains(lower, "::1")) &&
+			strings.Contains(lower, "microsoft corp") && !strings.Contains(base, "microsoft corp") {
+			return true
 		}
 	}
 	return false

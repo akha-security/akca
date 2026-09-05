@@ -87,11 +87,14 @@ func (r *Runner) runCORS(ctx context.Context, target ScanTarget) []ModuleFinding
 					f.Description = "The server reflected or allowed 'Origin: null' in Access-Control-Allow-Origin. Sandboxed iframes, local file schemes, and data: URIs generate null origin requests."
 				}
 			case "cloud_metadata_origin":
-				f.Severity = "critical"
-				f.Title = "CORS Cloud Metadata Origin Allowed (Client-Side SSRF Pivot)"
-				f.Description = fmt.Sprintf("Insecure CORS configuration reflected/allowed Cloud Metadata origin '%s' (Access-Control-Allow-Origin: %s). An attacker can leverage a victim's browser to pivot and exfiltrate cloud instance metadata.", pr.origin, pr.origin)
 				if hasCreds {
-					f.Description += " Access-Control-Allow-Credentials is also set to true."
+					f.Severity = "critical"
+					f.Title = "CORS Cloud Metadata Origin Allowed with Credentials"
+					f.Description = fmt.Sprintf("Insecure CORS configuration reflected origin '%s' with Access-Control-Allow-Credentials: true. An attacker can leverage this configuration to conduct client-side pivot and steal cloud metadata tokens.", pr.origin)
+				} else {
+					f.Severity = "low"
+					f.Title = "CORS Cloud Metadata Origin Reflected"
+					f.Description = fmt.Sprintf("Insecure CORS configuration reflected origin '%s' without credentials (Access-Control-Allow-Origin: %s).", pr.origin, pr.origin)
 				}
 			case "localhost_origin", "intranet_origin":
 				if hasCreds {

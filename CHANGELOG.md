@@ -5,18 +5,20 @@ All notable changes to AKCA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
-
-### Added
-
-- GitHub community, contribution and security documentation.
-- `go install -v github.com/akha-security/akca/engine/cmd/akca@latest`
-  installation instructions.
-- `--include-linked-api-subdomains` to opt into the previous broad crawler scope
-  expansion for linked API/service subdomains.
+## [0.1.1] - 2026-09-05
 
 ### Fixed
 
+- Eliminated widespread false positives in `sensitive_files` (`.htpasswd` now requires valid Unix crypt/MD5/SHA/bcrypt hashes; `.dockerenv` rejects 0-byte responses; `docker-compose.yml` requires services definition).
+- Tightened `cloud_takeover` signatures for Fly.io, Strikingly, Cargo Collective, and Unbounce to prevent alerting on generic 404 pages.
+- Standardized `deeptraversal` tokens to specific Unix/Windows OS files and removed generic keyword matches (`path=`, `heap`, `stack`, `version=`, etc.).
+- Fixed false shortname confirmation bug in `fp_guard` (`iis_discovery`) when baseline and probe both return 404.
+- Added root URL/SPA baseline comparison in `route_auth_bypass` to prevent alerting when path traversal sequences normalize back to public root.
+- Reclassified uncredentialed cloud metadata origin reflection in `cors` from critical SSRF to low severity.
+- Reclassified public WebSocket connections in `ws_cswsh` from high severity CSWSH to info when no authenticated user session exists.
+- Filtered public contact and role-based mail addresses (`support@`, `info@`, `sales@`, `contact@`) in `sensitivedata` and restricted PII keyword triggers to JSON/API responses.
+- Reclassified rate limit threshold discoveries to informative telemetry rather than medium vulnerabilities.
+- Added wildcard/SPA catch-all guards in `devops_exposure` and `cloud_native_exposure`, and tightened Docker and Elasticsearch schema verifiers.
 - Reduced credit-card false positives with Luhn, issuer/length, context,
   low-diversity and known-test-number validation.
 - Reduced IBAN false positives with official country lengths, mod-97 checksum,
@@ -32,6 +34,14 @@ and the project follows [Semantic Versioning](https://semver.org/).
   response-splitting evidence.
 - Stopped automatically adding linked API/service subdomains to crawl scope by
   default; explicitly included hosts and wildcard scopes still work.
+
+### Added
+
+- GitHub community, contribution and security documentation.
+- `go install -v github.com/akha-security/akca/engine/cmd/akca@latest`
+  installation instructions.
+- `--include-linked-api-subdomains` to opt into the previous broad crawler scope
+  expansion for linked API/service subdomains.
 
 ## [0.1.0] - 2026-09-04
 

@@ -83,6 +83,13 @@ func (r *Runner) runRouteAuthBypass(ctx context.Context, target ScanTarget) []Mo
 		}
 	}
 
+	// Step 2b: Root Homepage Control - Ensure path normalization doesn't just route back to the public homepage
+	rootURL := u.Scheme + "://" + u.Host + "/"
+	var rootRR httpclient.RequestResponse
+	if r.scope.IsInScope(rootURL) {
+		rootRR, _ = client.DoWithoutSession(ctx, http.MethodGet, rootURL, nil, nil)
+	}
+
 	// Step 3: Generate Route Normalization & Proxy Discrepancy Variants
 	variants := generateRouteBypassVariants(u)
 	for _, v := range variants {
@@ -101,6 +108,13 @@ func (r *Runner) runRouteAuthBypass(ctx context.Context, target ScanTarget) []Mo
 		// Step 4: Strict Verification (Zero False-Positive Filter)
 		if !isRouteBypassSuccessful(probeRR.Response, baselineRR.Response) {
 			continue
+		}
+
+		// Must not be a normalization fallback to the public homepage
+		if rootRR.Response.StatusCode == http.StatusOK && len(rootRR.Response.Body) > 0 {
+			if probeRR.Response.Body == rootRR.Response.Body || bodiesSimilar(probeRR.Response.Body, rootRR.Response.Body) {
+				continue
+			}
 		}
 
 		// Dual Replay Confirmation: Replay probe twice to ensure it's not a flaky network/race response
