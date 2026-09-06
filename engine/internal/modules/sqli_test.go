@@ -740,3 +740,59 @@ func TestSQLiAdvancedRunsForNonAllowlistParam(t *testing.T) {
 		t.Fatal("JSON body parameter should be allowed for advanced SQLi probes")
 	}
 }
+
+func TestPrioritizeSQLiPayloadsNumericAndDatabaseHint(t *testing.T) {
+	basePayloads := []payloadgen.Payload{
+		defaultPayload("sqli", "generic_quote", `'`, "sql_error"),
+		defaultPayload("sqli", "mysql_extractvalue", `' AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT version())))-- -`, "sql_error"),
+		defaultPayload("sqli", "pg_cast_error", `' AND (SELECT 1 FROM CAST((SELECT version()) AS INT))-- -`, "sql_error"),
+		defaultPayload("sqli", "mssql_convert_error", `' AND 1=CONVERT(INT, @@version)-- -`, "sql_error"),
+	}
+
+	// 1. Numeric target should prepend numeric probes
+	resNumeric := prioritizeSQLiPayloads(basePayloads, "", true, "42")
+	if len(resNumeric) <= len(basePayloads) {
+		t.Fatalf("expected numeric probes prepended, got %d", len(resNumeric))
+	}
+	if !strings.HasPrefix(resNumeric[0].Value, "42") {
+		t.Fatalf("expected first payload to be numeric with value '42...', got %q", resNumeric[0].Value)
+	}
+
+	// 2. Database hint (e.g. postgres) should prioritize matching payloads
+	resHint := prioritizeSQLiPayloads(basePayloads, "pg", false, "")
+	if len(resHint) == 0 || !strings.Contains(resHint[0].Variant, "pg") {
+		t.Fatalf("expected postgres payload first when dbHint='pg', got %q", resHint[0].Variant)
+	}
+}
+
+func TestNativeTargetValueNestedJSON(t *testing.T) {
+	target := ScanTarget{
+		EndpointURL:  "https://example.com/api/users",
+		Parameter:    "user.profile.age",
+		Location:     "json",
+		BodyTemplate: `{"user":{"profile":{"age":25,"name":"Alice"}}}`,
+	}
+	val := nativeTargetValue(target)
+	if val != "25" {
+		t.Fatalf("expected native value '25', got %q", val)
+	}
+	if !isNumericTargetValue(target) {
+		t.Fatalf("expected age=25 to be classified as numeric target")
+	}
+
+	// Array nested target
+	arrayTarget := ScanTarget{
+		EndpointURL:  "https://example.com/api/items",
+		Parameter:    "items.0.id",
+		Location:     "json",
+		BodyTemplate: `{"items":[{"id":999,"title":"Test"}]}`,
+	}
+	arrVal := nativeTargetValue(arrayTarget)
+	if arrVal != "999" {
+		t.Fatalf("expected native value '999', got %q", arrVal)
+	}
+	if !isNumericTargetValue(arrayTarget) {
+		t.Fatalf("expected items.0.id=999 to be classified as numeric target")
+	}
+}
+

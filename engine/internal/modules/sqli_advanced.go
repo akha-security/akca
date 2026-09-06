@@ -581,7 +581,7 @@ func sqliBooleanPairs(scanID string, target ScanTarget) []sqliBooleanPair {
 	if baseVal == "" {
 		baseVal = "1"
 	}
-	return []sqliBooleanPair{
+	pairs := []sqliBooleanPair{
 		{
 			fmt.Sprintf(`%s' AND '%d'='%d'-- -`, baseVal, left, left), fmt.Sprintf(`%s' AND '%d'='%d'-- -`, baseVal, left, right),
 			fmt.Sprintf(`%s' AND '%d'='%d'-- -`, baseVal, left2, left2), fmt.Sprintf(`%s' AND '%d'='%d'-- -`, baseVal, left2, right2),
@@ -638,6 +638,19 @@ func sqliBooleanPairs(scanID string, target ScanTarget) []sqliBooleanPair {
 			"boolean_xor_leading",
 		},
 	}
+	if isNumericTargetValue(target) {
+		var numPairs []sqliBooleanPair
+		var otherPairs []sqliBooleanPair
+		for _, p := range pairs {
+			if strings.Contains(p.variant, "numeric") || strings.Contains(p.variant, "comparison") {
+				numPairs = append(numPairs, p)
+			} else {
+				otherPairs = append(otherPairs, p)
+			}
+		}
+		return append(numPairs, otherPairs...)
+	}
+	return pairs
 }
 
 func (r *Runner) booleanBlindSQLiProbe(ctx context.Context, target ScanTarget, baseline httpclient.RequestResponse) []ModuleFinding {

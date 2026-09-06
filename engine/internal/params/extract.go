@@ -180,6 +180,9 @@ func collectJSONPaths(value interface{}, prefix string, out map[string]struct{})
 				path = prefix + "." + path
 			}
 			collectJSONPaths(child, path, out)
+			if prefix != "" {
+				collectJSONPaths(child, prefix, out)
+			}
 			if i >= 2 {
 				break
 			}

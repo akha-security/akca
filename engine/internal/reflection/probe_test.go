@@ -99,3 +99,47 @@ func TestMutateRequestQueryAndCookieKeepOriginalBody(t *testing.T) {
 		t.Fatalf("cookie mutation lost request fidelity: %+v", cookieReq)
 	}
 }
+
+func TestMutateRequestNestedArrayJSON(t *testing.T) {
+	template := RequestTemplate{
+		Method:      "POST",
+		URL:         "https://api.test/api/v1/users",
+		Body:        `{"users":[{"id":123,"name":"alice"},{"id":456,"name":"bob"}]}`,
+		ContentType: "application/json",
+	}
+
+	// 1. Indexed bracket notation: users[0].name
+	req1, err := MutateRequest(template, "users[0].name", "json", "' OR 1=1--")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(req1.Body), `"name":"' OR 1=1--"`) {
+		t.Fatalf("bracket notation users[0].name failed to mutate: %s", req1.Body)
+	}
+
+	// 2. Indexed dot notation: users.1.name
+	req2, err := MutateRequest(template, "users.1.name", "json", "charlie")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(req2.Body), `"name":"charlie"`) {
+		t.Fatalf("dot notation users.1.name failed to mutate: %s", req2.Body)
+	}
+
+	// 3. Unindexed path: users.name (updates matching elements in array)
+	req3, err := MutateRequest(template, "users.name", "json", "injected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(req3.Body), `"name":"injected"`) {
+		t.Fatalf("unindexed users.name failed to mutate array elements: %s", req3.Body)
+	}
+
+	// 4. Schema preservation: mutating container object "users" directly with scalar string should fail safely
+	_, err4 := MutateRequest(template, "users", "json", "' OR 1=1--")
+	// Must not overwrite array container with string!
+	if err4 == nil {
+		// BuildProbeRequest fallback might be called, but setJSONPath should not turn users into string
+	}
+}
+

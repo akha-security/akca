@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/learning"
@@ -590,7 +591,7 @@ func paramsFromBody(body, contentType string) ([]string, string) {
 			var keys []string
 			collectJSONKeys(doc, "", &keys)
 			if len(keys) > 0 {
-				return keys, "json"
+				return deduplicateStrings(keys), "json"
 			}
 		}
 	}
@@ -604,10 +605,22 @@ func paramsFromBody(body, contentType string) ([]string, string) {
 			}
 		}
 		if len(keys) > 0 {
-			return keys, "form"
+			return deduplicateStrings(keys), "form"
 		}
 	}
 	return nil, "form"
+}
+
+func deduplicateStrings(items []string) []string {
+	seen := make(map[string]struct{}, len(items))
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if _, exists := seen[item]; !exists {
+			seen[item] = struct{}{}
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func collectJSONKeys(doc interface{}, prefix string, keys *[]string) {
@@ -618,12 +631,31 @@ func collectJSONKeys(doc interface{}, prefix string, keys *[]string) {
 			if prefix != "" {
 				fullKey = prefix + "." + k
 			}
-			*keys = append(*keys, fullKey)
-			collectJSONKeys(val, fullKey, keys)
+			switch val.(type) {
+			case map[string]interface{}, []interface{}:
+				collectJSONKeys(val, fullKey, keys)
+			default:
+				*keys = append(*keys, fullKey)
+			}
 		}
 	case []interface{}:
-		for _, item := range v {
-			collectJSONKeys(item, prefix, keys)
+		for i, item := range v {
+			indexedPrefix := strconv.Itoa(i)
+			if prefix != "" {
+				indexedPrefix = prefix + "." + indexedPrefix
+			}
+			switch item.(type) {
+			case map[string]interface{}, []interface{}:
+				collectJSONKeys(item, indexedPrefix, keys)
+				if prefix != "" {
+					collectJSONKeys(item, prefix, keys)
+				}
+			default:
+				*keys = append(*keys, indexedPrefix)
+			}
+			if i >= 2 {
+				break
+			}
 		}
 	}
 }

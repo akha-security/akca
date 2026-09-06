@@ -141,3 +141,21 @@ func TestProbesCount(t *testing.T) {
 		t.Fatalf("expected many nosql probes, got %d", len(Probes("email")))
 	}
 }
+
+func TestNoSQLNestedKeySupport(t *testing.T) {
+	loginBypass := buildLoginBypassJSON("user.account.name")
+	if !contains(loginBypass, `"user":{"account":{"name":{"$ne":""}}}`) {
+		t.Fatalf("buildLoginBypassJSON failed to produce nested JSON: %s", loginBypass)
+	}
+
+	gtPair := buildGTPairJSON("credentials.user")
+	if !contains(gtPair, `"credentials":{"user":{"$gt":""}}`) {
+		t.Fatalf("buildGTPairJSON failed to produce nested JSON: %s", gtPair)
+	}
+
+	control := ControlBody("session.auth_user")
+	if !contains(control, `"session":{"auth_user":"akca_nosql_control"}`) {
+		t.Fatalf("ControlBody failed to produce nested JSON: %s", control)
+	}
+}
+

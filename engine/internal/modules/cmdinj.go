@@ -51,9 +51,36 @@ func (r *Runner) runCommandInjection(ctx context.Context, target ScanTarget) []M
 			{Value: "`id`", VulnClass: "command_injection", Variant: "backtick", ExpectedSignal: "command_output"},
 		}...)
 	}
+	isNumeric := isNumericTargetValue(target)
+	nativeVal := nativeTargetValue(target)
+	if isNumeric && nativeVal != "" {
+		numericProbes := []payloadgen.Payload{
+			{Value: nativeVal + "; id", VulnClass: "command_injection", Variant: "numeric_semicolon", ExpectedSignal: "command_output"},
+			{Value: nativeVal + "| id", VulnClass: "command_injection", Variant: "numeric_pipe", ExpectedSignal: "command_output"},
+			{Value: nativeVal + "&& id", VulnClass: "command_injection", Variant: "numeric_and", ExpectedSignal: "command_output"},
+			{Value: nativeVal + "$(id)", VulnClass: "command_injection", Variant: "numeric_subshell", ExpectedSignal: "command_output"},
+			{
+				Value:                fmt.Sprintf(`%s; printf 'AKCA_CMD_%%d' $((%d+1))`, nativeVal, primarySeed),
+				VulnClass:            "command_injection",
+				Family:               "command_injection",
+				Variant:              "numeric_computed_canary",
+				ExpectedSignal:       "canary_output",
+				VerificationStrategy: "computed_output_pair",
+				NoiseLevel:           "high",
+				RiskLevel:            "active",
+				Priority:             80,
+				BudgetCost:           2,
+			},
+		}
+		probes = append(numericProbes, probes...)
+	}
+	fastFailLimit := 6
+	if isNumeric {
+		fastFailLimit = 10
+	}
 	earlySignalFound := false
 	for idx, p := range probes {
-		if idx >= 6 && !earlySignalFound && len(out) == 0 {
+		if idx >= fastFailLimit && !earlySignalFound && len(out) == 0 {
 			break
 		}
 		probePayload := p
@@ -88,6 +115,10 @@ func (r *Runner) runCommandInjection(ctx context.Context, target ScanTarget) []M
 			elapsed = rr.Response.Duration.Milliseconds()
 		}
 		signal := detectCommandSignal(probePayload, rr.Response.Body, baseline.Response.Body, elapsed, timingBase, sleepSec)
+		if signal != "" || rr.Response.StatusCode >= 500 ||
+			(baseline.Response.StatusCode < 400 && rr.Response.StatusCode >= 400 && rr.Response.StatusCode != 404) {
+			earlySignalFound = true
+		}
 		if signal == "" && r.cfg.EnableOAST && r.oast != nil {
 			if oast := strings.TrimSpace(r.oastURL(ctx, "cmd-"+target.Parameter, target, "command_injection")); oast != "" {
 				for _, callbackPayload := range commandOASTProbes(oast, windows) {

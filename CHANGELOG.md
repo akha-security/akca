@@ -5,6 +5,29 @@ All notable changes to AKCA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.6] - 2026-09-06
+
+### Added
+
+- **Universal Type-Aware Probing Across All Modules**:
+  - **SQL Injection**: Added automatic numeric boolean and error-based probes (`AND 1=CONVERT(...)`, `CAST(...)`, `EXTRACTVALUE(...)`, `subzero -0`) for numeric parameters, prioritized database-hinted payloads (PostgreSQL, MSSQL, MySQL, Oracle, SQLite) within initial probe sequences, and prioritized numeric boolean pairs in boolean-blind verification.
+  - **Command Injection**: Prepending numeric-prefixed injection probes (`1; id`, `1|id`, `1&&id`, `1$(id)`) and numeric canary evaluations for integer/numeric parameters to bypass strict prefix input validation.
+  - **NoSQL Injection**: Implemented nested dotted path resolution (`user.account.name`) across MongoDB operator queries (`$ne`, `$gt`, `$regex`, `$or`) and authentication bypass bodies.
+  - **IDOR / BOLA**: Enhanced parameter detection with `nativeTargetValue` across JSON, form, query, and path locations; added type-aware increment/decrement (`+1`, `-1`, `+2`) and UUID character mutations.
+  - **LFI / Path Traversal**: Balanced Linux and Windows traversal testing with increased thresholds to prevent premature fast-fail on cross-platform targets.
+
+- **Adaptive Fair-Share Budgeting & Dynamic Rollover**:
+  - Added category-weighted budget partitioning (Injection 35%, Server-Side 25%, Logic & Auth 25%, Client & Exposure 15%) when `--request-budget` is set, eliminating starvation where early modules consume all requests and starve later modules.
+  - Implemented dynamic budget rollover: unspent requests from completed modules and groups are automatically returned to a shared reserve pool for subsequent modules to utilize.
+  - Added explicit coverage gap metrics (`targets_tested`, `targets_total`, and `coverage_percentage`) whenever budgets are exhausted, preventing silent false negatives.
+
+### Fixed
+
+- **Nested JSON & Array Mutation Failures**:
+  - Rewrote JSON path traversal in `reflection.MutateRequest` and `setJSONPath` to support bracket notation (`users[0].id`), dot notation (`users.0.id`), and unindexed array mutations (`users.id`).
+  - Implemented strict schema preservation in `schemaCompatibleJSONValue` preventing container objects and arrays from being overwritten with scalar string payloads.
+  - Updated `loader.go:collectJSONKeys` to target only leaf scalar values, preventing 400 Bad Request schema validation rejections on REST/JSON APIs.
+
 ## [0.1.5] - 2026-09-06
 
 ### Fixed

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/payloadgen"
@@ -28,6 +30,8 @@ func (r *Runner) RunGroupB(ctx context.Context, targets []ScanTarget) ([]ModuleF
 
 	var mu sync.Mutex
 	var findings []ModuleFinding
+	var testedCount atomic.Int64
+	var skippedBudgetCount atomic.Int64
 
 	targetCh := make(chan ScanTarget, moduleQueueCapacity(workers, len(targets)))
 
@@ -45,12 +49,14 @@ func (r *Runner) RunGroupB(ctx context.Context, targets []ScanTarget) ([]ModuleF
 				if ctx.Err() != nil {
 					return
 				}
-				if r.budgetExhausted.Load() {
+				if r.budgetExhausted.Load() || !r.canModuleProbe("ssrf") {
+					skippedBudgetCount.Add(1)
 					continue
 				}
 				if !r.scope.IsInScope(target.EndpointURL) {
 					continue
 				}
+				testedCount.Add(1)
 				func() {
 					defer func() {
 						if rec := recover(); rec != nil {
@@ -98,9 +104,29 @@ func (r *Runner) RunGroupB(ctx context.Context, targets []ScanTarget) ([]ModuleF
 	feedModuleTargets(ctx, targetCh, targets)
 	wg.Wait()
 
+	r.releaseUnusedCategoryBudget("serverside")
+	totalTargets := len(targets)
+	tested := int(testedCount.Load())
+	skipped := int(skippedBudgetCount.Load())
+	coveragePct := 100.0
+	if totalTargets > 0 {
+		coveragePct = float64(tested) / float64(totalTargets) * 100.0
+	}
 	_ = r.emit("vuln_modules_b_finished", "SSRF, LFI & XXE scanning finished", map[string]interface{}{
 		"scan_id": r.scanID, "findings": len(findings),
+		"targets_tested": tested, "targets_total": totalTargets,
+		"coverage_percentage": fmt.Sprintf("%.1f%%", coveragePct),
 	})
+	if skipped > 0 {
+		r.emitOnce("group_budget_starved:group_b", "coverage_gap",
+			fmt.Sprintf("Server-side scan group was budget-starved: tested %d of %d targets (%.1f%% coverage)", tested, totalTargets, coveragePct),
+			map[string]interface{}{
+				"scan_id": r.scanID, "group": "group_b",
+				"targets_tested": tested, "targets_total": totalTargets,
+				"coverage_pct": coveragePct,
+			},
+		)
+	}
 	return findings, nil
 }
 
@@ -479,21 +505,85 @@ func nativeTargetValue(target ScanTarget) string {
 			return value[0]
 		}
 	}
-	if target.BodyTemplate != "" && target.Parameter != "" {
+	body := target.BodyTemplate
+	if body == "" {
+		body = target.RequestTemplate.Body
+	}
+	if body != "" && target.Parameter != "" {
 		location := strings.ToLower(strings.TrimSpace(target.Location))
 		if location == "form" {
-			if values, err := url.ParseQuery(target.BodyTemplate); err == nil {
+			if values, err := url.ParseQuery(body); err == nil {
 				return values.Get(target.Parameter)
 			}
 		}
-		if location == "json" || strings.Contains(strings.ToLower(target.Profile.ContentType), "json") {
-			var object map[string]any
-			if json.Unmarshal([]byte(target.BodyTemplate), &object) == nil {
-				if value, exists := object[target.Parameter]; exists {
-					return fmt.Sprint(value)
+		if location == "json" || strings.Contains(strings.ToLower(target.Profile.ContentType), "json") || strings.HasPrefix(strings.TrimSpace(body), "{") || strings.HasPrefix(strings.TrimSpace(body), "[") {
+			var doc any
+			if json.Unmarshal([]byte(body), &doc) == nil {
+				normParam := strings.ReplaceAll(target.Parameter, "[", ".")
+				normParam = strings.ReplaceAll(normParam, "]", "")
+				normParam = strings.Trim(normParam, ".")
+				parts := strings.Split(normParam, ".")
+				if val, found := getJSONValueByPath(doc, parts); found {
+					return fmt.Sprint(val)
+				}
+			}
+		}
+	}
+	if strings.EqualFold(target.Location, "path") && target.Parameter != "" {
+		if u, err := url.Parse(target.EndpointURL); err == nil {
+			segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+			for _, seg := range segs {
+				if seg != "" && seg != target.Parameter {
+					return seg
 				}
 			}
 		}
 	}
 	return ""
 }
+
+func getJSONValueByPath(current any, path []string) (any, bool) {
+	if len(path) == 0 || current == nil {
+		return nil, false
+	}
+	switch node := current.(type) {
+	case map[string]any:
+		val, exists := node[path[0]]
+		if !exists {
+			return nil, false
+		}
+		if len(path) == 1 {
+			return val, true
+		}
+		return getJSONValueByPath(val, path[1:])
+	case []any:
+		idx, err := strconv.Atoi(path[0])
+		if err == nil && idx >= 0 && idx < len(node) {
+			if len(path) == 1 {
+				return node[idx], true
+			}
+			return getJSONValueByPath(node[idx], path[1:])
+		}
+		for _, item := range node {
+			if val, ok := getJSONValueByPath(item, path); ok {
+				return val, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func isNumericTargetValue(target ScanTarget) bool {
+	val := strings.TrimSpace(nativeTargetValue(target))
+	if val == "" {
+		return false
+	}
+	if _, err := strconv.ParseInt(val, 10, 64); err == nil {
+		return true
+	}
+	if _, err := strconv.ParseFloat(val, 64); err == nil {
+		return true
+	}
+	return false
+}
+

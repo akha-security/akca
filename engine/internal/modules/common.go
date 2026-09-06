@@ -22,7 +22,13 @@ func (r *Runner) probe(ctx context.Context, target ScanTarget, payload string) (
 }
 
 func (r *Runner) probeForModule(ctx context.Context, module string, target ScanTarget, payload string) (httpclient.RequestResponse, error) {
+	if module != "" && !r.canModuleProbe(module) {
+		return httpclient.RequestResponse{}, fmt.Errorf("request budget exhausted for module %s", module)
+	}
 	r.probeCount.Add(1)
+	if module != "" {
+		r.recordModuleProbeUsage(module)
+	}
 	method := strings.ToUpper(target.Method)
 	if method == "" {
 		method = http.MethodGet

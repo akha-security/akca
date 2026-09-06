@@ -76,7 +76,10 @@ func MutateRequest(template RequestTemplate, param, location, value string) (Mut
 		if doc == nil {
 			doc = make(map[string]interface{})
 		}
-		if setJSONPath(doc, strings.Split(param, "."), value) {
+		normParam := strings.ReplaceAll(param, "[", ".")
+		normParam = strings.ReplaceAll(normParam, "]", "")
+		normParam = strings.Trim(normParam, ".")
+		if setJSONPath(doc, strings.Split(normParam, "."), value) {
 			mutated, err := json.Marshal(doc)
 			if err == nil {
 				if headerValueCI(headers, "Content-Type") == "" {
@@ -180,33 +183,46 @@ func setJSONPath(current interface{}, path []string, value string) bool {
 	switch node := current.(type) {
 	case map[string]interface{}:
 		if len(path) == 1 {
-			current, exists := node[path[0]]
-			if !exists {
-				return false
+			currentVal, exists := node[path[0]]
+			if exists {
+				coerced, ok := schemaCompatibleJSONValue(currentVal, value)
+				if !ok {
+					return false
+				}
+				node[path[0]] = coerced
+				return true
 			}
-			coerced, ok := schemaCompatibleJSONValue(current, value)
-			if !ok {
-				return false
-			}
-			node[path[0]] = coerced
+			node[path[0]] = value
 			return true
 		}
 		next, ok := node[path[0]]
-		return ok && setJSONPath(next, path[1:], value)
+		if !ok {
+			nextMap := make(map[string]interface{})
+			node[path[0]] = nextMap
+			return setJSONPath(nextMap, path[1:], value)
+		}
+		return setJSONPath(next, path[1:], value)
 	case []interface{}:
 		idx, err := strconv.Atoi(path[0])
-		if err != nil || idx < 0 || idx >= len(node) {
-			return false
-		}
-		if len(path) == 1 {
-			coerced, ok := schemaCompatibleJSONValue(node[idx], value)
-			if !ok {
-				return false
+		if err == nil && idx >= 0 && idx < len(node) {
+			if len(path) == 1 {
+				coerced, ok := schemaCompatibleJSONValue(node[idx], value)
+				if !ok {
+					return false
+				}
+				node[idx] = coerced
+				return true
 			}
-			node[idx] = coerced
-			return true
+			return setJSONPath(node[idx], path[1:], value)
 		}
-		return setJSONPath(node[idx], path[1:], value)
+		// Fallback for unindexed path like "id" targeting an array of objects:
+		mutatedAny := false
+		for i := range node {
+			if setJSONPath(node[i], path, value) {
+				mutatedAny = true
+			}
+		}
+		return mutatedAny
 	default:
 		return false
 	}
@@ -214,6 +230,9 @@ func setJSONPath(current interface{}, path []string, value string) bool {
 
 func schemaCompatibleJSONValue(current interface{}, value string) (interface{}, bool) {
 	switch current.(type) {
+	case map[string]interface{}, []interface{}:
+		// Never overwrite an object or array container node with a scalar probe string!
+		return nil, false
 	case bool:
 		if parsed, err := strconv.ParseBool(value); err == nil {
 			return parsed, true
@@ -261,12 +280,20 @@ func BuildProbeRequest(endpointURL, method, param, location, value string) (stri
 		}
 		return u.String(), []byte(form.Encode()), headers, nil
 	case "json", "graphql":
-		body := fmt.Sprintf("{%q:%q}", param, value)
+		doc := make(map[string]interface{})
+		normParam := strings.ReplaceAll(param, "[", ".")
+		normParam = strings.ReplaceAll(normParam, "]", "")
+		normParam = strings.Trim(normParam, ".")
+		setJSONPath(doc, strings.Split(normParam, "."), value)
+		body, err := json.Marshal(doc)
+		if err != nil {
+			body = []byte(fmt.Sprintf("{%q:%q}", param, value))
+		}
 		headers["Content-Type"] = "application/json"
 		if strings.ToUpper(method) == "" || strings.ToUpper(method) == "GET" {
 			method = "POST"
 		}
-		return u.String(), []byte(body), headers, nil
+		return u.String(), body, headers, nil
 	case "xml":
 		body := fmt.Sprintf("<%s>%s</%s>", param, value, param)
 		headers["Content-Type"] = "application/xml"

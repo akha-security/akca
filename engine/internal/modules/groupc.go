@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 func (r *Runner) RunGroupC(ctx context.Context, targets []ScanTarget) ([]ModuleFinding, error) {
@@ -21,6 +22,8 @@ func (r *Runner) RunGroupC(ctx context.Context, targets []ScanTarget) ([]ModuleF
 
 	var mu sync.Mutex
 	var findings []ModuleFinding
+	var testedCount atomic.Int64
+	var skippedBudgetCount atomic.Int64
 
 	targetCh := make(chan ScanTarget, moduleQueueCapacity(workers, len(targets)))
 
@@ -38,12 +41,14 @@ func (r *Runner) RunGroupC(ctx context.Context, targets []ScanTarget) ([]ModuleF
 				if ctx.Err() != nil {
 					return
 				}
-				if r.budgetExhausted.Load() {
+				if r.budgetExhausted.Load() || !r.canModuleProbe("cors") {
+					skippedBudgetCount.Add(1)
 					continue
 				}
 				if !r.scope.IsInScope(target.EndpointURL) {
 					continue
 				}
+				testedCount.Add(1)
 				func() {
 					defer func() {
 						if rec := recover(); rec != nil {
@@ -121,9 +126,29 @@ func (r *Runner) RunGroupC(ctx context.Context, targets []ScanTarget) ([]ModuleF
 	feedModuleTargets(ctx, targetCh, targets)
 	wg.Wait()
 
+	r.releaseUnusedCategoryBudget("logic_auth")
+	totalTargets := len(targets)
+	tested := int(testedCount.Load())
+	skipped := int(skippedBudgetCount.Load())
+	coveragePct := 100.0
+	if totalTargets > 0 {
+		coveragePct = float64(tested) / float64(totalTargets) * 100.0
+	}
 	_ = r.emit("vuln_modules_c_finished", "Authentication & API security scanning finished", map[string]interface{}{
 		"scan_id": r.scanID, "findings": len(findings),
+		"targets_tested": tested, "targets_total": totalTargets,
+		"coverage_percentage": fmt.Sprintf("%.1f%%", coveragePct),
 	})
+	if skipped > 0 {
+		r.emitOnce("group_budget_starved:group_c", "coverage_gap",
+			fmt.Sprintf("Authentication & API scan group was budget-starved: tested %d of %d targets (%.1f%% coverage)", tested, totalTargets, coveragePct),
+			map[string]interface{}{
+				"scan_id": r.scanID, "group": "group_c",
+				"targets_tested": tested, "targets_total": totalTargets,
+				"coverage_pct": coveragePct,
+			},
+		)
+	}
 	return findings, nil
 }
 

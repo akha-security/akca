@@ -74,14 +74,20 @@ func (r *Runner) runLFI(ctx context.Context, target ScanTarget) []ModuleFinding 
 		if ctx.Err() != nil {
 			break
 		}
-		// Fast-fail: if the first 6 core payloads fail to produce any signal or change, terminate.
-		if coreTested >= 6 && !coreHadSignal && len(proofs) == 0 {
+		// Fast-fail: if initial core payloads fail to produce any signal or change, terminate.
+		if coreTested >= 10 && !coreHadSignal && len(proofs) == 0 {
 			break
 		}
 		coreTested++
 		rr, err := r.probeForModule(ctx, "lfi", target, p.Value)
 		if err != nil {
 			continue
+		}
+		if !isInfrastructureError(rr.Response.StatusCode) {
+			if rr.Response.StatusCode == 500 ||
+				(baseline.Response.StatusCode < 400 && rr.Response.StatusCode >= 400 && rr.Response.StatusCode != 404) {
+				coreHadSignal = true
+			}
 		}
 		if runtimeFinding, handled := r.runtimeSinkProof(ctx, "lfi", target, p, baseline, rr); handled {
 			if runtimeFinding != nil {

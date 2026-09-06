@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 func (r *Runner) RunModuleFromDB(ctx context.Context, module string, limit int) ([]ModuleFinding, error) {
@@ -32,6 +33,8 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 
 	var mu sync.Mutex
 	var findings []ModuleFinding
+	var testedCount atomic.Int64
+	var skippedBudgetCount atomic.Int64
 	errorsBefore := r.executionErrors.Load()
 	targetCh := make(chan ScanTarget, moduleQueueCapacity(workers, len(targets)))
 
@@ -50,12 +53,14 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 				if ctx.Err() != nil {
 					return
 				}
-				if r.budgetExhausted.Load() {
+				if r.budgetExhausted.Load() || !r.canModuleProbe(module) {
+					skippedBudgetCount.Add(1)
 					continue
 				}
 				if !r.scope.IsInScope(target.EndpointURL) {
 					continue
 				}
+				testedCount.Add(1)
 				func() {
 					defer func() {
 						if rec := recover(); rec != nil {
@@ -79,9 +84,28 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 	if module == "sqli" || module == "command_injection" {
 		findings = append(findings, r.flushDelayedTimingVerifications(ctx)...)
 	}
+	totalTargets := len(targets)
+	tested := int(testedCount.Load())
+	skipped := int(skippedBudgetCount.Load())
+	coveragePct := 100.0
+	if totalTargets > 0 {
+		coveragePct = float64(tested) / float64(totalTargets) * 100.0
+	}
 	_ = r.emit("vuln_module_finished", module+" scanning finished", map[string]interface{}{
 		"scan_id": r.scanID, "module": module, "findings": len(findings),
+		"targets_tested": tested, "targets_total": totalTargets,
+		"coverage_percentage": fmt.Sprintf("%.1f%%", coveragePct),
 	})
+	if skipped > 0 {
+		r.emitOnce("module_budget_starved:"+module, "coverage_gap",
+			fmt.Sprintf("Module %s was budget-starved: tested %d of %d targets (%.1f%% coverage)", module, tested, totalTargets, coveragePct),
+			map[string]interface{}{
+				"scan_id": r.scanID, "module": module,
+				"targets_tested": tested, "targets_total": totalTargets,
+				"coverage_pct": coveragePct,
+			},
+		)
+	}
 	if failed := r.executionErrors.Load() - errorsBefore; failed > 0 {
 		return findings, fmt.Errorf("module %s completed with %d execution or persistence errors", module, failed)
 	}

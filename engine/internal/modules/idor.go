@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/config"
@@ -53,16 +54,30 @@ func (r *Runner) runIDORHeuristicCoverage(ctx context.Context, target ScanTarget
 	if err != nil || baseline.Response.StatusCode >= 400 {
 		return
 	}
-	origVal := "100"
-	if u, err := url.Parse(target.EndpointURL); err == nil {
-		if qVal := u.Query().Get(target.Parameter); qVal != "" {
-			origVal = qVal
+	origVal := nativeTargetValue(target)
+	if origVal == "" {
+		origVal = "100"
+		if u, err := url.Parse(target.EndpointURL); err == nil {
+			if qVal := u.Query().Get(target.Parameter); qVal != "" {
+				origVal = qVal
+			}
 		}
 	}
 	hint := &mutation.SchemaHint{ParamName: target.Parameter}
 	vType := mutation.Classify(origVal, hint)
 	mSet := mutation.Generate(origVal, vType, nil)
-	payloads := []string{"102", "1", "999999", "00000000-0000-0000-0000-000000000001"}
+	var payloads []string
+	if n, err := strconv.ParseInt(origVal, 10, 64); err == nil {
+		payloads = append(payloads, strconv.FormatInt(n+1, 10), strconv.FormatInt(n-1, 10), strconv.FormatInt(n+2, 10))
+	} else if len(origVal) == 36 && strings.Count(origVal, "-") == 4 {
+		lastChar := origVal[len(origVal)-1]
+		newChar := "1"
+		if lastChar == '1' {
+			newChar = "2"
+		}
+		payloads = append(payloads, origVal[:len(origVal)-1]+newChar)
+	}
+	payloads = append(payloads, "102", "1", "999999", "00000000-0000-0000-0000-000000000001")
 	for _, mut := range mSet.Mutations {
 		if mut.Value != "" && mut.Value != origVal {
 			payloads = append(payloads, mut.Value)

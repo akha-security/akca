@@ -153,6 +153,9 @@ type Runner struct {
 	budgetExhausted atomic.Bool
 	probeCount      atomic.Int64
 	executionErrors atomic.Int64
+	categoryBudgets map[string]int64
+	categoryUsage   map[string]*atomic.Int64
+	rolloverPool    atomic.Int64
 }
 
 // ProbeCount reports vulnerability-module probe attempts independently from
@@ -178,6 +181,20 @@ func NewRunner(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *st
 		moduleSeen:      make(map[string]struct{}),
 		findingSeen:     make(map[string]int64),
 	}
+	if cfg.RequestBudget > 0 {
+		r.categoryBudgets = map[string]int64{
+			"injection":       int64(float64(cfg.RequestBudget) * 0.35),
+			"serverside":      int64(float64(cfg.RequestBudget) * 0.25),
+			"logic_auth":      int64(float64(cfg.RequestBudget) * 0.25),
+			"client_exposure": int64(float64(cfg.RequestBudget) * 0.15),
+		}
+		r.categoryUsage = map[string]*atomic.Int64{
+			"injection":       new(atomic.Int64),
+			"serverside":      new(atomic.Int64),
+			"logic_auth":      new(atomic.Int64),
+			"client_exposure": new(atomic.Int64),
+		}
+	}
 	r.tlsInspector = newNetworkTLSInspector(cfg)
 	r.websocket = newNetworkWebSocketProber(cfg, scopeEngine)
 	r.smuggling = newNetworkSmugglingProber(cfg, scopeEngine)
@@ -197,6 +214,75 @@ func NewRunner(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *st
 	r.loadStoredMarkers()
 	r.loadExistingFindingKeys()
 	return r
+}
+
+func moduleCategory(module string) string {
+	switch module {
+	case "sqli", "command_injection", "ssti", "nosql":
+		return "injection"
+	case "ssrf", "xxe", "insecure_deserialization", "lfi", "file_upload":
+		return "serverside"
+	case "idor", "auth_bypass", "cors", "csrf", "broken_auth", "jwt", "oauth", "bfla", "session_fixation", "open_redirect":
+		return "logic_auth"
+	default:
+		return "client_exposure"
+	}
+}
+
+func (r *Runner) canModuleProbe(module string) bool {
+	if r == nil || r.cfg.RequestBudget <= 0 {
+		return true
+	}
+	if r.budgetExhausted.Load() {
+		return false
+	}
+	cat := moduleCategory(module)
+	usage := r.categoryUsage[cat]
+	if usage == nil {
+		return true
+	}
+	used := usage.Load()
+	allocated := r.categoryBudgets[cat]
+	if used < allocated {
+		return true
+	}
+	if r.rolloverPool.Load() > 0 {
+		return true
+	}
+	return false
+}
+
+func (r *Runner) recordModuleProbeUsage(module string) {
+	if r == nil || r.cfg.RequestBudget <= 0 {
+		return
+	}
+	cat := moduleCategory(module)
+	usage := r.categoryUsage[cat]
+	if usage == nil {
+		return
+	}
+	allocated := r.categoryBudgets[cat]
+	cur := usage.Add(1)
+	if cur > allocated {
+		r.rolloverPool.Add(-1)
+	}
+}
+
+func (r *Runner) releaseUnusedCategoryBudget(cat string) {
+	if r == nil || r.cfg.RequestBudget <= 0 {
+		return
+	}
+	usage := r.categoryUsage[cat]
+	if usage == nil {
+		return
+	}
+	used := usage.Load()
+	allocated := r.categoryBudgets[cat]
+	if remaining := allocated - used; remaining > 0 {
+		if usage.CompareAndSwap(used, allocated) {
+			r.rolloverPool.Add(remaining)
+		}
+	}
 }
 
 func (r *Runner) loadStoredMarkers() {
@@ -423,6 +509,8 @@ func (r *Runner) RunGroupA(ctx context.Context, targets []ScanTarget) ([]ModuleF
 
 	var mu sync.Mutex
 	var findings []ModuleFinding
+	var testedCount atomic.Int64
+	var skippedBudgetCount atomic.Int64
 
 	targetCh := make(chan ScanTarget, moduleQueueCapacity(workers, len(targets)))
 
@@ -440,12 +528,14 @@ func (r *Runner) RunGroupA(ctx context.Context, targets []ScanTarget) ([]ModuleF
 				if ctx.Err() != nil {
 					return
 				}
-				if r.budgetExhausted.Load() {
+				if r.budgetExhausted.Load() || !r.canModuleProbe("sqli") {
+					skippedBudgetCount.Add(1)
 					continue
 				}
 				if !r.scope.IsInScope(target.EndpointURL) {
 					continue
 				}
+				testedCount.Add(1)
 				func() {
 					defer func() {
 						if rec := recover(); rec != nil {
@@ -484,9 +574,29 @@ func (r *Runner) RunGroupA(ctx context.Context, targets []ScanTarget) ([]ModuleF
 	feedModuleTargets(ctx, targetCh, targets)
 	wg.Wait()
 
+	r.releaseUnusedCategoryBudget("injection")
+	totalTargets := len(targets)
+	tested := int(testedCount.Load())
+	skipped := int(skippedBudgetCount.Load())
+	coveragePct := 100.0
+	if totalTargets > 0 {
+		coveragePct = float64(tested) / float64(totalTargets) * 100.0
+	}
 	_ = r.emit("vuln_modules_finished", "Injection vulnerability scanning finished", map[string]interface{}{
 		"scan_id": r.scanID, "findings": len(findings),
+		"targets_tested": tested, "targets_total": totalTargets,
+		"coverage_percentage": fmt.Sprintf("%.1f%%", coveragePct),
 	})
+	if skipped > 0 {
+		r.emitOnce("group_budget_starved:group_a", "coverage_gap",
+			fmt.Sprintf("Injection scan group was budget-starved: tested %d of %d targets (%.1f%% coverage)", tested, totalTargets, coveragePct),
+			map[string]interface{}{
+				"scan_id": r.scanID, "group": "group_a",
+				"targets_tested": tested, "targets_total": totalTargets,
+				"coverage_pct": coveragePct,
+			},
+		)
+	}
 	findings = append(findings, r.flushDelayedTimingVerifications(ctx)...)
 	return findings, nil
 }

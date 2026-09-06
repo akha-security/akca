@@ -512,3 +512,46 @@ func TestCoreInjectionModuleParameterRestrictions(t *testing.T) {
 		}
 	}
 }
+
+func TestFairShareBudgetAllocationAndRollover(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.RequestBudget = 100
+	runner := NewRunner("scan-budget-test", nil, nil, nil, nil, nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
+
+	if runner.categoryBudgets["injection"] != 35 {
+		t.Fatalf("expected injection budget 35, got %d", runner.categoryBudgets["injection"])
+	}
+	if runner.categoryBudgets["serverside"] != 25 {
+		t.Fatalf("expected serverside budget 25, got %d", runner.categoryBudgets["serverside"])
+	}
+
+	// Module can probe up to category limit
+	for i := 0; i < 35; i++ {
+		if !runner.canModuleProbe("sqli") {
+			t.Fatalf("expected canModuleProbe to be true at probe %d", i)
+		}
+		runner.recordModuleProbeUsage("sqli")
+	}
+
+	// After hitting 35, canModuleProbe should return false
+	if runner.canModuleProbe("sqli") {
+		t.Fatal("expected canModuleProbe to be false after category budget exhausted")
+	}
+
+	// But another category (serverside) can still probe! (prevents starvation!)
+	if !runner.canModuleProbe("ssrf") {
+		t.Fatal("expected ssrf in serverside category to still have budget")
+	}
+
+	// When serverside completes with 25 unused requests, release to rollover pool
+	runner.releaseUnusedCategoryBudget("serverside")
+	if runner.rolloverPool.Load() != 25 {
+		t.Fatalf("expected rollover pool 25, got %d", runner.rolloverPool.Load())
+	}
+
+	// Now sqli can tap into the rollover pool!
+	if !runner.canModuleProbe("sqli") {
+		t.Fatal("expected sqli to be able to probe using rollover pool")
+	}
+}
+
