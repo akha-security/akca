@@ -51,7 +51,7 @@ func (r *Runner) RunGroupC(ctx context.Context, targets []ScanTarget) ([]ModuleF
 						}
 					}()
 					var localFindings []ModuleFinding
-					if r.cfg.AllowsModule("cors") {
+					if r.cfg.AllowsModule("cors") && r.endpointModuleOnce("cors", target) {
 						localFindings = append(localFindings, r.runCORS(ctx, target)...)
 					}
 					if r.cfg.AllowsModule("jwt") {
@@ -63,7 +63,7 @@ func (r *Runner) RunGroupC(ctx context.Context, targets []ScanTarget) ([]ModuleF
 					if r.cfg.AllowsModule("cache_poisoning") {
 						localFindings = append(localFindings, r.runCachePoisoning(ctx, target)...)
 					}
-					if r.cfg.AllowsModule("cache_deception") {
+					if r.cfg.AllowsModule("cache_deception") && r.endpointModuleOnce("cache_deception", target) {
 						localFindings = append(localFindings, r.runCacheDeception(ctx, target)...)
 					}
 					if r.cfg.AllowsModule("mass_assignment") && r.endpointModuleOnce("mass_assignment", target) {

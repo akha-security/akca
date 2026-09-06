@@ -32,6 +32,7 @@
 report.html
 report.json
 results.json
+akca-report-*.html
 
 # Credentials and local configuration
 .env

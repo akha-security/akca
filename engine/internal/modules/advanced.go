@@ -2,6 +2,7 @@ package modules
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -391,22 +392,39 @@ func (r *Runner) runAPIVersioning(ctx context.Context, target ScanTarget) []Modu
 		if err != nil || rr.Response.StatusCode != 200 {
 			continue
 		}
-		// If the response was redirected (e.g. 302 to login or root page) and is not
-		// simply a trailing slash canonicalization of the version path, reject it.
+		// If the response was redirected, only allow trailing slash normalizations (e.g. /v1 -> /v1/)
+		// Any redirect to other endpoints (e.g. /login, /, /error, /oauth) must be rejected immediately.
 		if rr.Response.Redirected {
-			if rr.Response.InitialStatus >= 300 && rr.Response.InitialStatus <= 308 {
-				finalClean := strings.TrimRight(rr.Response.FinalURL, "/")
-				origClean := strings.TrimRight(u, "/")
-				if finalClean != origClean {
-					continue
-				}
+			finalClean := strings.TrimRight(rr.Response.FinalURL, "/")
+			origClean := strings.TrimRight(u, "/")
+			if finalClean != origClean {
+				continue
 			}
 		}
+
 		// Reject HTML web pages (login pages, custom 404s, SPA entrypoints)
-		lowerBody := strings.ToLower(rr.Response.Body)
+		ct := strings.ToLower(rr.Response.Headers["Content-Type"])
+		if strings.Contains(ct, "text/html") {
+			continue
+		}
+		trimmedBody := strings.TrimSpace(rr.Response.Body)
+		lowerBody := strings.ToLower(trimmedBody)
 		if strings.Contains(lowerBody, "<!doctype") || strings.Contains(lowerBody, "<html") {
 			continue
 		}
+
+		// API discovery requires a real API payload: valid JSON array or object
+		if len(trimmedBody) < 2 {
+			continue
+		}
+		var js interface{}
+		if err := json.Unmarshal([]byte(trimmedBody), &js); err != nil {
+			// If not valid JSON, check if it explicitly announces an API routes listing
+			if !strings.Contains(lowerBody, "swagger") && !strings.Contains(lowerBody, "openapi") && !strings.Contains(lowerBody, "routes") {
+				continue
+			}
+		}
+
 		p := defaultPayload("api_versioning", "version_discovered", version, "version_discovered")
 		f := r.verifyAndBuild(ctx, "api_versioning", target, p, baseline, rr, "version_discovered", false, false, "", "")
 		r.recordFinding(ctx, &out, f, "api_versioning", "version_discovered")

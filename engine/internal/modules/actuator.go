@@ -74,7 +74,22 @@ func (r *Runner) runSpringActuator(ctx context.Context, target ScanTarget) []Mod
 			continue
 		}
 
+		// Reject redirects that take us away from the actuator probe path (e.g. 302 to /login or /)
+		if rr.Response.Redirected {
+			finalClean := strings.TrimRight(rr.Response.FinalURL, "/")
+			origClean := strings.TrimRight(targetURL, "/")
+			if finalClean != origClean {
+				continue
+			}
+		}
+
 		body := rr.Response.Body
+		// Reject HTML web pages unless it's a binary heap dump
+		ct := strings.ToLower(rr.Response.Headers["Content-Type"])
+		if ap.kind != "actuator_heapdump" && (strings.Contains(ct, "text/html") || strings.Contains(strings.ToLower(body), "<!doctype") || strings.Contains(strings.ToLower(body), "<html")) {
+			continue
+		}
+
 		isHealthMatch := (strings.Contains(ap.kind, "health") && (strings.Contains(body, `"status":"UP"`) || strings.Contains(body, `"status": "UP"`) || strings.Contains(body, `"status":"DOWN"`) || strings.Contains(body, `"status":"OUT_OF_SERVICE"`)))
 		if strings.Contains(body, ap.matchMarker) || isHealthMatch || (ap.kind == "actuator_heapdump" && (strings.HasPrefix(body, "JAVA PROFILE") || strings.Contains(body, "HPROF"))) {
 			p := defaultPayload("actuator", ap.kind, ap.path, ap.kind)

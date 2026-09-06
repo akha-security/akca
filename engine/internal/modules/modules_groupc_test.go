@@ -401,6 +401,26 @@ func TestCacheDeceptionRequiresCacheEvidence(t *testing.T) {
 	}
 }
 
+func TestCacheDeceptionSkipsTemplatePathsAndPublicConfirmEmail(t *testing.T) {
+	confirmPage := `<html><body>Please confirm your email address with token: 12345</body></html>`
+	c := &sessionlessGroupCClient{groupCClient: &groupCClient{responses: map[string]string{
+		"/confirm-email/{token}":     confirmPage,
+		"/confirm-email/{token};.css": confirmPage,
+	}, headers: map[string]map[string]string{
+		"/confirm-email/{token};.css": {"Content-Type": "text/html", "X-Cache": "HIT"},
+	}}}
+	// Target with template parameter in URL
+	target := ScanTarget{EndpointURL: "http://example.com/confirm-email/{token}", Method: "GET", Parameter: "User-Agent"}
+	cfg := config.DefaultScanConfig()
+	runner := NewRunner("scan-cache-tpl", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil),
+		nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
+	findings := runner.runCacheDeception(context.Background(), target)
+	if len(findings) != 0 {
+		t.Fatalf("template paths like /confirm-email/{token} must never produce cache deception findings, got %+v", findings)
+	}
+}
+
+
 func TestBrokenAuthUsesAnonymousControl(t *testing.T) {
 	c := authenticatedGroupCClient{}
 	cfg := config.DefaultScanConfig()
@@ -694,3 +714,37 @@ func TestGroupCManifestsPresent(t *testing.T) {
 		t.Fatalf("expected 10 group C modules, got %d", len(GroupCRegistry))
 	}
 }
+
+func TestCORSSkipsStaticAssetsAndEarlyExits(t *testing.T) {
+	requestCount := 0
+	c := &groupCClient{
+		responses: map[string]string{
+			"__default__": "clean html",
+		},
+	}
+	cfg := config.DefaultScanConfig()
+	runner := NewRunner("scan-cors-speed", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+		func(string, string, map[string]interface{}) error { return nil }, cfg)
+
+	// 1. Static asset: should immediately skip and make 0 requests
+	staticTarget := ScanTarget{EndpointURL: "http://example.com/assets/style.css", Method: "GET"}
+	findings := runner.runCORS(context.Background(), staticTarget)
+	if len(findings) != 0 {
+		t.Fatal("static CSS should produce 0 findings")
+	}
+
+	// 2. Non-CORS endpoint: endpointModuleOnce deduplication
+	target1 := ScanTarget{EndpointURL: "http://example.com/items/123?q=foo", Method: "GET", Parameter: "q"}
+	target2 := ScanTarget{EndpointURL: "http://example.com/items/456?q=bar", Method: "GET", Parameter: "q"}
+
+	if !runner.endpointModuleOnce("cors", target1) {
+		t.Fatal("target1 should be accepted for cors")
+	}
+	// target2 has same route pattern /items/{id}, so it must be deduplicated
+	if runner.endpointModuleOnce("cors", target2) {
+		t.Fatal("target2 with same route pattern /items/{id} should be deduplicated")
+	}
+
+	_ = requestCount
+}
+

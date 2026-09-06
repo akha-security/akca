@@ -44,6 +44,7 @@ var headerSignatures = []signature{
 	{Vendor: "Reblaze", Header: "rbzid", Value: ""},
 	{Vendor: "LiteSpeed", Header: "server", Value: "litespeed"},
 	{Vendor: "LiteSpeed", Header: "x-ls-", Value: ""},
+	{Vendor: "LiteSpeed", Header: "x-litespeed-", Value: ""},
 	{Vendor: "Wordfence", Header: "wfwaf-authcookie", Value: ""},
 }
 
@@ -108,6 +109,17 @@ func (p *Profiler) applyResponse(profile *models.WAFProfile, headers map[string]
 	normalized := normalizeHeaders(headers)
 
 	for _, sig := range headerSignatures {
+		if strings.HasSuffix(sig.Header, "-") {
+			for hName, hVal := range normalized {
+				if strings.HasPrefix(hName, sig.Header) {
+					if sig.Value == "" || strings.Contains(strings.ToLower(hVal), sig.Value) {
+						setVendor(profile, sig.Vendor)
+						profile.HeaderSignatures = appendUnique(profile.HeaderSignatures, hName+":"+hVal)
+					}
+				}
+			}
+			continue
+		}
 		val, ok := normalized[sig.Header]
 		if !ok {
 			continue
@@ -201,9 +213,15 @@ func hostFromURL(raw string) string {
 	return parts[0]
 }
 
-// ApplyCautiousMode adjusts rate limiter when WAF/CDN defenses are detected.
-func ApplyCautiousMode(limiter *ratelimit.Limiter, profile models.WAFProfile) {
-	if profile.CautiousModeRecommended {
-		limiter.SetWAFSlowDown(20.0)
+// ApplyCautiousMode temporarily throttles the rate limiter when WAF/CDN active defenses are detected,
+// allowing it to automatically decay back to baseline rates as requests succeed.
+func ApplyCautiousMode(limiter *ratelimit.Limiter, profile models.WAFProfile, baseGlobalRate, targetRate float64) {
+	if limiter == nil || !profile.CautiousModeRecommended {
+		return
 	}
+	multiplier := 3.0
+	if targetRate > 0 && baseGlobalRate > targetRate {
+		multiplier = baseGlobalRate / targetRate
+	}
+	limiter.SetWAFSlowDown(multiplier)
 }

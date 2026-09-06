@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/config"
@@ -11,11 +12,21 @@ import (
 	"github.com/akha-security/akca/engine/internal/verification"
 )
 
+var wcdEmailRe = regexp.MustCompile(`\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`)
+
 func (r *Runner) runCacheDeception(ctx context.Context, target ScanTarget) []ModuleFinding {
 	if ok, reason := r.shouldRunModule("cache_deception", target); !ok {
 		r.emitSkip("cache_deception", target, reason)
 		return nil
 	}
+	// Web Cache Deception is an endpoint-level path confusion attack, not a parameter-level injection.
+	target.Parameter = ""
+
+	// Skip unexpanded route template paths like /confirm-email/{token}
+	if strings.ContainsAny(target.EndpointURL, "{}") {
+		return nil
+	}
+
 	anonymous, ok := r.client.(sessionlessHTTPDoer)
 	if !ok {
 		return nil
@@ -35,11 +46,21 @@ func (r *Runner) runCacheDeception(ctx context.Context, target ScanTarget) []Mod
 	if policy, ok := r.cacheDeceptionPolicy(target); ok && policy.PrivateCanary != "" {
 		canary = policy.PrivateCanary
 	} else {
-		// Heuristic detection: check if authenticated baseline contains personal identifiers
-		for _, kw := range []string{"email", "username", "account", "token", "profile", "apiKey", "balance", "avatar"} {
-			if strings.Contains(strings.ToLower(privateBaseline.Response.Body), kw) {
-				canary = kw
-				break
+		// Heuristic detection: must find structured private identifiers (e.g. an actual email address)
+		// rather than static generic words like "email" or "token" which appear on public pages.
+		m := wcdEmailRe.FindString(privateBaseline.Response.Body)
+		if m != "" && !strings.HasSuffix(m, ".png") && !strings.HasSuffix(m, ".jpg") {
+			canary = m
+		}
+		// In heuristic mode, verify that this canary is truly private by checking
+		// that an unauthenticated (anonymous) request to privateURL does NOT see it.
+		if canary != "" {
+			anonBase, anonErr := anonymous.DoWithoutSession(ctx, http.MethodGet, privateURL, nil, nil)
+			if anonErr == nil && anonBase.Response.StatusCode < 400 {
+				if strings.Contains(anonBase.Response.Body, canary) || anonBase.Response.Body == privateBaseline.Response.Body {
+					// Canary is public, not private data!
+					canary = ""
+				}
 			}
 		}
 	}
@@ -72,13 +93,13 @@ func (r *Runner) runCacheDeception(ctx context.Context, target ScanTarget) []Mod
 	for _, probe := range probes {
 		rawURL := parsed.Scheme + "://" + parsed.Host + probe.path
 		prime, primeErr := r.client.Do(ctx, http.MethodGet, rawURL, nil, nil)
-		if primeErr != nil || !strings.Contains(prime.Response.Body, canary) {
+		if primeErr != nil || prime.Response.StatusCode >= 400 || !strings.Contains(prime.Response.Body, canary) {
 			continue
 		}
 		var victims []httpclient.RequestResponse
 		for attempt := 0; attempt < 3; attempt++ {
 			victim, victimErr := anonymous.DoWithoutSession(ctx, http.MethodGet, rawURL, nil, nil)
-			if victimErr != nil || !strings.Contains(victim.Response.Body, canary) ||
+			if victimErr != nil || victim.Response.StatusCode >= 400 || !strings.Contains(victim.Response.Body, canary) ||
 				!cacheEvidence(victim.Response.Headers) {
 				victims = nil
 				break

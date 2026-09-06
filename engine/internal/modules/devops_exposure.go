@@ -320,6 +320,15 @@ func (r *Runner) runDevOpsExposure(ctx context.Context, target ScanTarget) []Mod
 			continue
 		}
 
+		// Reject redirects away from the probed infrastructure path (e.g. 302 to login or root)
+		if rr.Response.Redirected {
+			finalClean := strings.TrimRight(rr.Response.FinalURL, "/")
+			origClean := strings.TrimRight(targetURL, "/")
+			if finalClean != origClean {
+				continue
+			}
+		}
+
 		if dt.verifier(rr.Response.Body, rr.Response.StatusCode) {
 			signal := fmt.Sprintf("devops_exposure_%s", strings.ReplaceAll(strings.TrimPrefix(dt.path, "/"), "/", "_"))
 			p := defaultPayload("devops_exposure", dt.path, dt.path, signal)

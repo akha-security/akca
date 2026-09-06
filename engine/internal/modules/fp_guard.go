@@ -362,6 +362,16 @@ func ssrfSignalConfirmed(p payloadgen.Payload, baseline, probe httpclient.Respon
 	if body == base || strings.TrimSpace(body) == "" {
 		return false
 	}
+	// Never confirm SSRF on 404 Not Found or other client/infrastructure error responses.
+	if probe.StatusCode == 404 || probe.StatusCode >= 400 || clientErrorStatus(probe.StatusCode) || isInfrastructureError(probe.StatusCode) {
+		return false
+	}
+	if probe.StatusCode != 0 && baseline.StatusCode != 0 && statusOnlyDifferential(probe.StatusCode, baseline.StatusCode) {
+		return false
+	}
+	if injectionPayloadReflected(p.Value, probe.Body, baseline.Body) {
+		return false
+	}
 	if strings.Contains(body, "blocked by policy") || strings.Contains(body, "is blocked") ||
 		strings.Contains(body, "request blocked") || strings.Contains(body, "access denied") {
 		return false
@@ -401,7 +411,20 @@ func ssrfSignalConfirmed(p payloadgen.Payload, baseline, probe httpclient.Respon
 		if strings.Contains(body, "ami-id") || strings.Contains(body, "instance-id") {
 			return false
 		}
-		return bodyDiffRatio(base, body) >= 0.05
+		// Probe must be a successful response
+		if probe.StatusCode != 0 && (probe.StatusCode < 200 || probe.StatusCode >= 300) {
+			return false
+		}
+		// Check for internal service markers
+		for _, marker := range []string{
+			"docker engine", "k8s", "consul", "kubernetes.io/serviceaccount",
+			"redis_version", "root:x:0:0:",
+		} {
+			if strings.Contains(body, marker) && !strings.Contains(base, marker) {
+				return true
+			}
+		}
+		return differentialWithStatusGuard(probe.Body, baseline.Body, p.Value, probe.StatusCode, baseline.StatusCode)
 	default:
 		return false
 	}

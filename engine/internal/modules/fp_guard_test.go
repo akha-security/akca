@@ -228,3 +228,43 @@ func TestCentralContentHelpersPreserveSpecificProof(t *testing.T) {
 		t.Fatal("protected-route middleware bypass must still confirm Next.js bypass")
 	}
 }
+
+func TestSSRFRejects404AndClientErrors(t *testing.T) {
+	p := payloadgen.Payload{Value: "http://127.0.0.1/", ExpectedSignal: "internal_ip"}
+	base := httpclient.ResponseRecord{Body: "<html><body>Welcome to content page</body></html>", StatusCode: 200}
+	
+	// Server responds 404 Not Found to /content/http://127.0.0.1/
+	probe404 := httpclient.ResponseRecord{
+		Body:       "<html><body>404 Not Found: /content/http://127.0.0.1/ does not exist</body></html>",
+		StatusCode: 404,
+	}
+	if ssrfSignalConfirmed(p, base, probe404, "internal_ip") {
+		t.Fatal("404 Not Found must never be confirmed as SSRF")
+	}
+
+	// Server responds 400 Bad Request
+	probe400 := httpclient.ResponseRecord{
+		Body:       "Bad Request: Invalid URL format http://127.0.0.1/",
+		StatusCode: 400,
+	}
+	if ssrfSignalConfirmed(p, base, probe400, "internal_ip") {
+		t.Fatal("400 Bad Request must never be confirmed as SSRF")
+	}
+}
+
+func TestCRLFRejectsJSONStateReflection(t *testing.T) {
+	payload := "\r\n\r\nAKCA_CRLF_BODY_akca-crlf-__state__"
+	base := `{"state":"clean","params":{},"fullPath":"/bignews"}`
+	probeJSON := `{"state":"AKCA_CRLF_BODY_akca-crlf-__state__"},"params":{},"fullPath":"\u002Fbignews?__state__=%0D%0A%0D%0AAKCA_CRLF_BODY_akca-crlf-__state__"}`
+
+	if crlfBodyConfirmed(base, probeJSON, payload) {
+		t.Fatal("query parameter reflected into JSON state and URL-encoded fullPath must NOT confirm CRLF body injection")
+	}
+
+	// Real CRLF response splitting: body starts with raw injected body marker
+	probeRealSplit := "AKCA_CRLF_BODY_akca-crlf-__state__\r\n<html>injected body</html>"
+	if !crlfBodyConfirmed(base, probeRealSplit, payload) {
+		t.Fatal("genuine HTTP response splitting with raw body breakout must be confirmed")
+	}
+}
+

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/akha-security/akca/engine/internal/models"
+	"github.com/akha-security/akca/engine/internal/ratelimit"
 )
 
 func TestDetectCloudflareAkamaiAWSModSecurity(t *testing.T) {
@@ -41,6 +42,20 @@ func TestDetectCloudflareAkamaiAWSModSecurity(t *testing.T) {
 			body:    "blocked by mod_security",
 			status:  403,
 			want:    "ModSecurity",
+		},
+		{
+			name:    "litespeed cache header",
+			headers: map[string]string{"x-litespeed-cache": "hit"},
+			body:    "",
+			status:  200,
+			want:    "LiteSpeed",
+		},
+		{
+			name:    "litespeed ls prefix header",
+			headers: map[string]string{"x-ls-cache": "hit"},
+			body:    "",
+			status:  200,
+			want:    "LiteSpeed",
 		},
 	}
 
@@ -81,3 +96,23 @@ func TestCautiousModeConfidence(t *testing.T) {
 		t.Fatal("expected cautious mode")
 	}
 }
+
+func TestApplyCautiousModeDynamicSlowdown(t *testing.T) {
+	limiter := ratelimit.New(20.0, 10.0)
+	p := models.WAFProfile{CautiousModeRecommended: true}
+	ApplyCautiousMode(limiter, p, 20.0, 3.0)
+
+	_, _, mult := limiter.Rates()
+	expectedMult := 20.0 / 3.0
+	if mult < expectedMult-0.01 || mult > expectedMult+0.01 {
+		t.Fatalf("expected multiplier around %f, got %f", expectedMult, mult)
+	}
+
+	// Verify that DecayWAFSlowDown successfully reduces multiplier back toward 1.0
+	limiter.DecayWAFSlowDown(1.0)
+	_, _, decayedMult := limiter.Rates()
+	if decayedMult >= mult {
+		t.Fatalf("expected multiplier to decay, got %f", decayedMult)
+	}
+}
+

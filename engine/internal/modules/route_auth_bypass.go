@@ -105,6 +105,15 @@ func (r *Runner) runRouteAuthBypass(ctx context.Context, target ScanTarget) []Mo
 			continue
 		}
 
+		// If the probe response was redirected, verify it did not redirect to login, root, or a different URL
+		if probeRR.Response.Redirected {
+			finalClean := strings.TrimRight(probeRR.Response.FinalURL, "/")
+			probeClean := strings.TrimRight(v.url, "/")
+			if finalClean != probeClean {
+				continue
+			}
+		}
+
 		// Step 4: Strict Verification (Zero False-Positive Filter)
 		if !isRouteBypassSuccessful(probeRR.Response, baselineRR.Response) {
 			continue

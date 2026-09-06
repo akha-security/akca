@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -247,6 +248,29 @@ func (r *Runner) loadExistingFindingKeys() {
 	})
 }
 
+var (
+	routeNumSegmentRe  = regexp.MustCompile(`^(\d+|[0-9a-fA-F]{8,})$`)
+	routeUUIDSegmentRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+)
+
+func normalizeRoutePattern(path string) string {
+	if path == "" || path == "/" {
+		return path
+	}
+	segments := strings.Split(path, "/")
+	for i, seg := range segments {
+		if seg == "" {
+			continue
+		}
+		if routeUUIDSegmentRe.MatchString(seg) {
+			segments[i] = "{uuid}"
+		} else if routeNumSegmentRe.MatchString(seg) {
+			segments[i] = "{id}"
+		}
+	}
+	return strings.Join(segments, "/")
+}
+
 // endpointModuleOnce prevents endpoint-level modules from running once per
 // discovered parameter. Query values are excluded because these modules act on
 // the route/resource, not on an individual injection surface.
@@ -255,6 +279,10 @@ func (r *Runner) endpointModuleOnce(module string, target ScanTarget) bool {
 	if parsed, err := url.Parse(raw); err == nil {
 		if originScopedModule(module) {
 			raw = parsed.Scheme + "://" + parsed.Host
+		} else if module == "cors" {
+			parsed.RawQuery = ""
+			parsed.Fragment = ""
+			raw = parsed.Scheme + "://" + parsed.Host + normalizeRoutePattern(parsed.Path)
 		} else {
 			parsed.RawQuery = ""
 			parsed.Fragment = ""
@@ -297,7 +325,7 @@ func originScopedModule(module string) bool {
 		"cloud_native_exposure", "host_poisoning", "wordpress_fuzz", "nginx_alias",
 		"nextjs_bypass", "framework_debug", "cpdos", "proxy_path_confusion", "ws_cswsh", "react_rsc_rce",
 		"swagger_exposure", "sensitive_file_discovery", "http_smuggling", "debug_admin",
-		"vulnerable_components", "known_cve":
+		"vulnerable_components", "known_cve", "cors_oast":
 		return true
 	default:
 		return false

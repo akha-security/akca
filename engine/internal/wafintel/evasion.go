@@ -194,7 +194,7 @@ func appendBlockedTechnique(blocked []string, technique string) []string {
 }
 
 func ApplyStrategy(payload string, strategy Strategy) (string, map[string]string) {
-	out := payload
+	out := MutatePayload(payload)
 	headers := map[string]string{}
 	for _, enc := range strategy.Encodings {
 		out = ApplyEncoding(out, enc)
@@ -223,7 +223,6 @@ func ApplyStrategy(payload string, strategy Strategy) (string, map[string]string
 			headers["X-HTTP-Method-Override"] = "POST"
 		}
 	}
-	out = MutatePayload(out)
 	return out, headers
 }
 
@@ -407,4 +406,31 @@ func octalEncode(s string) string {
 
 func AllVendors() []string {
 	return []string{"Cloudflare", "Akamai", "AWS WAF", "ModSecurity", "Imperva"}
+}
+
+// IsURLSafePayload returns true if the string consists exclusively of RFC 3986
+// unreserved characters ([a-zA-Z0-9\-_.~]) and valid percent-encoded octets (%XX).
+// Such payloads are already transport-safe for query parameters and do not require
+// an additional url.QueryEscape wrap.
+func IsURLSafePayload(s string) bool {
+	if s == "" {
+		return true
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '-' || c == '.' || c == '_' || c == '~' {
+			continue
+		}
+		if c == '%' && i+2 < len(s) && isHexByte(s[i+1]) && isHexByte(s[i+2]) {
+			i += 2
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isHexByte(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }

@@ -126,7 +126,7 @@ func (r *Runner) RunGroupD(ctx context.Context, targets []ScanTarget) ([]ModuleF
 					if r.cfg.AllowsModule("race_condition") {
 						localFindings = append(localFindings, r.runRaceCondition(ctx, target)...)
 					}
-					if r.cfg.AllowsModule("api_versioning") {
+					if r.cfg.AllowsModule("api_versioning") && r.endpointModuleOnce("api_versioning", target) {
 						localFindings = append(localFindings, r.runAPIVersioning(ctx, target)...)
 					}
 					if r.cfg.AllowsModule("known_cve") {

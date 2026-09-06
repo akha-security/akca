@@ -91,3 +91,51 @@ func TestCharacterPreflightProbing(t *testing.T) {
 		t.Fatalf("expected semicolon in allowed chars: %#v", learn.AllowedChars)
 	}
 }
+
+func TestApplyStrategyMutationIntegrity(t *testing.T) {
+	strategy := wafintel.Strategy{
+		ID:        "test_unicode",
+		Vendor:    "test",
+		Name:      "test_unicode",
+		Encodings: []string{"unicode"},
+	}
+	sample := `<script>alert(1)</script>`
+	for i := 0; i < 25; i++ {
+		mutated, _ := wafintel.ApplyStrategy(sample, strategy)
+		// Upper-case \U is invalid in JS/JSON unicode escapes; only lowercase \u is valid.
+		if strings.Contains(mutated, `\U`) {
+			t.Fatalf("iteration %d: mutated payload contains invalid uppercase unicode escape: %q", i, mutated)
+		}
+	}
+}
+
+func TestIsURLSafePayload(t *testing.T) {
+	safeCases := []string{
+		"%253Cscript%253E",
+		"%3Cscript%3E",
+		"hello-world_123.~",
+		"%20",
+		"param%27%20OR%201%3D1",
+	}
+	for _, tc := range safeCases {
+		if !wafintel.IsURLSafePayload(tc) {
+			t.Errorf("expected %q to be URL-safe", tc)
+		}
+	}
+
+	unsafeCases := []string{
+		"<script>alert(1)</script>",
+		"alert(1)",
+		`\u0073cript`,
+		"hello world",
+		"100%safe", // % not followed by two hex digits
+		"test&foo=bar",
+		"test=1",
+	}
+	for _, tc := range unsafeCases {
+		if wafintel.IsURLSafePayload(tc) {
+			t.Errorf("expected %q to NOT be URL-safe", tc)
+		}
+	}
+}
+

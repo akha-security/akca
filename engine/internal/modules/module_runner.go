@@ -121,6 +121,9 @@ func (r *Runner) runSingleModule(ctx context.Context, module string, target Scan
 	case "second_order":
 		return r.runSecondOrder(ctx, target)
 	case "cors":
+		if !r.endpointModuleOnce("cors", target) {
+			return nil
+		}
 		return r.runCORS(ctx, target)
 	case "jwt":
 		return r.runJWT(ctx, target)

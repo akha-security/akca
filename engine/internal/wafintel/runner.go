@@ -86,7 +86,11 @@ func (r *Runner) CalibrateWithOptions(ctx context.Context, targets []string, opt
 			} else {
 				testURL += "?"
 			}
-			testURL += "akca_waf_probe=" + url.QueryEscape(mutated)
+			probeVal := mutated
+			if !IsURLSafePayload(mutated) {
+				probeVal = url.QueryEscape(mutated)
+			}
+			testURL += "akca_waf_probe=" + probeVal
 			status, body := r.probe(ctx, testURL, mutated, headers)
 			blocked := isWAFBlocked(baselineStatus, baselineBody, status, body)
 			learn = RecordStrategyResult(learn, strategy.ID, !blocked)

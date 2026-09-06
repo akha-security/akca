@@ -15,6 +15,11 @@ func (r *Runner) runCORS(ctx context.Context, target ScanTarget) []ModuleFinding
 		r.emitSkip("cors", target, reason)
 		return nil
 	}
+	// 1. Skip static assets (.css, .js, images, fonts) - CORS credential theft is not applicable
+	if isStaticAssetURL(target.EndpointURL) {
+		return nil
+	}
+
 	var out []ModuleFinding
 	baseline, err := r.probeCORS(ctx, target, "https://benign.example")
 	if err != nil {
@@ -25,40 +30,16 @@ func (r *Runner) runCORS(ctx context.Context, target ScanTarget) []ModuleFinding
 		targetHost = u.Hostname()
 	}
 
-	probes := []struct {
-		origin, signal string
-	}{
-		{"null", "null_origin"},
-		{"https://evil.example", "origin_reflection"},
-		{"http://evil.example", "origin_reflection"},
-		// Intranet & Cloud Metadata Origins (Client-Side SSRF / Intranet Pivoting via CORS)
-		{"http://127.0.0.1", "localhost_origin"},
-		{"http://localhost", "localhost_origin"},
-		{"http://169.254.169.254", "cloud_metadata_origin"},
-		{"http://192.168.1.1", "intranet_origin"},
-		{"http://10.0.0.1", "intranet_origin"},
-		{"http://172.16.0.1", "intranet_origin"},
-		{"http://[::1]", "localhost_origin"},
-		{"http://0.0.0.0", "localhost_origin"},
-	}
+	baseACAO := headerValue(baseline.Response.Headers, "Access-Control-Allow-Origin")
+	baseACAC := headerValue(baseline.Response.Headers, "Access-Control-Allow-Credentials")
+	corsActive := hasCORSHeaders(baseline.Response.Headers)
 
-	// Advanced domain regex bypasses (prefix, suffix, unquoted dot, subdomains, ports, special chars)
-	probes = append(probes,
-		struct{ origin, signal string }{"https://" + targetHost + ".evil.example", "partial_origin_match"},
-		struct{ origin, signal string }{"https://evil" + targetHost, "pre_domain_match"},
-		struct{ origin, signal string }{"http://" + targetHost, "protocol_downgrade"},
-		struct{ origin, signal string }{"https://trusted-sub." + targetHost, "trusted_subdomain"},
-		struct{ origin, signal string }{"https://" + strings.Replace(targetHost, ".", "x", 1), "unquoted_regex_dot_bypass"},
-		struct{ origin, signal string }{"https://" + targetHost + "_.evil.example", "special_char_bypass"},
-		struct{ origin, signal string }{"https://" + targetHost + ":8080", "port_bypass"},
-	)
-	for _, pr := range probes {
-		rr, err := r.probeCORS(ctx, target, pr.origin)
-		if err != nil {
-			continue
+	handleProbeResult := func(pr struct{ origin, signal string }, rr httpclient.RequestResponse) {
+		if hasCORSHeaders(rr.Response.Headers) {
+			corsActive = true
 		}
 		if !corsSignal(rr.Response.Headers, pr.origin, pr.signal) {
-			continue
+			return
 		}
 		p := defaultPayload("cors", pr.signal, pr.origin, pr.signal)
 		f := r.verifyAndBuild(ctx, "cors", target, p, baseline, rr, pr.signal, false, false, "", "")
@@ -122,9 +103,88 @@ func (r *Runner) runCORS(ctx context.Context, target ScanTarget) []ModuleFinding
 		r.recordFinding(ctx, &out, f, "cors", pr.signal)
 	}
 
-	// withCredentials + wildcard
-	rr, err := r.probeCORS(ctx, target, "https://evil.example")
-	if err == nil && corsWildcardCredentials(rr.Response.Headers) {
+	// Case 1: Arbitrary Origin Reflected directly in baseline probe!
+	if baseACAO == "https://benign.example" {
+		handleProbeResult(struct{ origin, signal string }{"https://benign.example", "origin_reflection"}, baseline)
+		if nullRR, err := r.probeCORS(ctx, target, "null"); err == nil {
+			handleProbeResult(struct{ origin, signal string }{"null", "null_origin"}, nullRR)
+		}
+		return out
+	}
+
+	// Case 2: Wildcard origin in baseline
+	if baseACAO == "*" {
+		if strings.EqualFold(baseACAC, "true") {
+			p := defaultPayload("cors", "wildcard_credentials", "*", "wildcard_credentials")
+			f := r.verifyAndBuild(ctx, "cors", target, p, baseline, baseline, "wildcard_credentials", false, false, "", "")
+			if f != nil {
+				f.Severity = "high"
+				f.Title = "CORS Wildcard with Credentials"
+			}
+			r.recordFinding(ctx, &out, f, "cors", "wildcard_credentials")
+		}
+		if nullRR, err := r.probeCORS(ctx, target, "null"); err == nil {
+			handleProbeResult(struct{ origin, signal string }{"null", "null_origin"}, nullRR)
+		}
+		return out
+	}
+
+	// Core probes: covers all distinct CORS vulnerability classes
+	coreProbes := []struct {
+		origin, signal string
+	}{
+		{"null", "null_origin"},
+		{"https://evil.example", "origin_reflection"},
+		{"http://169.254.169.254", "cloud_metadata_origin"},
+		{"http://localhost", "localhost_origin"},
+		{"https://" + targetHost + ".evil.example", "partial_origin_match"},
+		{"https://trusted-sub." + targetHost, "trusted_subdomain"},
+	}
+
+	for _, pr := range coreProbes {
+		if ctx.Err() != nil {
+			break
+		}
+		rr, err := r.probeCORS(ctx, target, pr.origin)
+		if err != nil {
+			continue
+		}
+		handleProbeResult(pr, rr)
+	}
+
+	// If neither baseline nor any core probe produced any CORS header,
+	// the endpoint completely ignores Origin and does not have CORS enabled.
+	if !corsActive {
+		return out
+	}
+
+	// Secondary bypass probes (only run if CORS is confirmed active on this endpoint)
+	secondaryProbes := []struct {
+		origin, signal string
+	}{
+		{"http://evil.example", "origin_reflection"},
+		{"http://127.0.0.1", "localhost_origin"},
+		{"http://192.168.1.1", "intranet_origin"},
+		{"https://evil" + targetHost, "pre_domain_match"},
+		{"http://" + targetHost, "protocol_downgrade"},
+		{"https://" + strings.Replace(targetHost, ".", "x", 1), "unquoted_regex_dot_bypass"},
+		{"https://" + targetHost + "_.evil.example", "special_char_bypass"},
+		{"https://" + targetHost + ":8080", "port_bypass"},
+	}
+
+	for _, pr := range secondaryProbes {
+		if ctx.Err() != nil {
+			break
+		}
+		rr, err := r.probeCORS(ctx, target, pr.origin)
+		if err != nil {
+			continue
+		}
+		handleProbeResult(pr, rr)
+	}
+
+	// withCredentials + wildcard check
+	if rr, err := r.probeCORS(ctx, target, "https://evil.example"); err == nil && corsWildcardCredentials(rr.Response.Headers) {
 		p := defaultPayload("cors", "wildcard_credentials", "*", "wildcard_credentials")
 		f := r.verifyAndBuild(ctx, "cors", target, p, baseline, rr, "wildcard_credentials", false, false, "", "")
 		if f != nil {
@@ -135,8 +195,7 @@ func (r *Runner) runCORS(ctx context.Context, target ScanTarget) []ModuleFinding
 	}
 
 	// W3C Private Network Access (PNA) Preflight Probe
-	pnaRR, pnaErr := r.probeCORSOptionsPNA(ctx, target, "https://evil.example")
-	if pnaErr == nil && pnaAllowed(pnaRR.Response.Headers) {
+	if pnaRR, pnaErr := r.probeCORSOptionsPNA(ctx, target, "https://evil.example"); pnaErr == nil && pnaAllowed(pnaRR.Response.Headers) {
 		p := defaultPayload("cors", "pna_allowed", "https://evil.example", "private_network_access")
 		f := r.verifyAndBuild(ctx, "cors", target, p, baseline, pnaRR, "private_network_access", false, false, "", "")
 		if f != nil {
@@ -147,9 +206,9 @@ func (r *Runner) runCORS(ctx context.Context, target ScanTarget) []ModuleFinding
 		r.recordFinding(ctx, &out, f, "cors", "private_network_access")
 	}
 
-	// Server-Side Origin Validation SSRF Probe via OAST
-	if r.cfg.EnableOAST && r.oast != nil {
-		if oastURL := strings.TrimSpace(r.oastURL(ctx, "cors-ssrf-"+target.Parameter, target, "cors")); oastURL != "" {
+	// Server-Side Origin Validation SSRF Probe via OAST (run once per host/origin, only if CORS is active)
+	if r.cfg.EnableOAST && r.oast != nil && r.endpointModuleOnce("cors_oast", target) {
+		if oastURL := strings.TrimSpace(r.oastURL(ctx, "cors-ssrf", target, "cors")); oastURL != "" {
 			r.sendOASTProbe(ctx, target, oastURL)
 			_, _ = r.probeCORS(ctx, target, oastURL)
 			_, _ = r.probeCORSOptions(ctx, target, oastURL)
@@ -158,6 +217,40 @@ func (r *Runner) runCORS(ctx context.Context, target ScanTarget) []ModuleFinding
 	}
 
 	return out
+}
+
+func hasCORSHeaders(headers map[string]string) bool {
+	for k, v := range headers {
+		lower := strings.ToLower(k)
+		if strings.HasPrefix(lower, "access-control-") && strings.TrimSpace(v) != "" {
+			return true
+		}
+		if lower == "vary" && strings.Contains(strings.ToLower(v), "origin") {
+			return true
+		}
+	}
+	return false
+}
+
+func isStaticAssetURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	clean := strings.ToLower(u.Path)
+	if i := strings.IndexAny(clean, "?#"); i >= 0 {
+		clean = clean[:i]
+	}
+	for _, ext := range []string{
+		".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
+		".bmp", ".woff", ".woff2", ".ttf", ".eot", ".otf", ".mp4", ".webm", ".mp3",
+		".wav", ".pdf", ".avif", ".map",
+	} {
+		if strings.HasSuffix(clean, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 // probeCORS preserves the discovered request instead of rewriting an arbitrary

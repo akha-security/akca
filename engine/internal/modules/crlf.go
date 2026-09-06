@@ -75,8 +75,53 @@ func crlfBodyConfirmed(baseBody, probeBody, payload string) bool {
 	if token == "" {
 		return false
 	}
-	return strings.Contains(strings.ToLower(probeBody), "akca_crlf_body_"+token) &&
-		!strings.Contains(strings.ToLower(baseBody), "akca_crlf_body_"+token)
+	marker := "akca_crlf_body_" + token
+	probeLower := strings.ToLower(probeBody)
+	baseLower := strings.ToLower(baseBody)
+	if !strings.Contains(probeLower, marker) || strings.Contains(baseLower, marker) {
+		return false
+	}
+
+	// 1. If the marker is URL-encoded or appears in a URL query echo, it means
+	// the web application/server treated it as regular parameter text rather than HTTP control characters.
+	if strings.Contains(probeLower, "%0d%0a"+marker) ||
+		strings.Contains(probeLower, "%0a"+marker) ||
+		strings.Contains(probeLower, "%0d"+marker) ||
+		strings.Contains(probeLower, "fullpath") ||
+		strings.Contains(probeLower, `\u002f`) ||
+		strings.Contains(probeLower, `\u002F`) {
+		return false
+	}
+
+	// 2. Reject if the marker appears inside a URL query string, path echo, or router state
+	for _, echoMarker := range []string{
+		"fullpath", "params\":", "query\":", `\u002f`, `\u002F`,
+	} {
+		if strings.Contains(probeLower, echoMarker) {
+			return false
+		}
+	}
+
+	// 3. In HTTP response splitting / body injection, the injected \r\n\r\n must break out
+	// into the HTTP body with raw unescaped newlines (\r\n\r\n or \n\n), or the body must start
+	// directly with the injected body token.
+	hasRawCRLFBreakout := strings.Contains(probeLower, "\r\n\r\n"+marker) ||
+		strings.Contains(probeLower, "\n\n"+marker) ||
+		strings.Contains(probeLower, "\r\r"+marker) ||
+		strings.HasPrefix(strings.TrimSpace(probeLower), marker)
+
+	if !hasRawCRLFBreakout {
+		return false
+	}
+
+	// 4. Reject if the body is a JSON document where the marker is simply embedded in a JSON string
+	trimmed := strings.TrimSpace(probeBody)
+	if (strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) ||
+		(strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]")) {
+		return false
+	}
+
+	return true
 }
 
 func crlfSignalConfirmed(baseHeaders, probeHeaders map[string]string, baseBody, probeBody, payload, signal string) bool {

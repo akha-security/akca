@@ -5,6 +5,27 @@ All notable changes to AKCA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.5] - 2026-09-06
+
+### Fixed
+
+- **WAF Intelligence & Evasion**:
+  - Fixed `MutatePayload` case randomization execution order in `ApplyStrategy` to run prior to encodings, preventing corruption of JS/JSON unicode escape tokens (`\u` -> `\U`).
+  - Fixed calibration double-encoding in `wafintel/runner.go` by verifying `IsURLSafePayload` before applying `url.QueryEscape`, ensuring target applications receive intended bypass payloads rather than unparsed quadruple-encoded strings.
+- **WAF Rate Limit Throttling Lock (3 RPS)**:
+  - Replaced permanent base rate and concurrency reduction (`SetRates` / `ApplyTrafficBudget`) upon WAF challenge/429 with dynamic WAF throttling via `ApplyCautiousMode` (`SetWAFSlowDown`). Scan speed automatically recovers back to configured intensity as requests succeed via `DecayWAFSlowDown`.
+- **LiteSpeed Header Signature Matching**:
+  - Added prefix-based matching for headers ending with `-` (e.g. `x-ls-` and `x-litespeed-`) so LiteSpeed cache and server headers are accurately classified.
+- **Vulnerability Scanner False Positives**:
+  - SSRF: Eliminated false positives on path-like payloads (e.g. `/content/http://127.0.0.1/`) returning 404 or reflection without true backend SSRF requests.
+  - Web Cache Deception: Verified against false positives on static path appendages (e.g. `;.css`) when no sensitive authenticated session content is exposed or cached.
+  - CRLF Injection: Enforced strict HTTP header validation so reflected CRLF body payloads within JSON/HTML/escaped text are no longer flagged as header injection.
+
+### Optimized
+
+- **CORS Scanning Performance**:
+  - Resolved 11-hour bottleneck in `vuln_module_cors` via endpoint module deduplication (`endpointModuleOnce`), route pattern normalization (`normalizeRoutePattern`), static asset skipping (`isStaticAssetURL`), smart early-exit on non-CORS endpoints, and single-run host-scoped OAST SSRF probes.
+
 ## [0.1.4] - 2026-09-05
 
 ### Optimized

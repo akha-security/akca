@@ -645,6 +645,7 @@ func TestAPIVersioningDiscovery(t *testing.T) {
 	c := &groupDClient{
 		responses: map[string]string{"/api/v2": `{"version":"v2"}`},
 		statuses:  map[string]int{"/api/v2": 200},
+		headers:   map[string]map[string]string{"/api/v2": {"Content-Type": "application/json"}},
 	}
 	target := ScanTarget{EndpointURL: "http://example.com/api", Method: "GET", Parameter: "q"}
 	findings := groupDRunner(t, c).runAPIVersioning(context.Background(), target)
