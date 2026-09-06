@@ -151,8 +151,8 @@ func TestFalsePositiveRegressionFromClientJS(t *testing.T) {
 
 func TestOpenAIAndOktaFalsePositiveRegressions(t *testing.T) {
 	fpSamples := []string{
-		`sk-8030-kablosuz-cam-govde-su-isitici-sk-7338-p-367682`,
-		`000-adet-nostalji-oyun-3-5inc-ipsekran-mp3`,
+		`sk-8030-wireless-device-model-sku-7338-p-367682`,
+		`000-item-sample-catalog-product-3-5inch-id`,
 		`000000000000000000000000000000000000000000`,
 		`sk-something-short`,
 	}

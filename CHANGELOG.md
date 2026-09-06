@@ -45,8 +45,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - **Secret Scan False Positives**:
-  - Tightened OpenAI API key detection: classic keys (`sk-`) now strictly require alphanumeric base62 strings without hyphens (`sk-[A-Za-z0-9]{32,64}`), and `Detect()` enforces entropy/character diversity filters. Model numbers and kebab-case product slugs (e.g. `sk-8030-...`) are no longer flagged.
-  - Corrected Okta API token pattern: removed hyphens and underscores (`00[A-Za-z0-9]{40}`) and added entropy and character complexity checks to prevent false alarms on e-commerce slugs (e.g. `000-adet-nostalji-...`) and repeated zero sequences.
+  - Tightened OpenAI API key detection: classic keys (`sk-`) now strictly require alphanumeric base62 strings without hyphens (`sk-[A-Za-z0-9]{32,64}`), and `Detect()` enforces entropy/character diversity filters. Model numbers and kebab-case product slugs (e.g. `sk-8030-device-sku-...`) are no longer flagged.
+  - Corrected Okta API token pattern: removed hyphens and underscores (`00[A-Za-z0-9]{40}`) and added entropy and character complexity checks to prevent false alarms on e-commerce slugs (e.g. `000-item-catalog-sku-...`) and repeated zero sequences.
 - **API Versioning Redirect False Positives**:
   - HTTP client now records redirect telemetry (`Redirected`, `FinalURL`, `InitialStatus`).
   - `api_versioning` module rejects responses that resulted from 302/3xx redirects to different endpoints (such as `/login` or root `/`) as well as HTML responses (`<html`, `<!doctype`).
