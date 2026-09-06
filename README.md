@@ -136,37 +136,37 @@ Release binaries, when published, are available from
 
 ```bash
 # Full scan
-./akca -u https://staging.example.com
+akca -u https://staging.example.com
 
 # Focused SQL/NoSQL injection scan
-./akca -u https://staging.example.com -m sql
+akca -u https://staging.example.com -m sql
 
 # Combine profiles
-./akca -u https://staging.example.com -m sql,xss,api
+akca -u https://staging.example.com -m sql,xss,api
 
 # Authenticated scan
-./akca -u https://app.example.com \
+akca -u https://app.example.com \
   -c "session=replace-me" \
   -H "Authorization: Bearer replace-me"
 
 # API scan using a multi-file OpenAPI or RAML ZIP bundle
-./akca -u https://api.example.com \
+akca -u https://api.example.com \
   --api-spec ./api-bundle.zip \
   -m api
 
 # Passive, non-mutating inspection
-./akca -u https://staging.example.com -m passive -v
+akca -u https://staging.example.com -m passive -v
 
 # Crawl linked API/service subdomains only when you explicitly want wider scope
-./akca -u https://www.example.com \
+akca -u https://www.example.com \
   --include-linked-api-subdomains
 
 # Send traffic through an inspection proxy
-./akca -u https://staging.example.com \
+akca -u https://staging.example.com \
   -p http://127.0.0.1:8080 -k
 
 # Generate SARIF for CI systems
-./akca -u https://staging.example.com \
+akca -u https://staging.example.com \
   -f sarif -o results.sarif -q
 ```
 
@@ -234,7 +234,7 @@ and authorization headers can be redacted before storage or export.
 Replay a stored finding independently:
 
 ```bash
-./akca replay --finding 42
+akca replay --finding 42
 ```
 
 ## CI example
