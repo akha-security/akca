@@ -141,11 +141,46 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 	var randCtrlFP ResponseFingerprint
 	var randCtrlBody string
 	randParam := "__akca_rand_ctrl_8f1"
+
+	// Arjun-style method pivoting: If endpoint is GET, probe if it accepts POST requests
+	postSupported := false
+	var postBaselineFP ResponseFingerprint
+	var postBaselineBody string
+	var randCtrlFP_POST ResponseFingerprint
+	var randCtrlBody_POST string
+	jsonHeaders := map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "application/json, text/plain, */*",
+	}
+	for k, v := range requestHeaders {
+		if _, exists := jsonHeaders[k]; !exists {
+			jsonHeaders[k] = v
+		}
+	}
+
 	if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
 		if probeURL, body := buildCustomQueryProbe(requestURL, randParam, "akca_probe"); d.scope.IsInScope(probeURL) {
 			if rr, perr := d.client.Do(ctx, http.MethodGet, probeURL, body, requestHeaders); perr == nil {
 				randCtrlFP = Fingerprint(rr.Response.StatusCode, rr.Response.Body, rr.Response.Duration.Milliseconds(), rr.Response.Headers)
 				randCtrlBody = rr.Response.Body
+			}
+		}
+		// Test if GET endpoint accepts POST with JSON payload (Arjun method pivot)
+		if d.scope.IsInScope(requestURL) {
+			if pRR, perr := d.client.Do(ctx, http.MethodPost, requestURL, []byte("{}"), jsonHeaders); perr == nil {
+				if pRR.Response.StatusCode != http.StatusMethodNotAllowed &&
+					pRR.Response.StatusCode != http.StatusNotFound &&
+					pRR.Response.StatusCode != http.StatusNotImplemented {
+					postSupported = true
+					postBaselineFP = Fingerprint(pRR.Response.StatusCode, pRR.Response.Body, pRR.Response.Duration.Milliseconds(), pRR.Response.Headers)
+					postBaselineBody = pRR.Response.Body
+
+					randJSON := []byte(fmt.Sprintf(`{"%s":"akca_probe"}`, randParam))
+					if rcRR, rcErr := d.client.Do(ctx, http.MethodPost, requestURL, randJSON, jsonHeaders); rcErr == nil {
+						randCtrlFP_POST = Fingerprint(rcRR.Response.StatusCode, rcRR.Response.Body, rcRR.Response.Duration.Milliseconds(), rcRR.Response.Headers)
+						randCtrlBody_POST = rcRR.Response.Body
+					}
+				}
 			}
 		}
 	} else if body, location, ok := mutateNativeBody(template, randParam, "akca_probe"); ok && d.scope.IsInScope(requestURL) {
@@ -254,6 +289,23 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 							hitMu.Unlock()
 						}
 					}
+					// Arjun-style POST JSON discovery on GET endpoints that accept POST
+					if postSupported && d.scope.IsInScope(requestURL) {
+						probeJSON := []byte(fmt.Sprintf(`{"%s":"akca_probe"}`, cand))
+						if pRR, perr := d.client.Do(ctx, http.MethodPost, requestURL, probeJSON, jsonHeaders); perr == nil {
+							fp := Fingerprint(pRR.Response.StatusCode, pRR.Response.Body, pRR.Response.Duration.Milliseconds(), pRR.Response.Headers)
+							isPostHit := isParameterHitWithControl(postBaselineFP, fp, randCtrlFP_POST, postBaselineBody, pRR.Response.Body, randCtrlBody_POST,
+								cand, randParam, "akca_probe", isDynamic, noiseThreshold)
+
+							hitMu.Lock()
+							probes++
+							if isPostHit {
+								recordHit(cand, "post_json")
+								jsonPotentialHits[cand] = struct{}{}
+							}
+							hitMu.Unlock()
+						}
+					}
 				}
 
 				// Mutate the captured native body while preserving the original method,
@@ -324,7 +376,11 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 		loc := LocationQuery
 		probeMethod := primaryProbeMethod(method)
 		priority := 70
-		if _, ok := surfaces["form"]; ok {
+		if _, ok := surfaces["post_json"]; ok {
+			loc = LocationJSON
+			priority = 90
+			probeMethod = http.MethodPost
+		} else if _, ok := surfaces["form"]; ok {
 			loc = LocationForm
 			priority = 88
 			if method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch {
@@ -350,7 +406,13 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 			EndpointURL: endpointURL, EndpointMethod: probeMethod,
 		}
 		differential = append(differential, p)
-		_ = d.persist(endpointID, p)
+		targetEndpointID := endpointID
+		if probeMethod == http.MethodPost && method != http.MethodPost && d.db != nil {
+			if postID, err := d.db.EnsureEndpoint(d.scanID, endpointURL, http.MethodPost); err == nil && postID > 0 {
+				targetEndpointID = postID
+			}
+		}
+		_ = d.persist(targetEndpointID, p)
 	}
 
 	for _, p := range templateParams {

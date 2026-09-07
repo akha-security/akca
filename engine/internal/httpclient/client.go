@@ -3,6 +3,7 @@ package httpclient
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -218,13 +219,14 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 	var resp *http.Response
 	var req *http.Request
 
+	count := c.requestCount.Add(1)
+	if c.cfg.RequestBudget > 0 && count > int64(c.cfg.RequestBudget) {
+		return RequestResponse{}, fmt.Errorf("global request budget exhausted after %d requests", c.cfg.RequestBudget)
+	}
+
 	for attempt := 0; attempt < 3; attempt++ {
 		if ctx.Err() != nil {
 			return RequestResponse{}, ctx.Err()
-		}
-		count := c.requestCount.Add(1)
-		if c.cfg.RequestBudget > 0 && count > int64(c.cfg.RequestBudget) {
-			return RequestResponse{}, fmt.Errorf("global request budget exhausted after %d requests", c.cfg.RequestBudget)
 		}
 
 		var bodyReader io.Reader
@@ -283,9 +285,14 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 			continue
 		}
 
-		// Handle WAF rate limiting
+		// Handle WAF rate limiting — 429 is preserved as evidence and not retried,
+		// but future requests on this host/limiter are slowed down.
 		if resp.StatusCode == http.StatusTooManyRequests {
 			c.limiter.SetWAFSlowDown(5.0)
+			if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+				cooldown := retryAfterDuration(retryAfter, 5*time.Second)
+				c.recordHostBlock(u.Hostname(), cooldown)
+			}
 			break
 		}
 
@@ -399,6 +406,17 @@ func (c *Client) proxyError(err error) error {
 func (c *Client) circuitOpen(host string) (time.Time, bool) {
 	c.blockMu.Lock()
 	defer c.blockMu.Unlock()
+	// Periodically purge expired entries to prevent unbounded map growth
+	// during large subdomain scans.
+	if len(c.blockedUntil) > 100 {
+		now := time.Now()
+		for h, t := range c.blockedUntil {
+			if !now.Before(t) {
+				delete(c.blockedUntil, h)
+				delete(c.hostBlocks, h)
+			}
+		}
+	}
 	until := c.blockedUntil[host]
 	if until.IsZero() || !time.Now().Before(until) {
 		delete(c.blockedUntil, host)
@@ -460,11 +478,14 @@ func isAuthenticationHeader(name string) bool {
 }
 
 func (c *Client) applyWafBypassHeaders(req *http.Request) {
-	c.uaMu.Lock()
-	idx := c.uaIndex
-	c.uaMu.Unlock()
-
-	randIP := fmt.Sprintf("%d.%d.%d.%d", 100+(idx%100), 20+(idx%100), 30+(idx%100), 40+(idx%100))
+	randBytes := make([]byte, 4)
+	_, _ = rand.Read(randBytes)
+	randIP := fmt.Sprintf("%d.%d.%d.%d",
+		100+int(randBytes[0])%100,
+		10+int(randBytes[1])%200,
+		10+int(randBytes[2])%200,
+		10+int(randBytes[3])%200,
+	)
 
 	bypassHeaders := []string{
 		"X-Forwarded-For",
@@ -487,9 +508,13 @@ func (c *Client) applyWafBypassHeaders(req *http.Request) {
 
 func parseSecs(raw string) int {
 	var val int
+	const maxSecs = 86400 // 24 hours upper bound
 	for i := 0; i < len(raw); i++ {
 		if raw[i] >= '0' && raw[i] <= '9' {
 			val = val*10 + int(raw[i]-'0')
+			if val > maxSecs {
+				return maxSecs
+			}
 		} else {
 			break
 		}

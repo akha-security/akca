@@ -589,6 +589,7 @@ func printDetailedUsage() {
 		{"--max-depth <n>", "Optional crawl depth cap; 0 means unlimited"},
 		{"--crawler-budget <n>", "Discovery request budget; 0 means unlimited"},
 		{"--request-budget <n>", "Maximum total requests; 0 means unlimited"},
+		{"--requests-per-target <n>", "Derive budget as N requests per discovered target; 0 means unlimited"},
 		{"--time-budget <duration>", "Maximum duration such as 30m or 2h; 0 means unlimited"},
 		{"--memory-limit <mb>", "Process memory limit; 0 means automatic"},
 		{"--include-linked-api-subdomains", "Also crawl linked API/service subdomains under the same root"},
@@ -845,17 +846,17 @@ func scanSessionPanel(payload map[string]interface{}) string {
 
 	var b strings.Builder
 	b.WriteString(panelTitle("SCAN SESSION", "RUNNING", w, cLavender) + "\n")
-	b.WriteString(boxText(fmt.Sprintf(" %sTarget%s    %s%s%s", cSlate, rst, cIce, targets, rst), w) + "\n")
-	b.WriteString(panelDivider(w, cGhost) + "\n")
-	b.WriteString(boxText(fmt.Sprintf(" %sMode%s      %s%s%s  %s•%s  %s%.0f req/s%s  %s•%s  OAST %s%s%s",
+	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sTarget%s    %s%s%s", cSlate, rst, cIce, targets, rst), w, cLavender) + "\n")
+	b.WriteString(panelDivider(w, cLavender) + "\n")
+	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sMode%s      %s%s%s  %s•%s  %s%.0f req/s%s  %s•%s  OAST %s%s%s",
 		cSlate, rst, cFrost, profile, rst, cGhost, rst, cSilver, rate, rst,
-		cGhost, rst, oastColor, oastStatus, rst), w) + "\n")
-	b.WriteString(boxText(fmt.Sprintf(" %sCrawl%s     %s%s%s  %s•%s  %s%d endpoints%s%s",
-		cSlate, rst, cSilver, pagesStr, rst, cGhost, rst, cSilver, maxEndpoints, rst, scopeStr), w) + "\n")
-	b.WriteString(boxText(fmt.Sprintf(" %sBudget%s    %s%d crawler requests%s  %s•%s  %stotal %s%s",
-		cSlate, rst, cSilver, crawlerBudget, rst, cGhost, rst, cSilver, totalBudget, rst), w) + "\n")
-	b.WriteString(boxText(fmt.Sprintf(" %sPayloads%s  %s%s%s  %s•%s  %sMemory %s%s",
-		cSlate, rst, cSilver, payloadBudget, rst, cGhost, rst, cSilver, memory, rst), w) + "\n")
+		cGhost, rst, oastColor, oastStatus, rst), w, cLavender) + "\n")
+	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sCrawl%s     %s%s%s  %s•%s  %s%d endpoints%s%s",
+		cSlate, rst, cSilver, pagesStr, rst, cGhost, rst, cSilver, maxEndpoints, rst, scopeStr), w, cLavender) + "\n")
+	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sBudget%s    %s%d crawler requests%s  %s•%s  %stotal %s%s",
+		cSlate, rst, cSilver, crawlerBudget, rst, cGhost, rst, cSilver, totalBudget, rst), w, cLavender) + "\n")
+	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sPayloads%s  %s%s%s  %s•%s  %sMemory %s%s",
+		cSlate, rst, cSilver, payloadBudget, rst, cGhost, rst, cSilver, memory, rst), w, cLavender) + "\n")
 	b.WriteString(panelBottom(w, cLavender) + "\n\n")
 	return b.String()
 }
@@ -1528,8 +1529,6 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		cw.mu.Lock()
 		cw.progressPercent = 100
 		cw.scanStatus = "COMPLETE"
-		cw.mu.Unlock()
-		cw.mu.Lock()
 		cw.scanActive = false
 		cw.mu.Unlock()
 		if !cw.interactive {
@@ -1550,8 +1549,6 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 	case "scan_stopped":
 		cw.mu.Lock()
 		cw.scanStatus = "STOPPED"
-		cw.mu.Unlock()
-		cw.mu.Lock()
 		cw.scanActive = false
 		cw.mu.Unlock()
 		if !cw.interactive {
@@ -1902,7 +1899,9 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		cw.mu.Lock()
 		cw.coverageGaps++
 		cw.mu.Unlock()
-		fmt.Fprintf(cw.outputWriter(), "%s[COVERAGE]%s  %s%s%s\n", bAmber, rst, cAmber, safeTerminalText(e.Message), rst)
+		if cw.mode == "verbose" {
+			fmt.Fprintf(cw.outputWriter(), "%s[COVERAGE]%s  %s%s%s\n", bAmber, rst, cAmber, safeTerminalText(e.Message), rst)
+		}
 
 	case "parameter_discovery_progress":
 		completed := payloadInt(e.Payload, "completed")
@@ -2298,6 +2297,7 @@ func runScanCommand(args []string) int {
 	var maxDepth int
 	var crawlerBudget int
 	var requestBudget int
+	var requestsPerTarget int
 	var timeBudget time.Duration
 	var memoryLimitMB int
 	var includeLinkedAPISubdomains bool
@@ -2343,6 +2343,7 @@ func runScanCommand(args []string) int {
 	fs.IntVar(&maxDepth, "max-depth", 0, "")
 	fs.IntVar(&crawlerBudget, "crawler-budget", 0, "")
 	fs.IntVar(&requestBudget, "request-budget", 0, "")
+	fs.IntVar(&requestsPerTarget, "requests-per-target", 0, "")
 	fs.DurationVar(&timeBudget, "time-budget", 0, "")
 	fs.IntVar(&memoryLimitMB, "memory-limit", 0, "")
 	fs.BoolVar(&includeLinkedAPISubdomains, "include-linked-api-subdomains", false, "")
@@ -2474,6 +2475,10 @@ func runScanCommand(args []string) int {
 	}
 	if flagWasSet(fs, "request-budget") && requestBudget < 0 {
 		printCLIError(fmt.Errorf("--request-budget cannot be negative"))
+		return 2
+	}
+	if flagWasSet(fs, "requests-per-target") && requestsPerTarget < 0 {
+		printCLIError(fmt.Errorf("--requests-per-target cannot be negative"))
 		return 2
 	}
 	if flagWasSet(fs, "time-budget") && timeBudget < 0 {
@@ -2651,6 +2656,10 @@ func runScanCommand(args []string) int {
 	if flagWasSet(fs, "request-budget") {
 		cfg.RequestBudget = requestBudget
 		cfg.Explicit.RequestBudget = true
+	}
+	if flagWasSet(fs, "requests-per-target") {
+		cfg.RequestsPerTarget = requestsPerTarget
+		cfg.Explicit.RequestsPerTarget = true
 	}
 	if flagWasSet(fs, "time-budget") {
 		cfg.TimeBudget = timeBudget

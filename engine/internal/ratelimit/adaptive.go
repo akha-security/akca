@@ -54,8 +54,8 @@ func (al *AdaptiveLimiter) RecordResponse(statusCode int) {
 
 	now := time.Now()
 
-	// 1. If Rate Limited (429 Too Many Requests) or Service Overloaded (503)
-	if statusCode == 429 || statusCode == 503 {
+	// 1. If Rate Limited (429 Too Many Requests)
+	if statusCode == 429 {
 		al.consecutiveOK = 0
 		if now.Sub(al.lastSlowdown) > al.cooldownDuration {
 			// Multiplicative Decrease (halve RPS down to minRPS)
@@ -65,6 +65,22 @@ func (al *AdaptiveLimiter) RecordResponse(statusCode int) {
 			}
 			al.baseLimiter.SetRates(al.currentRPS, al.currentRPS)
 			al.baseLimiter.SetWAFSlowDown(2.0)
+			al.lastSlowdown = now
+		}
+		return
+	}
+
+	// 1b. Service Overloaded (503) — not always rate limiting; apply a
+	// softer multiplicative decrease so transient deploy/restart errors
+	// don't starve the scanner.
+	if statusCode == 503 {
+		al.consecutiveOK = 0
+		if now.Sub(al.lastSlowdown) > al.cooldownDuration {
+			al.currentRPS = al.currentRPS * 0.75
+			if al.currentRPS < al.minRPS {
+				al.currentRPS = al.minRPS
+			}
+			al.baseLimiter.SetRates(al.currentRPS, al.currentRPS)
 			al.lastSlowdown = now
 		}
 		return

@@ -53,7 +53,7 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 				if ctx.Err() != nil {
 					return
 				}
-				if r.budgetExhausted.Load() || !r.canModuleProbe(module) {
+				if !r.canModuleProbe(module) {
 					skippedBudgetCount.Add(1)
 					continue
 				}

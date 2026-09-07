@@ -148,7 +148,8 @@ var patterns = []pattern{
 	{kind: "html_hidden_secret", re: regexp.MustCompile(`(?i)<input[^>]+(?:name|id)=["'](?:api[_-]?key|secret|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key)["'][^>]+value=["']([^"']{12,})["']`), confidence: 0.75, valueGroup: 1, generic: true},
 
 	// --- Generic credential assignments (entropy + placeholder gated) ---
-	{kind: "api_key", re: regexp.MustCompile(`(?i)(?:api[_-]?key|apikey|secret|access[_-]?token|client[_-]?secret|auth[_-]?token|x[_-]?api[_-]?key)\s*[:=]\s*["']([A-Za-z0-9_\-]{16,})["']`), confidence: 0.7, valueGroup: 1, generic: true},
+	{kind: "encryption_key", re: regexp.MustCompile(`(?i)["']?(?:aes[_\- ]?key|secret[_\- ]?key|encryption[_\- ]?key|cipher[_\- ]?key|crypto[_\- ]?key|signing[_\- ]?key|master[_\- ]?key|shared[_\- ]?key|symmetric[_\- ]?key)["']?\s*[:=]\s*["']([A-Za-z0-9+/=_\-]{16,})["']`), confidence: 0.9, valueGroup: 1, generic: true},
+	{kind: "api_key", re: regexp.MustCompile(`(?i)(?:api[_-]?key|apikey|secret|access[_-]?token|client[_-]?secret|auth[_-]?token|x[_-]?api[_-]?key)\s*[:=]\s*["']([A-Za-z0-9+/=_\-]{16,})["']`), confidence: 0.7, valueGroup: 1, generic: true},
 	{kind: "password_assignment", re: regexp.MustCompile(`(?i)(?:password|passwd|pwd|client_secret|private_key)\s*[:=]\s*["']([^"'\s]{8,})["']`), confidence: 0.6, valueGroup: 1, generic: true},
 }
 
@@ -279,7 +280,8 @@ func isCodeOrDOMReference(raw string) bool {
 	lower := strings.ToLower(raw)
 	if strings.HasPrefix(raw, "+") || strings.HasSuffix(raw, "+") ||
 		strings.HasPrefix(raw, ".") || strings.HasSuffix(raw, ".") ||
-		strings.ContainsAny(raw, "+();[]{}\"'$#`\\") {
+		strings.ContainsAny(raw, "();[]{}\"'$#`\\") ||
+		strings.Contains(raw, " + ") || strings.Contains(raw, "+ ") || strings.Contains(raw, " +") {
 		return true
 	}
 	if strings.Contains(lower, "form.") || strings.Contains(lower, ".value") ||

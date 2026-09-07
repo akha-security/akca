@@ -752,25 +752,6 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 
 	e.finalizePlatform(cfg.ScanID)
 
-	var currentRequests int64
-	if e.client != nil {
-		currentRequests = e.client.TotalRequests()
-	}
-	if currentRequests == 0 && e.platform != nil && e.platform.health != nil {
-		currentRequests = int64(e.platform.health.RequestCount())
-	}
-	startedAt := time.Now().UTC()
-	if e.session != nil {
-		snap := e.session.Snapshot()
-		if !snap.StartedAt.IsZero() {
-			startedAt = snap.StartedAt
-		}
-	}
-	completedAt := time.Now().UTC()
-	if e.db != nil {
-		_ = e.db.UpdateScanFinished(cfg.ScanID, "running", currentRequests, startedAt, completedAt)
-	}
-
 	if !cfg.SkipAutoReport {
 		e.checkpointPhase(cfg.ScanID, "report_generation", append([]string{}, completedList...), phaseStatus)
 		if err := e.runReportPhase(ctx, cfg.ScanID, false); err != nil {
@@ -1015,6 +996,16 @@ func (e *Engine) ProbeTarget(ctx context.Context, url string) error {
 func deriveIncludeDomains(targets []string) []string {
 	seen := map[string]struct{}{}
 	var out []string
+	addHost := func(h string) {
+		if h == "" {
+			return
+		}
+		if _, ok := seen[h]; ok {
+			return
+		}
+		seen[h] = struct{}{}
+		out = append(out, h)
+	}
 	for _, t := range targets {
 		raw := strings.TrimSpace(t)
 		if raw == "" {
@@ -1028,22 +1019,22 @@ func deriveIncludeDomains(targets []string) []string {
 			continue
 		}
 		host := strings.ToLower(u.Host)
-		if host == "" {
-			host = strings.ToLower(u.Hostname())
-		}
-		if host == "" {
+		hostname := strings.ToLower(u.Hostname())
+		if host == "" && hostname == "" {
 			continue
 		}
 		// Strip standard default ports (:80 for http, :443 for https)
 		if (u.Scheme == "http" && strings.HasSuffix(host, ":80")) ||
 			(u.Scheme == "https" && strings.HasSuffix(host, ":443")) {
-			host = strings.ToLower(u.Hostname())
+			addHost(hostname)
+		} else {
+			// Include both host:port and hostname so scope matching
+			// works regardless of whether the port is specified.
+			addHost(host)
+			if host != hostname {
+				addHost(hostname)
+			}
 		}
-		if _, ok := seen[host]; ok {
-			continue
-		}
-		seen[host] = struct{}{}
-		out = append(out, host)
 	}
 	return out
 }
@@ -1127,6 +1118,10 @@ func (e *Engine) runMetricsLoop(ctx context.Context, scanID string) {
 			return
 		case <-ticker.C:
 			e.mu.Lock()
+			if e.platform == nil {
+				e.mu.Unlock()
+				continue
+			}
 			health := e.platform.health
 			reqQueue := e.reqQueue
 			oast := e.oast

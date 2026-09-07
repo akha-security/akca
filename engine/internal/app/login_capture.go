@@ -216,15 +216,21 @@ func (e *Engine) applyLoginSession(params map[string]interface{}, emit func(inte
 	if e.client != nil {
 		e.applyAuth(cfg)
 	}
+	// Clone maps before emit to prevent data race if another goroutine
+	// modifies the session config concurrently.
+	emitCookies := cloneMap(cfg.SessionCookies)
+	emitHeaders := cloneMap(cfg.CustomHeaders)
+	emitProfiles := make([]config.AuthProfile, len(cfg.AuthProfiles))
+	copy(emitProfiles, cfg.AuthProfiles)
 	e.mu.Unlock()
 	return emit(map[string]interface{}{
 		"applied":         true,
 		"cookie_count":    len(cookies),
 		"header_count":    len(headers),
 		"force_http1":     true,
-		"session_cookies": cfg.SessionCookies,
-		"custom_headers":  cfg.CustomHeaders,
-		"auth_profiles":   cfg.AuthProfiles,
+		"session_cookies": emitCookies,
+		"custom_headers":  emitHeaders,
+		"auth_profiles":   emitProfiles,
 	})
 }
 
@@ -237,6 +243,14 @@ func parseStringMap(raw interface{}) map[string]string {
 		for k, val := range v {
 			out[k] = fmt.Sprintf("%v", val)
 		}
+	}
+	return out
+}
+
+func cloneMap(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
 	}
 	return out
 }

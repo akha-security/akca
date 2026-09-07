@@ -25,9 +25,15 @@ func PrioritizedWordlist(endpointURL string) []string {
 	case strings.Contains(lower, "checkout"), strings.Contains(lower, "cart"), strings.Contains(lower, "payment"):
 		addFront("amount", "price", "total", "quantity", "coupon", "discount", "currency", "order_id")
 	case strings.Contains(lower, "login"), strings.Contains(lower, "auth"), strings.Contains(lower, "oauth"):
-		addFront("username", "password", "email", "token", "redirect_uri", "client_id", "state", "code")
+		addFront("username", "password", "email", "token", "redirect_uri", "client_id", "state", "code", "admin", "role")
+	case strings.Contains(lower, "admin"), strings.Contains(lower, "manage"), strings.Contains(lower, "dashboard"):
+		addFront("admin", "is_admin", "role", "roles", "sudo", "impersonate", "bypass", "debug", "dev_mode", "user_id")
+	case strings.Contains(lower, "proxy"), strings.Contains(lower, "fetch"), strings.Contains(lower, "view"), strings.Contains(lower, "render"):
+		addFront("url", "dest", "destination", "target", "proxy", "feed", "remote", "load_url", "redirect", "site")
+	case strings.Contains(lower, "cloud"), strings.Contains(lower, "s3"), strings.Contains(lower, "bucket"), strings.Contains(lower, "storage"):
+		addFront("bucket", "s3_bucket", "s3_key", "region", "account_id", "role_arn")
 	case strings.Contains(lower, "upload"), strings.Contains(lower, "file"):
-		addFront("file", "filename", "path", "upload", "name", "type")
+		addFront("file", "filename", "filepath", "path", "upload", "name", "type", "template_path")
 	case strings.Contains(lower, "search"), strings.Contains(lower, "query"):
 		addFront("q", "query", "search", "term", "keyword", "filter", "sort")
 	case strings.Contains(lower, "graphql"):

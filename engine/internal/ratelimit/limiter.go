@@ -101,9 +101,17 @@ func (l *Limiter) reserveWait(host string) time.Duration {
 
 	if l.globalRPS > 0 {
 		interval := time.Duration(float64(time.Second) / (l.globalRPS / l.wafMultiplier))
-		// Apply subtle non-periodic jitter (up to 10%) so requests appear organic
-		jitterNanos := (now.UnixNano() % int64(max(int(interval/10), 1)))
+		// Apply subtle non-periodic jitter (±5%) so requests appear organic
+		jitterRange := int64(maxInt(int(interval/20), 1))
+		jitterNanos := (now.UnixNano() % jitterRange)
+		if jitterNanos < 0 {
+			jitterNanos = -jitterNanos
+		}
+		jitterNanos -= jitterRange / 2 // center around zero
 		interval += time.Duration(jitterNanos)
+		if interval < 0 {
+			interval = 0
+		}
 		if now.Before(l.globalNext) {
 			waits = append(waits, l.globalNext.Sub(now))
 		} else {
@@ -114,8 +122,16 @@ func (l *Limiter) reserveWait(host string) time.Duration {
 
 	if l.perHostRPS > 0 && host != "" {
 		interval := time.Duration(float64(time.Second) / (l.perHostRPS / l.wafMultiplier))
-		jitterNanos := (now.UnixNano() % int64(max(int(interval/10), 1)))
+		jitterRange := int64(maxInt(int(interval/20), 1))
+		jitterNanos := (now.UnixNano() % jitterRange)
+		if jitterNanos < 0 {
+			jitterNanos = -jitterNanos
+		}
+		jitterNanos -= jitterRange / 2
 		interval += time.Duration(jitterNanos)
+		if interval < 0 {
+			interval = 0
+		}
 		next := l.hostNext[host]
 		if now.Before(next) {
 			waits = append(waits, next.Sub(now))
@@ -126,7 +142,7 @@ func (l *Limiter) reserveWait(host string) time.Duration {
 	return maxDuration(waits)
 }
 
-func max(a, b int) int {
+func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}
@@ -141,11 +157,11 @@ func maxTime(a, b time.Time) time.Time {
 }
 
 func maxDuration(items []time.Duration) time.Duration {
-	var max time.Duration
+	var m time.Duration
 	for _, d := range items {
-		if d > max {
-			max = d
+		if d > m {
+			m = d
 		}
 	}
-	return max
+	return m
 }

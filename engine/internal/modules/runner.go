@@ -153,9 +153,13 @@ type Runner struct {
 	budgetExhausted atomic.Bool
 	probeCount      atomic.Int64
 	executionErrors atomic.Int64
+	categoryBudgetsMu sync.RWMutex
 	categoryBudgets map[string]int64
 	categoryUsage   map[string]*atomic.Int64
 	rolloverPool    atomic.Int64
+	moduleBudgetsMu sync.RWMutex
+	moduleBudgets   map[string]int64
+	moduleUsage     map[string]*atomic.Int64
 }
 
 // ProbeCount reports vulnerability-module probe attempts independently from
@@ -180,6 +184,8 @@ func NewRunner(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *st
 		tlsReported:     make(map[string]struct{}),
 		moduleSeen:      make(map[string]struct{}),
 		findingSeen:     make(map[string]int64),
+		moduleBudgets:   make(map[string]int64),
+		moduleUsage:     make(map[string]*atomic.Int64),
 	}
 	if cfg.RequestBudget > 0 {
 		r.categoryBudgets = map[string]int64{
@@ -216,25 +222,75 @@ func NewRunner(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *st
 	return r
 }
 
-func moduleCategory(module string) string {
+func ModuleCategory(module string) string {
 	switch module {
-	case "sqli", "command_injection", "ssti", "nosql":
+	case "sqli", "command_injection", "ssti", "nosql", "xss", "blind_xss", "ldap", "xpath",
+		"ldap_xpath_injection", "csti_detection", "client_ssti", "server_side_js_injection",
+		"pdf_injection", "react_rsc_rce", "crlf", "hpp", "prototype_pollution", "llm_injection":
 		return "injection"
-	case "ssrf", "xxe", "insecure_deserialization", "lfi", "file_upload":
+	case "ssrf", "xxe", "insecure_deserialization", "lfi", "file_upload", "nextjs_bypass",
+		"http_smuggling", "smuggling", "cache_poisoning", "cpdos", "proxy_path_confusion":
 		return "serverside"
-	case "idor", "auth_bypass", "cors", "csrf", "broken_auth", "jwt", "oauth", "bfla", "session_fixation", "open_redirect":
+	case "idor", "auth_bypass", "cors", "csrf", "broken_auth", "jwt", "oauth", "bfla",
+		"session_fixation", "open_redirect", "route_auth_bypass", "improper_auth",
+		"account_recovery", "tenant_isolation", "webhook_security", "parser_differential",
+		"mass_assignment", "rate_limit", "account_enum", "oauth_flow_audit",
+		"business_logic", "race_condition", "race_condition_sync", "session_lifecycle", "ws_cswsh":
 		return "logic_auth"
 	default:
 		return "client_exposure"
 	}
 }
 
+func moduleCategory(module string) string {
+	return ModuleCategory(module)
+}
+
+// ModuleDefaultProbesPerTarget defines the optimized probe quota for a given module per discovered target.
+func ModuleDefaultProbesPerTarget(module string) int {
+	switch module {
+	case "sqli", "nosql":
+		return 24
+	case "xss", "blind_xss":
+		return 20
+	case "command_injection", "ssti", "server_side_js_injection", "react_rsc_rce":
+		return 16
+	case "ssrf", "xxe":
+		return 12
+	case "insecure_deserialization", "lfi", "file_upload":
+		return 10
+	case "idor", "auth_bypass", "broken_auth", "bfla":
+		return 10
+	case "cors", "csrf", "open_redirect", "crlf", "hpp":
+		return 6
+	case "graphql", "jwt", "oauth":
+		return 8
+	default:
+		return 6
+	}
+}
+
 func (r *Runner) canModuleProbe(module string) bool {
-	if r == nil || r.cfg.RequestBudget <= 0 {
+	if r == nil {
 		return true
 	}
-	if r.budgetExhausted.Load() {
-		return false
+	// 1. Check granular per-module budget if initialized
+	r.moduleBudgetsMu.RLock()
+	if modBudget, ok := r.moduleBudgets[module]; ok && modBudget > 0 {
+		if usage := r.moduleUsage[module]; usage != nil {
+			if usage.Load() >= modBudget {
+				r.moduleBudgetsMu.RUnlock()
+				// This specific module hit its target-derived budget.
+				// Other modules continue unaffected!
+				return false
+			}
+		}
+	}
+	r.moduleBudgetsMu.RUnlock()
+
+	// 2. Check broad category budget (if global RequestBudget > 0)
+	if r.cfg.RequestBudget <= 0 {
+		return true
 	}
 	cat := moduleCategory(module)
 	usage := r.categoryUsage[cat]
@@ -242,7 +298,9 @@ func (r *Runner) canModuleProbe(module string) bool {
 		return true
 	}
 	used := usage.Load()
+	r.categoryBudgetsMu.RLock()
 	allocated := r.categoryBudgets[cat]
+	r.categoryBudgetsMu.RUnlock()
 	if used < allocated {
 		return true
 	}
@@ -253,7 +311,18 @@ func (r *Runner) canModuleProbe(module string) bool {
 }
 
 func (r *Runner) recordModuleProbeUsage(module string) {
-	if r == nil || r.cfg.RequestBudget <= 0 {
+	if r == nil {
+		return
+	}
+	// Track per-module usage
+	r.moduleBudgetsMu.RLock()
+	if u, ok := r.moduleUsage[module]; ok && u != nil {
+		u.Add(1)
+	}
+	r.moduleBudgetsMu.RUnlock()
+
+	// Track category usage if global budget is set
+	if r.cfg.RequestBudget <= 0 {
 		return
 	}
 	cat := moduleCategory(module)
@@ -261,14 +330,57 @@ func (r *Runner) recordModuleProbeUsage(module string) {
 	if usage == nil {
 		return
 	}
+	r.categoryBudgetsMu.RLock()
 	allocated := r.categoryBudgets[cat]
+	r.categoryBudgetsMu.RUnlock()
 	cur := usage.Add(1)
 	if cur > allocated {
 		r.rolloverPool.Add(-1)
 	}
 }
 
-func (r *Runner) releaseUnusedCategoryBudget(cat string) {
+// InitModuleBudgetsFromTargets initializes granular per-module budgets proportional
+// to the discovered attack surface (number of targets).
+func (r *Runner) InitModuleBudgetsFromTargets(targets []ScanTarget) {
+	if r == nil || len(targets) == 0 {
+		return
+	}
+	r.moduleBudgetsMu.Lock()
+	defer r.moduleBudgetsMu.Unlock()
+
+	targetCount := int64(len(targets))
+	allModules := []string{
+		"sqli", "nosql", "xss", "blind_xss", "command_injection", "ssti",
+		"ssrf", "xxe", "insecure_deserialization", "lfi", "file_upload",
+		"idor", "auth_bypass", "broken_auth", "bfla", "cors", "csrf",
+		"open_redirect", "crlf", "hpp", "graphql", "jwt", "oauth",
+		"server_side_js_injection", "react_rsc_rce", "security_headers",
+	}
+
+	for _, mod := range allModules {
+		perTarget := int64(ModuleDefaultProbesPerTarget(mod))
+		calculatedBudget := targetCount * perTarget
+		if r.cfg.RequestBudget > 0 {
+			// If an operator specified a global request budget, ensure the module
+			// budget respects its category allocation.
+			cat := moduleCategory(mod)
+			r.categoryBudgetsMu.RLock()
+			catAllocated := r.categoryBudgets[cat]
+			r.categoryBudgetsMu.RUnlock()
+			if catAllocated > 0 && calculatedBudget > catAllocated {
+				calculatedBudget = catAllocated
+			}
+		}
+		r.moduleBudgets[mod] = calculatedBudget
+		if _, exists := r.moduleUsage[mod]; !exists {
+			r.moduleUsage[mod] = new(atomic.Int64)
+		}
+	}
+}
+
+// ReleaseUnusedCategoryBudget releases any unspent requests from a completed category
+// into the shared rollover pool so subsequent categories can utilize them.
+func (r *Runner) ReleaseUnusedCategoryBudget(cat string) {
 	if r == nil || r.cfg.RequestBudget <= 0 {
 		return
 	}
@@ -277,11 +389,79 @@ func (r *Runner) releaseUnusedCategoryBudget(cat string) {
 		return
 	}
 	used := usage.Load()
+	r.categoryBudgetsMu.RLock()
 	allocated := r.categoryBudgets[cat]
+	r.categoryBudgetsMu.RUnlock()
 	if remaining := allocated - used; remaining > 0 {
 		if usage.CompareAndSwap(used, allocated) {
 			r.rolloverPool.Add(remaining)
 		}
+	}
+}
+
+func (r *Runner) releaseUnusedCategoryBudget(cat string) {
+	r.ReleaseUnusedCategoryBudget(cat)
+}
+
+// AdjustCategoryBudgetsFromTargets dynamically redistributes the remaining request budget
+// among categories based on the actual attack surface discovered (e.g. number of parameter
+// injection targets vs server-side URL targets vs passive endpoint targets).
+func (r *Runner) AdjustCategoryBudgetsFromTargets(targets []ScanTarget) {
+	if r == nil || len(targets) == 0 {
+		return
+	}
+	// Initialize module budgets alongside category adjustments
+	r.InitModuleBudgetsFromTargets(targets)
+
+	if r.cfg.RequestBudget <= 0 {
+		return
+	}
+	r.categoryBudgetsMu.Lock()
+	defer r.categoryBudgetsMu.Unlock()
+
+	counts := map[string]int{
+		"injection":       0,
+		"serverside":      0,
+		"logic_auth":      0,
+		"client_exposure": 0,
+	}
+
+	for _, t := range targets {
+		if t.Parameter != "" {
+			counts["injection"]++
+		}
+		paramLower := strings.ToLower(t.Parameter)
+		if t.Location == "path" || strings.Contains(paramLower, "url") || strings.Contains(paramLower, "file") ||
+			strings.Contains(paramLower, "path") || strings.Contains(paramLower, "dest") || strings.Contains(paramLower, "redirect") {
+			counts["serverside"]++
+		}
+		if t.Parameter == "" || len(t.RecommendedModules) > 0 {
+			counts["logic_auth"]++
+		}
+		counts["client_exposure"]++
+	}
+
+	totalWeighted := counts["injection"] + counts["serverside"] + counts["logic_auth"] + counts["client_exposure"]
+	if totalWeighted == 0 {
+		return
+	}
+
+	// Guarantee a baseline floor of 8% for each category so small surfaces don't starve,
+	// and distribute the remaining 68% proportionally according to discovered targets.
+	const floor = 0.08
+	const allocatable = 1.0 - (floor * 4.0)
+
+	totalBudget := float64(r.cfg.RequestBudget)
+	var allocatedTotal int64
+	for cat, count := range counts {
+		fraction := floor + allocatable*(float64(count)/float64(totalWeighted))
+		catBudget := int64(totalBudget * fraction)
+		r.categoryBudgets[cat] = catBudget
+		allocatedTotal += catBudget
+	}
+	// Give any rounding remainder to injection
+	if diff := int64(r.cfg.RequestBudget) - allocatedTotal; diff > 0 {
+		r.categoryBudgets["injection"] += diff
 	}
 }
 
@@ -528,7 +708,7 @@ func (r *Runner) RunGroupA(ctx context.Context, targets []ScanTarget) ([]ModuleF
 				if ctx.Err() != nil {
 					return
 				}
-				if r.budgetExhausted.Load() || !r.canModuleProbe("sqli") {
+				if !r.canModuleProbe("sqli") {
 					skippedBudgetCount.Add(1)
 					continue
 				}

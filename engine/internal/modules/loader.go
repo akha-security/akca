@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -165,7 +166,11 @@ func (r *Runner) LoadTargetsWithEndpointsFromDB(limit int) ([]ScanTarget, error)
 			})
 		}
 	}
-	return r.planAndCapBalancedTargets(targets, limit)
+	selected, err := r.planAndCapBalancedTargets(targets, limit)
+	if err == nil {
+		r.AdjustCategoryBudgetsFromTargets(selected)
+	}
+	return selected, err
 }
 
 // planAndCapBalancedTargets reserves part of the hard limit for parameterless
@@ -257,6 +262,25 @@ func orderTargetsByEndpointCoverage(planned []ScanTarget) []ScanTarget {
 	}
 
 	ordered := make([]ScanTarget, 0, len(planned))
+	// Sort targets in each endpoint bucket by Priority descending (highest risk first)
+	for key := range buckets {
+		sort.SliceStable(buckets[key], func(i, j int) bool {
+			return buckets[key][i].Priority > buckets[key][j].Priority
+		})
+	}
+	// Sort endpoints by their maximum target priority descending (highest risk endpoints first)
+	sort.SliceStable(endpointOrder, func(i, j int) bool {
+		priI := 0
+		if len(buckets[endpointOrder[i]]) > 0 {
+			priI = buckets[endpointOrder[i]][0].Priority
+		}
+		priJ := 0
+		if len(buckets[endpointOrder[j]]) > 0 {
+			priJ = buckets[endpointOrder[j]][0].Priority
+		}
+		return priI > priJ
+	})
+
 	for round := 0; len(ordered) < len(planned); round++ {
 		for _, key := range endpointOrder {
 			bucket := buckets[key]

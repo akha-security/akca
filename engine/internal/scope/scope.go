@@ -271,12 +271,14 @@ func IsLinkedAPISubdomain(host, baseHost string) bool {
 	if h == base {
 		return true
 	}
-	// Common API / service prefixes strictly required
+	// Common API / service prefixes strictly required. Core API, auth,
+	// and backend service prefixes are allowed. Generic development or staging
+	// environments (dev., stage.) are omitted to prevent unintentional scope creep.
 	for _, pfx := range []string{
-		"api.", "api-", "auth.", "backend.", "graphql.", "gateway.", "services.",
-		"app.", "v1.", "v2.", "v3.", "rest.", "ws.", "admin.", "stage.", "dev.",
+		"api.", "api-", "auth.", "app.", "backend.", "graphql.", "gateway.",
+		"services.", "rest.", "ws.", "grpc.", "v1.", "v2.", "v3.",
 	} {
-		if strings.HasPrefix(h, pfx) || strings.Contains(h, "."+pfx) {
+		if strings.HasPrefix(h, pfx) {
 			return true
 		}
 	}

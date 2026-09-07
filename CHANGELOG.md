@@ -5,6 +5,47 @@ All notable changes to AKCA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.7] - 2026-09-07
+
+### Added
+
+- **Arjun-Style GET-to-POST Method Pivoting & Hidden Parameter Discovery**:
+  - Automatic probing on GET endpoints to test if they accept POST requests without 405/404/501 rejections.
+  - Dual-surface differential probing: simultaneously fuzzes URL query parameters and JSON/Form request bodies.
+  - Automatic promotion: discovered hidden POST parameters automatically register new `POST` endpoints in the database, allowing vulnerability modules (SQLi, IDOR, SSRF, Mass Assignment) to target them.
+- **Surface-Adaptive Per-Module Granular Budgeting**:
+  - Replaced blunt global request budget cutoff with surface-proportional allocations scaled by discovered target counts (`len(targets)`).
+  - Granular probe quotas per vulnerability type: SQLi/NoSQL (24), XSS (20), RCE/SSTI (16), SSRF/XXE (12), IDOR/Auth (10), CORS/CRLF (6).
+  - Strict module isolation prevents heavy modules from starving subsequent checks.
+- **High-Impact Parameter Wordlist & Context-Aware Prioritization**:
+  - Expanded parameter dictionary with top bug bounty parameters across SSRF/Proxy (`dest`, `target_url`, `proxy`, `remote`), Cloud/AWS (`bucket`, `s3_key`, `role_arn`), Privilege Escalation (`admin`, `is_admin`, `sudo`, `impersonate`, `bypass`), File Inclusion (`template_path`, `view_path`), and Prototype Pollution (`__proto__`, `constructor`).
+  - Context-aware prioritization dynamically pulls admin, cloud, upload, and proxy parameters to the front based on URL path semantics.
+
+### Fixed & Hardened
+
+- **Core Engine & HTTP Client Stability**:
+  - Eliminated redundant `UpdateScanFinished("running")` call that overwrote final completion status in database.
+  - Fixed nil pointer dereference panic in `runMetricsLoop` when platform health is uninitialized.
+  - Fixed request budget counter incrementing inside retry loops, eliminating 3x budget burn on transient network retries.
+  - Upgraded WAF bypass headers to use cryptographically secure random IP generation (`crypto/rand`).
+  - Corrected rate limiter jitter calculation to be zero-centered (`±5%`), preventing negative interval drift.
+  - Fixed HTTP 429 response body handling to preserve evidence without retrying, while recording `Retry-After` cooldowns for future requests.
+  - Extended preflight status checks to cover all HTTP 5xx codes (502, 503, 504, 500+).
+  - Restricted scope auto-expansion prefixes to strictly API/service endpoints, avoiding dev/staging scope creep.
+  - Resolved non-standard port scope matching in `deriveIncludeDomains`.
+  - Replaced hardcoded proxy intercept port with dynamic port allocation (`127.0.0.1:0`).
+  - Fixed rune boundary truncation in repeater preventing broken multi-byte UTF-8 characters.
+
+### Optimized & CLI Polish
+
+- **Target-Level TLS Misconfiguration Scoping**:
+  - Anchored TLS inspections strictly to the root domain (`https://host/`), preventing confusing findings on subpages such as `.env` with misleading HTTP 200 statuses.
+- **CLI Output Hygiene**:
+  - Silenced repetitive `[COVERAGE] Stateful proof coverage requires an explicit reversible policy` notices in normal mode, reserving them exclusively for `--verbose`.
+  - Fixed `SCAN SESSION` panel rendering: replaced dim/grey vertical borders and dividers with uniform, vibrant lavender/blue styling.
+- **API Versioning Scan Speed**:
+  - Restricted `api_versioning` to run once per host on root or base API endpoints, eliminating thousands of redundant subpage probes and reducing module runtime from minutes to seconds.
+
 ## [0.1.6] - 2026-09-06
 
 ### Added

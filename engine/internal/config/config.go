@@ -232,6 +232,7 @@ type ScanConfig struct {
 	ScanIntensity                 string                        `json:"scan_intensity"`
 	TimeBudget                    time.Duration                 `json:"time_budget"`
 	RequestBudget                 int                           `json:"request_budget"`
+	RequestsPerTarget             int                           `json:"requests_per_target,omitempty"`
 	CrawlerRequestBudget          int                           `json:"crawler_request_budget,omitempty"`
 	PayloadBudget                 PayloadBudget                 `json:"payload_budget"`
 	AllowedVulnerabilityClasses   []string                      `json:"allowed_vulnerability_classes,omitempty"`
@@ -325,6 +326,7 @@ type ExplicitScanOptions struct {
 	PerHostConcurrency         bool
 	EnableWAFBypassHeaders     bool
 	RequestBudget              bool
+	RequestsPerTarget          bool
 	CrawlerRequestBudget       bool
 	TimeBudget                 bool
 	MaxPages                   bool
@@ -1001,4 +1003,18 @@ func redactStatefulSecurityPolicies(policies []StatefulSecurityProofPolicy) []St
 		}
 	}
 	return redacted
+}
+
+// EffectiveRequestBudget returns the calculated request budget. If an explicit
+// RequestBudget is set, it takes precedence. Otherwise, if RequestsPerTarget is set
+// and targetCount > 0, the budget is derived dynamically as RequestsPerTarget * targetCount.
+// Returns 0 for unlimited.
+func (c ScanConfig) EffectiveRequestBudget(targetCount int) int {
+	if c.RequestBudget > 0 {
+		return c.RequestBudget
+	}
+	if c.RequestsPerTarget > 0 && targetCount > 0 {
+		return c.RequestsPerTarget * targetCount
+	}
+	return 0
 }

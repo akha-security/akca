@@ -41,7 +41,7 @@ func (r *Runner) RunGroupC(ctx context.Context, targets []ScanTarget) ([]ModuleF
 				if ctx.Err() != nil {
 					return
 				}
-				if r.budgetExhausted.Load() || !r.canModuleProbe("cors") {
+				if !r.canModuleProbe("cors") {
 					skippedBudgetCount.Add(1)
 					continue
 				}

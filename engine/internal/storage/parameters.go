@@ -70,3 +70,20 @@ func (db *DB) CountParameters(endpointID int64) (int, error) {
 	}
 	return n, nil
 }
+
+// EnsureEndpoint returns existing endpoint ID or inserts a new endpoint for the given URL and method.
+func (db *DB) EnsureEndpoint(scanID, endpointURL, method string) (int64, error) {
+	var id int64
+	err := db.conn.QueryRow(`SELECT id FROM endpoints WHERE scan_id = ? AND url = ? AND method = ?`, scanID, endpointURL, method).Scan(&id)
+	if err == nil && id > 0 {
+		return id, nil
+	}
+	res, err := db.conn.Exec(`INSERT INTO endpoints (scan_id, url, method, normalized_url) VALUES (?, ?, ?, ?)`, scanID, endpointURL, method, endpointURL)
+	if err != nil {
+		if errRow := db.conn.QueryRow(`SELECT id FROM endpoints WHERE scan_id = ? AND url = ? AND method = ?`, scanID, endpointURL, method).Scan(&id); errRow == nil && id > 0 {
+			return id, nil
+		}
+		return 0, err
+	}
+	return res.LastInsertId()
+}

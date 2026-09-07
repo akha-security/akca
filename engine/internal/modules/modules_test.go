@@ -555,3 +555,162 @@ func TestFairShareBudgetAllocationAndRollover(t *testing.T) {
 	}
 }
 
+func TestCategoryBudgetIsolationDoesNotStarveOtherCategories(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.RequestBudget = 100
+	runner := NewRunner("isolation-test", nil, nil, nil, nil, nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
+
+	// Simulate injection exhausting all 35 requests
+	for i := 0; i < 35; i++ {
+		runner.recordModuleProbeUsage("sqli")
+	}
+
+	// Sqli should now be exhausted
+	if runner.canModuleProbe("sqli") {
+		t.Fatal("expected sqli to be exhausted")
+	}
+
+	// Trigger markBudgetExhausted (e.g. from an HTTP budget notice or module exhaustion)
+	runner.markBudgetExhausted("sqli", "http://example.com/test")
+
+	// Critical check: SSRF (serverside), CORS (logic_auth), and security_headers (client_exposure)
+	// MUST NOT BE STOPPED! They still have their own allocated budgets!
+	if !runner.canModuleProbe("ssrf") {
+		t.Fatal("ssrf in serverside category must not be starved by injection exhaustion!")
+	}
+	if !runner.canModuleProbe("cors") {
+		t.Fatal("cors in logic_auth category must not be starved by injection exhaustion!")
+	}
+	if !runner.canModuleProbe("security_headers") {
+		t.Fatal("security_headers in client_exposure category must not be starved by injection exhaustion!")
+	}
+	if !runner.canModuleProbe("xxe") {
+		t.Fatal("xxe in serverside category must not be starved by injection exhaustion!")
+	}
+}
+
+func TestDynamicCategoryBudgetAdjustmentFromTargets(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.RequestBudget = 1000
+	runner := NewRunner("dynamic-budget-test", nil, nil, nil, nil, nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
+
+	// Heavy injection target surface (90 injection targets, 10 serverside, 10 auth)
+	targets := make([]ScanTarget, 0, 110)
+	for i := 0; i < 90; i++ {
+		targets = append(targets, ScanTarget{
+			EndpointURL: fmt.Sprintf("http://example.com/api/%d", i),
+			Method:      "GET",
+			Parameter:   fmt.Sprintf("param_%d", i),
+			Location:    "query",
+		})
+	}
+	for i := 0; i < 10; i++ {
+		targets = append(targets, ScanTarget{
+			EndpointURL: fmt.Sprintf("http://example.com/download/%d", i),
+			Method:      "GET",
+			Parameter:   "file_url",
+			Location:    "query",
+		})
+	}
+
+	runner.AdjustCategoryBudgetsFromTargets(targets)
+
+	runner.categoryBudgetsMu.RLock()
+	injBudget := runner.categoryBudgets["injection"]
+	srvBudget := runner.categoryBudgets["serverside"]
+	runner.categoryBudgetsMu.RUnlock()
+
+	// Injection should receive significantly more budget than serverside due to surface distribution
+	if injBudget <= srvBudget {
+		t.Fatalf("expected injection budget (%d) > serverside budget (%d)", injBudget, srvBudget)
+	}
+	if injBudget < 400 {
+		t.Fatalf("expected injection budget to scale up to at least 400 requests, got %d", injBudget)
+	}
+}
+
+func TestPriorityOrderedTargetExecutionUnderBudget(t *testing.T) {
+	targets := []ScanTarget{
+		{EndpointURL: "http://example.com/low-risk", Method: "GET", Parameter: "low", Priority: 20},
+		{EndpointURL: "http://example.com/high-risk-admin", Method: "POST", Parameter: "cmd", Priority: 95},
+		{EndpointURL: "http://example.com/medium-risk", Method: "GET", Parameter: "id", Priority: 60},
+	}
+
+	ordered := orderTargetsByEndpointCoverage(targets)
+	if len(ordered) != 3 {
+		t.Fatalf("expected 3 targets, got %d", len(ordered))
+	}
+
+	// First target tested must be the highest risk (admin Priority 95)
+	if ordered[0].Parameter != "cmd" {
+		t.Fatalf("expected highest priority target 'cmd' first, got %q", ordered[0].Parameter)
+	}
+	// Second must be medium risk (id Priority 60)
+	if ordered[1].Parameter != "id" {
+		t.Fatalf("expected second priority target 'id', got %q", ordered[1].Parameter)
+	}
+	// Last must be low risk (low Priority 20)
+	if ordered[2].Parameter != "low" {
+		t.Fatalf("expected lowest priority target 'low' last, got %q", ordered[2].Parameter)
+	}
+}
+
+func TestPerModuleSurfaceAdaptiveBudgetAllocation(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.RequestBudget = 0 // Unlimited global mode (surface-driven)
+	runner := NewRunner("module-budget-test", nil, nil, nil, nil, nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
+
+	targets := make([]ScanTarget, 5)
+	for i := 0; i < 5; i++ {
+		targets[i] = ScanTarget{
+			EndpointURL: fmt.Sprintf("http://example.com/api/v1/resource/%d", i),
+			Method:      "GET",
+			Parameter:   fmt.Sprintf("param%d", i),
+		}
+	}
+
+	// Initialize surface-driven module budgets from 5 targets
+	runner.InitModuleBudgetsFromTargets(targets)
+
+	runner.moduleBudgetsMu.RLock()
+	sqliBudget := runner.moduleBudgets["sqli"]
+	ssrfBudget := runner.moduleBudgets["ssrf"]
+	corsBudget := runner.moduleBudgets["cors"]
+	runner.moduleBudgetsMu.RUnlock()
+
+	// 5 targets * 24 probes/target = 120 probes
+	if sqliBudget != 120 {
+		t.Fatalf("expected sqli budget 120, got %d", sqliBudget)
+	}
+	// 5 targets * 12 probes/target = 60 probes
+	if ssrfBudget != 60 {
+		t.Fatalf("expected ssrf budget 60, got %d", ssrfBudget)
+	}
+	// 5 targets * 6 probes/target = 30 probes
+	if corsBudget != 30 {
+		t.Fatalf("expected cors budget 30, got %d", corsBudget)
+	}
+
+	// Probe SQLi up to its quota
+	for i := 0; i < 120; i++ {
+		if !runner.canModuleProbe("sqli") {
+			t.Fatalf("expected sqli probe %d to be allowed", i)
+		}
+		runner.recordModuleProbeUsage("sqli")
+	}
+
+	// SQLi quota exhausted
+	if runner.canModuleProbe("sqli") {
+		t.Fatal("expected sqli to be exhausted after reaching its target quota")
+	}
+
+	// Crucial: SSRF and CORS must still be allowed to run!
+	if !runner.canModuleProbe("ssrf") {
+		t.Fatal("ssrf must not be stopped when sqli exhausts its module quota")
+	}
+	if !runner.canModuleProbe("cors") {
+		t.Fatal("cors must not be stopped when sqli exhausts its module quota")
+	}
+}
+
+

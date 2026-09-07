@@ -206,15 +206,20 @@ func (r *Runner) runTLSMisconfig(ctx context.Context, target ScanTarget) []Modul
 	}
 	r.tlsReported[hostKey] = struct{}{}
 	r.tlsMu.Unlock()
-	inspection, err := r.tlsInspector.Inspect(ctx, target.EndpointURL)
+
+	// TLS configuration is a host-level property, always inspect and report on the root host URL
+	rootURL := fmt.Sprintf("%s://%s/", u.Scheme, u.Host)
+	inspection, err := r.tlsInspector.Inspect(ctx, rootURL)
 	if err != nil {
 		r.emitOnce("tls-inspect:"+u.Host, "module_notice", "TLS inspection could not be completed", map[string]interface{}{
-			"module": "tls_misconfig", "endpoint": target.EndpointURL, "error": err.Error(),
+			"module": "tls_misconfig", "endpoint": rootURL, "error": err.Error(),
 		})
 		return nil
 	}
+	rootTarget := target
+	rootTarget.EndpointURL = rootURL
 	rr := httpclient.RequestResponse{
-		Request: httpclient.RequestRecord{Method: http.MethodGet, URL: target.EndpointURL},
+		Request: httpclient.RequestRecord{Method: http.MethodGet, URL: rootURL},
 		Response: httpclient.ResponseRecord{StatusCode: http.StatusOK, Headers: map[string]string{
 			"TLS-Protocol": inspection.Protocol, "TLS-Cipher": inspection.Cipher,
 			"TLS-Certificate-Subject": inspection.CertificateSubject,
@@ -229,13 +234,13 @@ func (r *Runner) runTLSMisconfig(ctx context.Context, target ScanTarget) []Modul
 		if signal == "expired_certificate" || signal == "hostname_mismatch" || signal == "self_signed_certificate" || signal == "certificate_not_yet_valid" || signal == "untrusted_certificate_chain" {
 			severity = "medium"
 		}
-		observation := r.observation("tls_misconfig", target, verification.RolePositiveProbe, 1, rr)
+		observation := r.observation("tls_misconfig", rootTarget, verification.RolePositiveProbe, 1, rr)
 		f := &ModuleFinding{
 			Title: "TLS configuration: " + strings.ReplaceAll(signal, "_", " "), VulnClass: "tls_misconfig", Severity: severity,
 			Description: fmt.Sprintf("TLS inspection confirmed %s (protocol=%s, cipher=%s, subject=%s, issuer=%s, expires=%s)",
 				signal, inspection.Protocol, inspection.Cipher, inspection.CertificateSubject,
 				inspection.CertificateIssuer, inspection.CertificateExpiry.Format("2006-01-02")),
-			Endpoint: target.EndpointURL, Confidence: verification.Confirmed,
+			Endpoint: rootURL, Confidence: verification.Confirmed,
 			Evidence: Evidence{
 				Module: "tls_misconfig", Signal: signal, Payload: p, Request: rr.Request, Response: rr.Response,
 				Verification: verification.Result{

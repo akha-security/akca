@@ -18,8 +18,8 @@ import (
 )
 
 func TestVersionIsStableReleaseString(t *testing.T) {
-	if version != "0.1.6" {
-		t.Fatalf("version=%q, want 0.1.6", version)
+	if version != "0.1.7" {
+		t.Fatalf("version=%q, want 0.1.7", version)
 	}
 }
 
@@ -48,7 +48,7 @@ func TestUsageHelpAndVersionPrintBrandBanner(t *testing.T) {
 			if !strings.Contains(combined, akcaASCII[0]) {
 				t.Fatalf("ASCII wordmark missing for %s: %q", tc.name, combined)
 			}
-			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.1.6") {
+			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.1.7") {
 				t.Fatalf("brand/version line missing for %s: %q", tc.name, combined)
 			}
 		})

@@ -20,7 +20,7 @@ func (e *Engine) runReportPhase(ctx context.Context, scanID string, partial bool
 		Partial:  partial,
 		Redact:   false,
 	}
-	if err := e.generateReport(opts); err != nil {
+	if err := e.generateReport(ctx, opts); err != nil {
 		return err
 	}
 
@@ -29,8 +29,12 @@ func (e *Engine) runReportPhase(ctx context.Context, scanID string, partial bool
 }
 
 func (e *Engine) GenerateReport(opts report.Options) ([]byte, error) {
+	return e.GenerateReportWithContext(context.Background(), opts)
+}
+
+func (e *Engine) GenerateReportWithContext(ctx context.Context, opts report.Options) ([]byte, error) {
 	var buf bytes.Buffer
-	if err := e.generateReportToWriter(&buf, opts); err != nil {
+	if err := e.generateReportToWriter(ctx, &buf, opts); err != nil {
 		return nil, err
 	}
 	if opts.Format == report.FormatJSON {
@@ -41,12 +45,15 @@ func (e *Engine) GenerateReport(opts report.Options) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (e *Engine) generateReport(opts report.Options) error {
-	_, err := e.GenerateReport(opts)
+func (e *Engine) generateReport(ctx context.Context, opts report.Options) error {
+	_, err := e.GenerateReportWithContext(ctx, opts)
 	return err
 }
 
-func (e *Engine) generateReportToWriter(w io.Writer, opts report.Options) error {
+func (e *Engine) generateReportToWriter(ctx context.Context, w io.Writer, opts report.Options) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	store := evidencestore.New(e.db)
 	builder := report.NewBuilder(store, e.db)
 	exporter := report.NewExporter(builder, func(p report.Progress) {

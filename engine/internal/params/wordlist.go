@@ -19,7 +19,7 @@ func init() {
 func generateWordlist() []string {
 	base := []string{
 		"id", "uid", "user", "user_id", "userid", "username", "email", "password", "pass", "pwd",
-		"token", "access_token", "refresh_token", "api_key", "apikey", "key", "secret", "auth",
+		"admin", "role", "roles", "token", "access_token", "refresh_token", "api_key", "apikey", "key", "secret", "auth",
 		"session", "sessionid", "sid", "csrf", "csrf_token", "xsrf", "nonce", "state", "code",
 		"redirect", "redirect_uri", "callback", "return", "next", "url", "uri", "path", "file",
 		"filename", "name", "q", "query", "search", "s", "term", "keyword", "filter", "sort",
@@ -71,6 +71,33 @@ func generateWordlist() []string {
 		"feed", "timeline", "event", "event_id", "calendar", "schedule", "appointment", "booking",
 		"reservation", "slot_id", "room", "room_id", "seat", "seat_id", "table", "table_id", "guest",
 		"guests", "adult", "child_count", "infant", "pet", "vehicle", "plate", "vin", "make",
+		// SSRF, Proxy, Remote Fetch & Open Redirect
+		"dest", "destination", "target", "target_url", "site", "html", "feed_url", "host_url",
+		"proxy", "proxy_url", "relay", "mirror", "remote", "remote_url", "fetch", "fetch_url",
+		"service_url", "forward", "forward_to", "open", "view_url", "rurl", "ref_url", "back_url",
+		"return_to", "return_path", "endpoint_url", "load_url", "source_url", "href", "link",
+		// Privilege Escalation, Admin Bypass & Internal Backdoors
+		"is_admin", "is_staff", "is_superuser", "superuser", "privilege", "privileges", "sudo",
+		"su", "impersonate", "as_user", "switch_user", "ghost", "override", "bypass", "dev",
+		"developer", "dev_mode", "internal", "test_mode", "debug_mode", "root", "god", "god_mode",
+		"master", "operator", "privileged", "elevated", "whitelist", "skip_auth", "no_auth", "disable_auth",
+		// Cloud, AWS, S3, Kubernetes & Microservice Tokens
+		"bucket", "s3_bucket", "s3_key", "aws_key", "aws_secret", "aws_token", "region", "account_id",
+		"role_arn", "session_token", "metadata_url", "cluster", "namespace", "pod", "sub_account",
+		"project_id", "resource_id", "instance_id", "zone", "provider", "secret_key", "private_key",
+		"public_key", "bearer", "oauth_token", "auth_token", "id_token", "jwt",
+		// File Inclusion, LFI, RFI, Path Traversal & Document Renderers
+		"filepath", "file_path", "template_path", "view_path", "layout_file", "include_path",
+		"render_file", "pdf_url", "report_file", "export_file", "attachment", "doc", "source_file",
+		"conf", "ini", "env", "dot_env", "config_file", "log_file", "base_dir", "root_dir",
+		// RCE, Command Injection, Expressions & Prototype Pollution
+		"exec", "execute", "shell", "cli", "eval", "expression", "spel", "script", "bin", "process",
+		"daemon", "__proto__", "constructor", "prototype", "_method", "_json", "authenticity_token",
+		// Database, SQL Filtering & Ordering
+		"select", "where", "order_by", "sort_by", "sort_order", "dir", "direction", "group_by",
+		"having", "column", "field", "fields", "table", "schema", "db", "database", "sql", "clause",
+		// FinTech, Payments & Pricing Logic
+		"subtotal", "cost", "refund", "voucher", "cart_id", "checkout_id", "transfer_amount", "recipient",
 	}
 
 	seen := map[string]struct{}{}

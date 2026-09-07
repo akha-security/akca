@@ -41,7 +41,7 @@ func (r *Runner) RunGroupD(ctx context.Context, targets []ScanTarget) ([]ModuleF
 				if ctx.Err() != nil {
 					return
 				}
-				if r.budgetExhausted.Load() || !r.canModuleProbe("security_headers") {
+				if !r.canModuleProbe("security_headers") {
 					skippedBudgetCount.Add(1)
 					continue
 				}

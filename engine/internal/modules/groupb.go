@@ -49,7 +49,7 @@ func (r *Runner) RunGroupB(ctx context.Context, targets []ScanTarget) ([]ModuleF
 				if ctx.Err() != nil {
 					return
 				}
-				if r.budgetExhausted.Load() || !r.canModuleProbe("ssrf") {
+				if !r.canModuleProbe("ssrf") {
 					skippedBudgetCount.Add(1)
 					continue
 				}

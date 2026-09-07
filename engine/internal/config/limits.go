@@ -17,8 +17,15 @@ func (c ScanConfig) EffectiveCrawlerBudget() int {
 		return 0
 	}
 	budget := int(float64(c.RequestBudget) * 0.35)
-	if budget < 1000 {
-		budget = 1000
+	if c.RequestBudget >= 2800 {
+		if budget < 1000 {
+			budget = 1000
+		}
+	} else {
+		// In smaller budgets, guarantee crawler leaves room for modules
+		if budget < 1 && c.RequestBudget > 0 {
+			budget = 1
+		}
 	}
 	return budget
 }

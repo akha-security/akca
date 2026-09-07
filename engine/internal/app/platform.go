@@ -108,7 +108,7 @@ func (e *Engine) bootstrapPlatform(cfg config.ScanConfig, scanScope *scope.Engin
 	}
 	if cfg.EnableProxyInterceptMode {
 		e.platform.proxy = proxy.NewInterceptServer(e.db, scanScope, "proxy-"+cfg.ScanID)
-		_ = e.platform.proxy.Start("127.0.0.1:18080")
+		_ = e.platform.proxy.Start("127.0.0.1:0")
 	}
 	if cfg.EnableRuntimeSensor {
 		token := os.Getenv(cfg.RuntimeSensorTokenEnv)

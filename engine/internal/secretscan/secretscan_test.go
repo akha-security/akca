@@ -180,3 +180,28 @@ func TestOpenAIAndOktaFalsePositiveRegressions(t *testing.T) {
 	}
 }
 
+func TestDetectEncryptionKeyAndBase64AESKey(t *testing.T) {
+	body := `{"data":null,"extra":null,"aes_key":"g569xr6zcYfN5DvUWAaW0orRZysfH6tDmGsTUoN/S5MF84YfmcjdjoDfTVEgwZzIzkEHFUHNUL+huFxRhunjMWTcwW0CsQjodOdrum7qbm7khyq6InB0ZkmX5FHkWU8Rl1cw4KMWUvGAfnlB9aTtIsXz0gf0kkQRR3BZ4Pzdb/624s/W+o6ZwVwSNgIbnPGmI+EsCeBNjXRa9YguXCW4MSEFdPtXB/Dm4a0ZiiaVZ9FSA0z1NVpPvwlGt+LPALgtrMHJ0ZNJU0P3czVBC5ZajgveOF8+AdGEe/zrvrALnKCk1uiMDxt0/Z0WfLB931TNaMZnEfMGaQt/v/QcZKMXTw=="}`
+	matches := Detect(body)
+	if len(matches) == 0 {
+		t.Fatal("expected aes_key to be detected")
+	}
+	found := false
+	for _, m := range matches {
+		if m.Kind == "encryption_key" {
+			found = true
+			if !IsReportable(m) {
+				t.Fatalf("expected encryption_key match to be reportable: %+v", m)
+			}
+			if Severity(m.Confidence) != "high" {
+				t.Fatalf("expected high severity for encryption_key, got %s", Severity(m.Confidence))
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected kind 'encryption_key', got matches: %+v", matches)
+	}
+}
+
+

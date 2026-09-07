@@ -381,10 +381,30 @@ func (r *Runner) runAPIVersioning(ctx context.Context, target ScanTarget) []Modu
 		r.emitSkip("api_versioning", target, reason)
 		return nil
 	}
+	targetParsed, err := url.Parse(target.EndpointURL)
+	if err != nil {
+		return nil
+	}
+	cleanPath := strings.TrimRight(targetParsed.Path, "/")
+	// Only probe API versioning on root ("" or "/") or base API prefixes ("/api", "/rest")
+	// Avoid probing deep content endpoints like /products/item-123 or /.env
+	if cleanPath != "" && cleanPath != "/api" && cleanPath != "/rest" {
+		return nil
+	}
+	hostKey := strings.ToLower(targetParsed.Host) + ":" + cleanPath
+	r.moduleSeenMu.Lock()
+	if _, seen := r.moduleSeen["api_versioning:"+hostKey]; seen {
+		r.moduleSeenMu.Unlock()
+		return nil
+	}
+	r.moduleSeen["api_versioning:"+hostKey] = struct{}{}
+	r.moduleSeenMu.Unlock()
+
+	baseURL := fmt.Sprintf("%s://%s%s", targetParsed.Scheme, targetParsed.Host, cleanPath)
 	baseline := httpclient.RequestResponse{Response: httpclient.ResponseRecord{StatusCode: 404, Body: "not found"}}
 	var out []ModuleFinding
 	for _, version := range []string{"/v1", "/v2", "/v3", "/api/v1", "/api/v2"} {
-		u := strings.TrimSuffix(target.EndpointURL, "/") + version
+		u := strings.TrimSuffix(baseURL, "/") + version
 		if !r.scope.IsInScope(u) {
 			continue
 		}

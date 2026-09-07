@@ -514,7 +514,7 @@ func (e *Engine) exportReportQuery(input CommandInput, params map[string]interfa
 	if err != nil {
 		return err
 	}
-	if err := e.generateReportToWriter(f, opts); err != nil {
+	if err := e.generateReportToWriter(context.Background(), f, opts); err != nil {
 		f.Close()
 		_ = os.Remove(outPath)
 		return err

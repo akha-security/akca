@@ -44,11 +44,12 @@ func (e *Engine) ReplayRequest(params map[string]interface{}) (map[string]interf
 	}, nil
 }
 
-func truncateStr(s string, max int) string {
-	if len(s) <= max {
+func truncateStr(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:max] + "…"
+	return string(runes[:maxLen]) + "…"
 }
 
 func toString(v interface{}) string {

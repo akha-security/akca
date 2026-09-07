@@ -129,13 +129,31 @@ func (e *Engine) vulnModuleRunner() *modules.Runner {
 	if e.oast != nil {
 		oastClient = e.oast
 	}
-	e.moduleRunner = modules.NewRunner(e.session.ID, e.client, e.scope, e.db, e.verifier, oastClient, e.Emit, e.session.Config, e.moduleRunnerOpts()...)
+	cfg := e.session.Config
+	if cfg.RequestBudget > 0 && e.client != nil {
+		spent := int(e.client.TotalRequests())
+		remaining := cfg.RequestBudget - spent
+		if remaining < 0 {
+			remaining = 0
+		}
+		cfg.RequestBudget = remaining
+	}
+	e.moduleRunner = modules.NewRunner(e.session.ID, e.client, e.scope, e.db, e.verifier, oastClient, e.Emit, cfg, e.moduleRunnerOpts()...)
 	return e.moduleRunner
 }
 
 func (e *Engine) runVulnModulesSequential(ctx context.Context) error {
 	runner := e.vulnModuleRunner()
 	hasError := false
+
+	lastModuleForCategory := make(map[string]int)
+	for i, item := range fullScanModuleOrder {
+		if e.session.Config.AllowsModule(item.name) {
+			cat := modules.ModuleCategory(item.name)
+			lastModuleForCategory[cat] = i
+		}
+	}
+
 	for moduleOffset, item := range fullScanModuleOrder {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -159,6 +177,10 @@ func (e *Engine) runVulnModulesSequential(ctx context.Context) error {
 			"phase": phase, "module": item.name, "findings": len(findings),
 			"module_index": moduleIndex, "module_total": moduleTotal,
 		})
+		cat := modules.ModuleCategory(item.name)
+		if lastModuleForCategory[cat] == moduleOffset {
+			runner.ReleaseUnusedCategoryBudget(cat)
+		}
 		if item.usesOAST {
 			e.runOASTModuleDrain(ctx, item.name)
 		}

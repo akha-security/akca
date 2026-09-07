@@ -47,6 +47,15 @@ func preflightStatusError(status int, authenticated bool) error {
 	if status == http.StatusBadGateway {
 		return fmt.Errorf("target preflight returned HTTP 502 Bad Gateway; scan aborted before consuming the request budget")
 	}
+	if status == http.StatusServiceUnavailable {
+		return fmt.Errorf("target preflight returned HTTP 503 Service Unavailable; target may be under maintenance")
+	}
+	if status == http.StatusGatewayTimeout {
+		return fmt.Errorf("target preflight returned HTTP 504 Gateway Timeout; upstream is unresponsive")
+	}
+	if status >= 500 {
+		return fmt.Errorf("target preflight returned HTTP %d; scan aborted due to server-side error", status)
+	}
 	if authenticated && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
 		return fmt.Errorf("authentication preflight returned HTTP %d; configured credentials were not accepted", status)
 	}

@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/akha-security/akca/engine/internal/config"
@@ -430,4 +432,81 @@ func TestGETDiscoveryPreservesCapturedAuthenticationHeaders(t *testing.T) {
 		}
 	}
 	t.Fatalf("authenticated hidden query parameter was not discovered: %+v", found)
+}
+
+func TestArjunStyleGETToPOSTMethodPivoting(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"status":"get_normal"}`))
+			return
+		}
+		if r.Method == http.MethodPost {
+			bodyBytes, _ := io.ReadAll(r.Body)
+			bodyStr := string(bodyBytes)
+			// Trigger differential hit on hidden POST JSON parameter 'admin'
+			if strings.Contains(bodyStr, `"admin"`) {
+				_, _ = w.Write([]byte(`{"status":"admin_authenticated","role":"superadmin"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"status":"post_baseline"}`))
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	defer srv.Close()
+
+	db, err := storage.Open(filepath.Join(t.TempDir(), "params-arjun-pivot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureScan("scan-arjun-pivot"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveDiscoveredEndpoint("scan-arjun-pivot", map[string]interface{}{
+		"url": srv.URL, "method": http.MethodGet, "normalized_url": srv.URL, "source": "test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	endpointID, err := db.GetEndpointID("scan-arjun-pivot", srv.URL, http.MethodGet)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"127.0.0.1"}
+	scopeEngine := scope.NewEngine(cfg)
+	client, err := httpclient.New(cfg, scopeEngine, ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := NewDiscoverer("scan-arjun-pivot", client, scopeEngine, db, nil)
+	d.SetWordlistCap(20)
+	d.SetMaxProbes(50)
+
+	found, err := d.DiscoverEndpoint(context.Background(), endpointID, srv.URL, http.MethodGet)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	discoveredAdminPost := false
+	for _, p := range found {
+		if p.Name == "admin" && p.EndpointMethod == http.MethodPost && p.Location == LocationJSON {
+			discoveredAdminPost = true
+			break
+		}
+	}
+	if !discoveredAdminPost {
+		t.Fatalf("expected Arjun-style method pivoting to discover 'admin' parameter as POST JSON on GET endpoint, got: %+v", found)
+	}
+
+	// Verify that a POST endpoint was also persisted in DB for vulnerability scanning
+	postEndpointID, err := db.GetEndpointID("scan-arjun-pivot", srv.URL, http.MethodPost)
+	if err != nil || postEndpointID <= 0 {
+		t.Fatalf("expected POST endpoint to be ensured in database, got id=%d err=%v", postEndpointID, err)
+	}
 }
