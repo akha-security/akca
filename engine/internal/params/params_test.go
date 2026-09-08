@@ -1,7 +1,10 @@
 package params
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/akha-security/akca/engine/internal/storage"
 )
 
 func TestWordlistAtLeast500(t *testing.T) {
@@ -105,5 +108,33 @@ func TestMethodDependentPriority(t *testing.T) {
 	}
 	if !p.MethodDependent || p.Priority < 90 {
 		t.Fatalf("method-dependent param should be high priority: %+v", p)
+	}
+}
+
+func TestMutateNativeBodyXMLAndMultipart(t *testing.T) {
+	// XML test
+	xmlTemplate := storage.DiscoveryRequestTemplate{
+		ContentType: "application/xml",
+		Body:        "<user><name>alice</name></user>",
+	}
+	xmlBody, xmlLoc, ok := mutateNativeBody(xmlTemplate, "role", "admin")
+	if !ok || xmlLoc != LocationXML {
+		t.Fatalf("expected XML location, got %s, ok=%v", xmlLoc, ok)
+	}
+	if !strings.Contains(string(xmlBody), "<role>admin</role>") {
+		t.Fatalf("expected XML to contain injected role tag, got: %s", string(xmlBody))
+	}
+
+	// Multipart test
+	multipartTemplate := storage.DiscoveryRequestTemplate{
+		ContentType: "multipart/form-data; boundary=----MyBoundary",
+		Body:        "------MyBoundary\r\nContent-Disposition: form-data; name=\"username\"\r\n\r\nalice\r\n------MyBoundary--\r\n",
+	}
+	mpBody, mpLoc, ok := mutateNativeBody(multipartTemplate, "debug", "true")
+	if !ok || mpLoc != LocationMultipart {
+		t.Fatalf("expected Multipart location, got %s, ok=%v", mpLoc, ok)
+	}
+	if !strings.Contains(string(mpBody), "name=\"debug\"") || !strings.Contains(string(mpBody), "true") {
+		t.Fatalf("expected multipart body to contain debug field, got: %s", string(mpBody))
 	}
 }

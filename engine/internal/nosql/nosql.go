@@ -2,6 +2,7 @@ package nosql
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"strings"
 )
@@ -36,7 +37,8 @@ func Probes(param string) []Probe {
 		{Name: "regex_operator", Value: `{"$regex":".*"}`, Signal: "regex_injection", Mode: "query"},
 		{Name: "where_js", Value: `{"$where":"this.password.match(/.*/)"}`, Signal: "where_injection", Mode: "query"},
 		{Name: "where_eval", Value: `{"$where":"(function(){throw new Error(\"AKCA_NOSQL_\"+(71*73)+\"_EVAL\")})()"}`, Signal: "where_eval_injection", Mode: "query"},
-		{Name: "where_sleep", Value: `{"$where":"sleep(5000)"}`, Signal: "where_injection", Mode: "query"},
+		{Name: "where_sleep", Value: `{"$where":"sleep(5000)"}`, Signal: "timing_differential", Mode: "query"},
+		{Name: "json_where_sleep", Value: fmt.Sprintf(`{"%s":{"$where":"sleep(5000)"}}`, param), Signal: "timing_differential", Mode: "json_body", ContentType: "application/json"},
 		{Name: "or_operator", Value: buildOrOperatorJSON(param), Signal: "auth_bypass", Mode: "json_body", ContentType: "application/json"},
 		{Name: "exists_operator", Value: `{"$exists":true}`, Signal: "operator_injection", Mode: "query"},
 		{Name: "in_operator", Value: `{"$in":["admin","root","user"]}`, Signal: "operator_injection", Mode: "query"},
@@ -198,12 +200,22 @@ func IsLoginLikeEndpoint(endpointURL string) bool {
 }
 
 // Mongo and in-memory engine error strings (avoid generic "syntax error", "javascript", etc.).
+var mongoStrongErrorMarkers = []string{
+	"syntaxerror: unexpected", "syntaxerror: unterminated", "syntax error: unexpected",
+	"referenceerror:", "in \"$where\" condition", "$where not allowed",
+	"evalmachine.<anonymous>", "function compilation failed",
+	"in csp mode, sift does not support strings", "unknown operator",
+	"cast to objectid failed", "invalid bson", "unexpected identifier",
+	"unexpected token", "is not defined",
+}
+
 var mongoErrorMarkers = []string{
 	"mongoerror", "mongoservererror", "unknown operator", "bad query",
 	"invalid bson", "failed to parse", "cast to objectid failed",
 	"bson type", "cannot use type", "$where not allowed", "unrecognized field",
 	"in csp mode, sift does not support strings", "in \"$where\" condition",
 	"function compilation failed", "evalmachine.<anonymous>",
+	"syntaxerror: unexpected", "syntaxerror: unterminated", "referenceerror:",
 }
 
 var authFailureMarkers = []string{
@@ -247,8 +259,8 @@ func AnalyzeWithContext(ctx ResponseContext, probe Probe) (bool, string) {
 	switch probe.Signal {
 	case "auth_bypass":
 		return analyzeAuthBypass(ctx, probeLower, baseLower, controlLower)
-	case "operator_injection", "regex_injection", "where_injection", "where_eval_injection", "js_injection", "bracket_injection":
-		// Operator probes only report on Mongo error disclosure (handled above).
+	case "operator_injection", "regex_injection", "where_injection", "where_eval_injection", "js_injection", "bracket_injection", "timing_differential":
+		// Operator and timing probes only report on Mongo error disclosure here (timing verified separately).
 		return false, ""
 	default:
 		return false, ""
@@ -256,6 +268,11 @@ func AnalyzeWithContext(ctx ResponseContext, probe Probe) (bool, string) {
 }
 
 func detectMongoError(probeLower, baseLower string) string {
+	for _, kw := range mongoStrongErrorMarkers {
+		if strings.Contains(probeLower, kw) && !strings.Contains(baseLower, kw) {
+			return "nosql_error_disclosure"
+		}
+	}
 	hits := 0
 	for _, kw := range mongoErrorMarkers {
 		if strings.Contains(probeLower, kw) && !strings.Contains(baseLower, kw) {

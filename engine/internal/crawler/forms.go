@@ -1,6 +1,9 @@
 package crawler
 
 import (
+	"bytes"
+	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
@@ -175,7 +178,6 @@ func buildFormRequestTemplate(rawURL, method, enctype string, fields url.Values)
 	if len(fields) == 0 {
 		return tmpl
 	}
-	encoded := fields.Encode()
 	if method == http.MethodGet {
 		u, err := url.Parse(rawURL)
 		if err != nil {
@@ -191,12 +193,32 @@ func buildFormRequestTemplate(rawURL, method, enctype string, fields url.Values)
 		tmpl.URL = u.String()
 		return tmpl
 	}
-	tmpl.Body = encoded
+
 	if strings.Contains(enctype, "multipart") {
-		tmpl.ContentType = "multipart/form-data"
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		for key, vals := range fields {
+			for _, value := range vals {
+				_ = mw.WriteField(key, value)
+			}
+		}
+		_ = mw.Close()
+		tmpl.Body = buf.String()
+		tmpl.ContentType = mw.FormDataContentType()
 	} else if strings.Contains(enctype, "json") {
+		doc := make(map[string]interface{})
+		for key, vals := range fields {
+			if len(vals) == 1 {
+				doc[key] = vals[0]
+			} else {
+				doc[key] = vals
+			}
+		}
+		raw, _ := json.Marshal(doc)
+		tmpl.Body = string(raw)
 		tmpl.ContentType = "application/json"
 	} else {
+		tmpl.Body = fields.Encode()
 		tmpl.ContentType = "application/x-www-form-urlencoded"
 	}
 	tmpl.Headers = map[string]string{"Content-Type": tmpl.ContentType}

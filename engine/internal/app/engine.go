@@ -240,9 +240,19 @@ func (e *Engine) startScan(cfg config.ScanConfig, completed map[string]bool) err
 
 	idCopy := cfg.ScanID
 	e.activeScanID.Store(&idCopy)
-	_ = e.db.EnsureScan(cfg.ScanID)
-	cfgJSON, _ := json.Marshal(cfg.RedactedForStorage())
-	_ = e.db.UpdateScanConfig(cfg.ScanID, string(cfgJSON))
+	if err := e.db.EnsureScan(cfg.ScanID); err != nil {
+		e.mu.Unlock()
+		return fmt.Errorf("failed to persist scan record: %w", err)
+	}
+	cfgJSON, err := json.Marshal(cfg.RedactedForStorage())
+	if err != nil {
+		e.mu.Unlock()
+		return fmt.Errorf("failed to serialize scan config: %w", err)
+	}
+	if err := e.db.UpdateScanConfig(cfg.ScanID, string(cfgJSON)); err != nil {
+		e.mu.Unlock()
+		return fmt.Errorf("failed to update scan config: %w", err)
+	}
 
 	e.session = session.NewScanSession(cfg)
 	e.scope = newScope
@@ -1075,15 +1085,16 @@ func uniqueURLSeeds(urls []string) []string {
 }
 
 func deriveTargetScanID(targets []string) string {
-	if len(targets) == 0 {
-		b := make([]byte, 4)
-		_, _ = rand.Read(b)
-		return fmt.Sprintf("scan-%d-%s", time.Now().UnixNano(), hex.EncodeToString(b))
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	targetPrefix := ""
+	if len(targets) > 0 {
+		sorted := append([]string(nil), targets...)
+		sort.Strings(sorted)
+		hash := sha256.Sum256([]byte(strings.Join(sorted, "|")))
+		targetPrefix = hex.EncodeToString(hash[:4]) + "-"
 	}
-	sorted := append([]string(nil), targets...)
-	sort.Strings(sorted)
-	hash := sha256.Sum256([]byte(strings.Join(sorted, "|")))
-	return fmt.Sprintf("scan-%s", hex.EncodeToString(hash[:6]))
+	return fmt.Sprintf("scan-%s%d-%s", targetPrefix, time.Now().UnixNano(), hex.EncodeToString(b))
 }
 
 func ConfigDir() (string, error) {

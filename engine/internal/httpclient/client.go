@@ -45,18 +45,20 @@ type RequestResponse struct {
 }
 
 type Client struct {
-	httpClient   *http.Client
-	scope        *scope.Engine
-	limiter      *ratelimit.Limiter
-	cfg          config.ScanConfig
-	sessionMu    sync.RWMutex
-	uaMu         sync.Mutex
-	uaIndex      int
-	blockMu      sync.Mutex
-	hostBlocks   map[string]int
-	blockedUntil map[string]time.Time
-	OnRequest    func(err bool)
-	requestCount atomic.Int64
+	httpClient      *http.Client
+	scope           *scope.Engine
+	limiter         *ratelimit.Limiter
+	cfg             config.ScanConfig
+	sessionMu       sync.RWMutex
+	uaMu            sync.Mutex
+	uaIndex         int
+	blockMu         sync.Mutex
+	hostBlocks      map[string]int
+	blockedUntil    map[string]time.Time
+	OnRequest       func(err bool)
+	requestCount    atomic.Int64
+	logicalProbes   atomic.Int64
+	networkAttempts atomic.Int64
 }
 
 func (c *Client) HTTPClient() *http.Client {
@@ -70,7 +72,21 @@ func (c *Client) TotalRequests() int64 {
 	if c == nil {
 		return 0
 	}
-	return c.requestCount.Load()
+	return c.networkAttempts.Load()
+}
+
+func (c *Client) NetworkAttempts() int64 {
+	if c == nil {
+		return 0
+	}
+	return c.networkAttempts.Load()
+}
+
+func (c *Client) LogicalProbes() int64 {
+	if c == nil {
+		return 0
+	}
+	return c.logicalProbes.Load()
 }
 
 func New(cfg config.ScanConfig, scopeEngine *scope.Engine, limiter *ratelimit.Limiter) (*Client, error) {
@@ -95,20 +111,8 @@ func New(cfg config.ScanConfig, scopeEngine *scope.Engine, limiter *ratelimit.Li
 			ForceAttemptHTTP2:     !cfg.ForceHTTP1,
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: cfg.InsecureSkipVerify,
-				MinVersion:         tls.VersionTLS12,
+				MinVersion:         tls.VersionTLS10,
 				MaxVersion:         tls.VersionTLS13,
-				// Use strong cipher suites supporting both RSA and ECDSA certificates
-				CipherSuites: []uint16{
-					tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-					tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-					tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-					tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-					tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-					tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
-					tls.TLS_AES_256_GCM_SHA384,
-					tls.TLS_CHACHA20_POLY1305_SHA256,
-					tls.TLS_AES_128_GCM_SHA256,
-				},
 			},
 		}
 		if cfg.ForceHTTP1 {
@@ -123,39 +127,41 @@ func New(cfg config.ScanConfig, scopeEngine *scope.Engine, limiter *ratelimit.Li
 			base.Proxy = http.ProxyURL(u)
 		}
 	}
-	return &Client{
-		httpClient: &http.Client{
-			Timeout:   30 * time.Second,
-			Transport: transport,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if !cfg.FollowRedirects {
-					return http.ErrUseLastResponse
-				}
-				if len(via) >= 10 {
-					return fmt.Errorf("too many redirects")
-				}
-				// Never follow a redirect to an out-of-scope host; keep the
-				// last (3xx) response so callers can still inspect Location.
-				if scopeEngine != nil && !scopeEngine.IsInScope(req.URL.String()) {
-					return http.ErrUseLastResponse
-				}
-				// Strip sensitive authentication headers on cross-origin redirects
-				if len(via) > 0 && !strings.EqualFold(via[len(via)-1].URL.Host, req.URL.Host) {
-					req.Header.Del("Authorization")
-					req.Header.Del("Cookie")
-					req.Header.Del("X-API-Key")
-					req.Header.Del("X-Token")
-					req.Header.Del("Proxy-Authorization")
-				}
-				return nil
-			},
-		},
+	c := &Client{
 		scope:        scopeEngine,
 		limiter:      limiter,
 		cfg:          cfg,
 		hostBlocks:   make(map[string]int),
 		blockedUntil: make(map[string]time.Time),
-	}, nil
+	}
+	wireTransport := NewWireTransport(transport, limiter, &c.networkAttempts, cfg.RequestBudget)
+	c.httpClient = &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: wireTransport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if !cfg.FollowRedirects {
+				return http.ErrUseLastResponse
+			}
+			if len(via) >= 10 {
+				return fmt.Errorf("too many redirects")
+			}
+			// Never follow a redirect to an out-of-scope host; keep the
+			// last (3xx) response so callers can still inspect Location.
+			if scopeEngine != nil && !scopeEngine.IsInScope(req.URL.String()) {
+				return http.ErrUseLastResponse
+			}
+			// Strip sensitive authentication headers on cross-origin redirects or HTTPS->HTTP downgrade
+			if len(via) > 0 && shouldStripAuthOnRedirect(via[len(via)-1].URL, req.URL) {
+				for k := range req.Header {
+					if isAuthenticationHeader(k) {
+						req.Header.Del(k)
+					}
+				}
+			}
+			return nil
+		},
+	}
+	return c, nil
 }
 
 func (c *Client) SetSession(cookies map[string]string, headers map[string]string) {
@@ -211,16 +217,14 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 	if until, blocked := c.circuitOpen(u.Hostname()); blocked {
 		return RequestResponse{}, fmt.Errorf("host circuit open until %s after repeated WAF/rate-limit blocks", until.UTC().Format(time.RFC3339))
 	}
-	if err := c.limiter.WaitContext(ctx, u.Hostname()); err != nil {
-		return RequestResponse{}, err
-	}
 
 	start := time.Now()
 	var resp *http.Response
 	var req *http.Request
 
-	count := c.requestCount.Add(1)
-	if c.cfg.RequestBudget > 0 && count > int64(c.cfg.RequestBudget) {
+	c.logicalProbes.Add(1)
+	c.requestCount.Add(1)
+	if c.cfg.RequestBudget > 0 && c.networkAttempts.Load() >= int64(c.cfg.RequestBudget) {
 		return RequestResponse{}, fmt.Errorf("global request budget exhausted after %d requests", c.cfg.RequestBudget)
 	}
 
@@ -470,11 +474,40 @@ func clampCooldown(wait time.Duration) time.Duration {
 
 func isAuthenticationHeader(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "authorization", "cookie", "proxy-authorization", "x-api-key", "x-auth-token":
+	case "authorization", "cookie", "proxy-authorization", "x-api-key", "x-auth-token", "x-token", "session-token", "api-key", "private-token", "token":
 		return true
 	default:
 		return false
 	}
+}
+
+func shouldStripAuthOnRedirect(prev, next *url.URL) bool {
+	if prev == nil || next == nil {
+		return false
+	}
+	// HTTPS to HTTP downgrade is an immediate security violation for sensitive credentials
+	if strings.EqualFold(prev.Scheme, "https") && strings.EqualFold(next.Scheme, "http") {
+		return true
+	}
+	// Cross-host redirect
+	if !strings.EqualFold(prev.Hostname(), next.Hostname()) {
+		return true
+	}
+	// Cross-port redirect
+	return effectivePort(prev) != effectivePort(next)
+}
+
+func effectivePort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		return "80"
+	}
+	return ""
 }
 
 func (c *Client) applyWafBypassHeaders(req *http.Request) {

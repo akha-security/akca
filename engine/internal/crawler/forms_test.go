@@ -82,3 +82,36 @@ func TestExtractFormsHandlesHTML5Controls(t *testing.T) {
 		t.Fatalf("unchecked or disabled controls must be skipped: %q", body)
 	}
 }
+
+func TestExtractFormsMultipartAndJSON(t *testing.T) {
+	multipartHTML := `<form action="/upload" method="post" enctype="multipart/form-data">
+<input type="file" name="doc">
+<input type="text" name="comment" value="my file">
+</form>`
+	eps := extractForms("https://example.com/", multipartHTML)
+	if len(eps) != 1 || eps[0].RequestTemplate == nil {
+		t.Fatalf("expected multipart form template, got %+v", eps)
+	}
+	tmpl := eps[0].RequestTemplate
+	if !strings.Contains(tmpl.ContentType, "multipart/form-data; boundary=") {
+		t.Fatalf("expected boundary in Content-Type, got %q", tmpl.ContentType)
+	}
+	if !strings.Contains(tmpl.Body, "name=\"doc\"") || !strings.Contains(tmpl.Body, "name=\"comment\"") {
+		t.Fatalf("expected multipart formatted body, got %q", tmpl.Body)
+	}
+
+	jsonHTML := `<form action="/api/v1/user" method="post" enctype="application/json">
+<input type="text" name="username" value="bob">
+</form>`
+	eps2 := extractForms("https://example.com/", jsonHTML)
+	if len(eps2) != 1 || eps2[0].RequestTemplate == nil {
+		t.Fatalf("expected json form template, got %+v", eps2)
+	}
+	tmpl2 := eps2[0].RequestTemplate
+	if tmpl2.ContentType != "application/json" {
+		t.Fatalf("expected application/json, got %q", tmpl2.ContentType)
+	}
+	if !strings.Contains(tmpl2.Body, `"username":"bob"`) {
+		t.Fatalf("expected json body, got %q", tmpl2.Body)
+	}
+}

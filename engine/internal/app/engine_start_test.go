@@ -109,3 +109,15 @@ func TestStartScanDoesNotDeadlockWhenOASTRegistrationFails(t *testing.T) {
 		t.Fatalf("scan did not stop: %v", err)
 	}
 }
+
+func TestDeriveTargetScanID_Uniqueness(t *testing.T) {
+	targets := []string{"https://example.com", "https://api.example.com"}
+	seen := make(map[string]bool)
+	for i := 0; i < 50; i++ {
+		id := deriveTargetScanID(targets)
+		if seen[id] {
+			t.Fatalf("collision detected for repeated scan runs on the same target set: %s", id)
+		}
+		seen[id] = true
+	}
+}

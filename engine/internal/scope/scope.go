@@ -63,8 +63,15 @@ func (e *Engine) isAdoptedHost(host string) bool {
 	if e.adoptedHosts == nil {
 		return false
 	}
-	_, ok := e.adoptedHosts[host]
-	return ok
+	if _, ok := e.adoptedHosts[host]; ok {
+		return true
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		if _, ok := e.adoptedHosts[h]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) IsInScope(rawURL string) bool {

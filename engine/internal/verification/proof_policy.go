@@ -27,7 +27,7 @@ var proofPolicies = map[string]ModuleProofPolicy{
 	"xxe":                    replayPolicy("xxe", ProofDifferentialReplay, ProofOAST, ProofRuntimeTrace),
 	"command_injection":      replayPolicy("command_injection", ProofDifferentialReplay, ProofTiming, ProofOAST, ProofRuntimeTrace),
 	"lfi":                    replayPolicy("lfi", ProofDifferentialReplay, ProofFileRetrieval, ProofRuntimeTrace),
-	"nosql":                  replayPolicy("nosql", ProofDifferentialReplay),
+	"nosql":                  replayPolicy("nosql", ProofDifferentialReplay, ProofTiming),
 	"prototype_pollution":    replayPolicy("prototype_pollution", ProofDifferentialReplay),
 	"ldap_xpath_injection":   replayPolicy("ldap_xpath_injection", ProofDifferentialReplay, ProofHeaderEvidence, ProofRuntimeTrace),
 	"crlf":                   headerPolicy("crlf"),

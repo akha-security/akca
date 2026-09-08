@@ -155,3 +155,18 @@ func TestEvaluateCharSentinels(t *testing.T) {
 		t.Fatalf("expected > to be in blocked list, got %v", blocked)
 	}
 }
+
+func TestBuildCharSentinelPayloadSyncWithSentinels(t *testing.T) {
+	canary := "akca1234567890"
+	payload := buildCharSentinelPayload(canary)
+	avail, blocked, hasEnc := evaluateCharSentinels(payload)
+	if hasEnc {
+		t.Fatal("raw payload should not trigger encoded detection")
+	}
+	if len(blocked) > 0 {
+		t.Fatalf("expected 0 blocked characters in raw payload, got blocked: %v", blocked)
+	}
+	if len(avail) != len(sentinelProbes) {
+		t.Fatalf("expected all %d characters to be available, got %d: %v", len(sentinelProbes), len(avail), avail)
+	}
+}

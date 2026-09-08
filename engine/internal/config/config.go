@@ -247,6 +247,7 @@ type ScanConfig struct {
 	SubdomainCount                int                           `json:"subdomain_count,omitempty"`
 	MaxEndpoints                  int                           `json:"max_endpoints,omitempty"`
 	IncludeLinkedAPISubdomains    bool                          `json:"include_linked_api_subdomains,omitempty"`
+	AutoAdoptSameRootRedirects    bool                          `json:"auto_adopt_same_root_redirects,omitempty"`
 	MaxMemoryMB                   int                           `json:"max_memory_mb,omitempty"`
 	MemoryLimitSource             string                        `json:"memory_limit_source,omitempty"`
 	DetectedAvailableMemoryMB     int                           `json:"detected_available_memory_mb,omitempty"`
@@ -363,6 +364,7 @@ func DefaultScanConfig() ScanConfig {
 		TimeBudget:                   0,
 		PayloadBudget:                PayloadBudgetUnlimited,
 		RedactionEnabled:             false,
+		AutoAdoptSameRootRedirects:   false,
 		EnableWAFDetection:           true,
 		EnableJSAnalysis:             true,
 		EnableHeadlessCrawler:        true,
@@ -384,7 +386,7 @@ func DefaultScanConfig() ScanConfig {
 		UserAgentMode:                UserAgentReal,
 		CredentialStorageMode:        CredentialStorageEncryptedDisk,
 		FollowRedirects:              true,
-		ForceHTTP1:                   true,
+		ForceHTTP1:                   false,
 		EnableBusinessLogicChecks:    true,
 		EnableRaceConditionTesting:   true,
 		EnableSecondOrderTracking:    true,

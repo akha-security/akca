@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/nosql"
+	"github.com/akha-security/akca/engine/internal/timingblind"
 	"github.com/akha-security/akca/engine/internal/verification"
 )
 
@@ -43,15 +45,91 @@ func (r *Runner) runNoSQLi(ctx context.Context, target ScanTarget) []ModuleFindi
 		target.Method,
 	)
 
+	var timingBase timingblind.Baseline
+	var timingCalibrated bool
+	sleepSec := 5
+
 	var out []ModuleFinding
 	for _, probe := range probes {
 		if ctx.Err() != nil {
 			break
 		}
+
+		isTiming := probe.Name == "where_sleep" || strings.Contains(probe.Value, "sleep(") || probe.Signal == "timing_differential"
+		if isTiming && sleepSec != 5 {
+			probe.Value = strings.ReplaceAll(probe.Value, "sleep(5000)", fmt.Sprintf("sleep(%d)", sleepSec*1000))
+		}
+
+		start := time.Now()
 		rr, err := r.nosqlProbe(ctx, target, probe)
 		if err != nil {
 			continue
 		}
+		elapsed := responseDurationMs(rr)
+		if elapsed <= 0 {
+			elapsed = time.Since(start).Milliseconds()
+		}
+
+		if isTiming {
+			if !timingCalibrated {
+				timingBase = r.calibrateTargetTimingForModule(ctx, "nosql", target)
+				timingCalibrated = true
+				if s := timingblind.RecommendSleepSec(timingBase); s > 0 {
+					sleepSec = s
+				}
+			}
+			matched, _ := timingblind.VerifyProbe(elapsed, timingBase, sleepSec)
+			if matched {
+				p := defaultPayload("nosql", probe.Name, probeValue(probe, target.Parameter), "timing_differential")
+				if timingblind.UseDelayedVerification(r.cfg) {
+					r.scheduleDelayedTimingProbe(delayedTimingProbe{
+						Target: target, Module: "nosql", Payload: p,
+						Baseline: timingBase, SleepSec: sleepSec, FirstMs: elapsed, Scheduled: time.Now(),
+					})
+					continue
+				}
+				zeroProbe := probe
+				zeroProbe.Name = probe.Name + "_zero"
+				zeroProbe.Value = strings.ReplaceAll(probe.Value, fmt.Sprintf("sleep(%d)", sleepSec*1000), "sleep(0)")
+				zeroProbe.Value = strings.ReplaceAll(zeroProbe.Value, "sleep(5000)", "sleep(0)")
+				zeroRR, zerr := r.nosqlProbe(ctx, target, zeroProbe)
+				if zerr != nil {
+					continue
+				}
+				zeroMs := responseDurationMs(zeroRR)
+				zeroSamples := []int64{zeroMs}
+				for len(zeroSamples) < 3 {
+					repZero, rzErr := r.nosqlProbe(ctx, target, zeroProbe)
+					if rzErr != nil {
+						zeroSamples = nil
+						break
+					}
+					zeroSamples = append(zeroSamples, responseDurationMs(repZero))
+				}
+				if len(zeroSamples) < 3 {
+					continue
+				}
+				ok, vReason := timingblind.VerifyProbeWithControl(elapsed, zeroMs, timingBase, sleepSec)
+				if !ok {
+					continue
+				}
+				thirdRR, thirdErr := r.nosqlProbe(ctx, target, probe)
+				if thirdErr != nil {
+					continue
+				}
+				thirdMs := responseDurationMs(thirdRR)
+				if ok, _ := timingblind.VerifyProbeWithControl(thirdMs, zeroMs, timingBase, sleepSec); !ok {
+					continue
+				}
+				f := r.buildTimedFinding(ctx, target, "nosql", p, zeroRR, thirdRR,
+					"timing_differential", vReason, timingBase, elapsed, elapsed, thirdMs, zeroSamples, sleepSec)
+				if f != nil {
+					r.recordFinding(ctx, &out, f, "nosql", "timing_differential")
+				}
+				continue
+			}
+		}
+
 		actx := nosql.ResponseContext{
 			BaselineBody:   baseline.Response.Body,
 			ProbeBody:      rr.Response.Body,
@@ -99,7 +177,13 @@ func (r *Runner) runNoSQLi(ctx context.Context, target ScanTarget) []ModuleFindi
 }
 
 func nosqlReprobeConfirmed(first nosql.ResponseContext, repeated httpclient.ResponseRecord, probe nosql.Probe, signal string) bool {
-	if isInfrastructureError(repeated.StatusCode) || repeated.StatusCode != first.ProbeStatus {
+	if isInfrastructureError(repeated.StatusCode) {
+		return false
+	}
+	if signal == "nosql_error_disclosure" {
+		return nosql.IsMongoErrorDisclosure(repeated.Body, first.BaselineBody)
+	}
+	if repeated.StatusCode != first.ProbeStatus {
 		return false
 	}
 	repeatedCtx := first

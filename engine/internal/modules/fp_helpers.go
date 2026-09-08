@@ -157,17 +157,13 @@ func sqliFindingAllowed(p payloadgen.Payload, signal string, baseline, probe htt
 	if probe.StatusCode == http.StatusMethodNotAllowed || baseline.StatusCode == http.StatusMethodNotAllowed {
 		return false
 	}
-	if (signal == "timing_differential" || signal == "stacked_timing") &&
-		statusOnlyDifferential(probe.StatusCode, baseline.StatusCode) {
-		return false
-	}
-	if !moduleSignalConfirmed("sqli", p, signal, baseline, probe, false, oastURL) {
-		return false
-	}
 	if signal == "union_signal" {
 		if statusOnlyDifferential(probe.StatusCode, baseline.StatusCode) {
 			return false
 		}
+	}
+	if !moduleSignalConfirmed("sqli", p, signal, baseline, probe, false, oastURL) {
+		return false
 	}
 	return true
 }

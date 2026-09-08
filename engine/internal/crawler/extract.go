@@ -37,6 +37,7 @@ var (
 	reWorkerScript = regexp.MustCompile(`(?i)new\s+Worker\s*\(\s*["']([^"']+)["']`)
 	reRobotsLine   = regexp.MustCompile(`(?i)^(?:allow|disallow|sitemap):\s*(\S+)`)
 	reSitemapLoc   = regexp.MustCompile(`(?i)<loc>([^<]+)</loc>`)
+	reTextURL      = regexp.MustCompile(`https?://[^\s"'<>]+|/[a-zA-Z0-9_./?&=%-]+`)
 )
 
 func ExtractFromHTML(baseURL, htmlContent string) []DiscoveredEndpoint {
@@ -277,6 +278,5 @@ func ExtractFromSitemap(body string) []DiscoveredEndpoint {
 }
 
 func extractURLsFromText(text string) []string {
-	re := regexp.MustCompile(`https?://[^\s"'<>]+|/[a-zA-Z0-9_./?&=%-]+`)
-	return re.FindAllString(text, -1)
+	return reTextURL.FindAllString(text, -1)
 }

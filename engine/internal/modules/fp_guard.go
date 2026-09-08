@@ -87,6 +87,9 @@ func moduleSignalConfirmed(
 		}
 		return cmdInjSignalConfirmed(p, body, baseBody, signal)
 	case "nosql":
+		if signal == "delayed_timing_confirmed" || signal == "timing_differential" {
+			return true
+		}
 		return nosqlSignalConfirmed(body, baseBody, probeStatus, baseStatus, signal)
 	case "ssrf":
 		if signal == "blind_oast" {

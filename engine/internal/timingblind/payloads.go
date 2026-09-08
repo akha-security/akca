@@ -119,6 +119,9 @@ func SQLiMatchedZeroDelayPayload(originalValue, dbHint string) payloadgen.Payloa
 	value = waitforControlRe.ReplaceAllString(value, "WAITFOR DELAY '0:0:0'")
 	value = benchmarkControlRe.ReplaceAllString(value, "BENCHMARK(1,")
 	value = randomblobControlRe.ReplaceAllString(value, "randomblob(1)")
+	if strings.Contains(value, "sleep(5000)") {
+		value = strings.ReplaceAll(value, "sleep(5000)", "sleep(0)")
+	}
 	if value == originalValue {
 		return SQLiZeroDelayPayload(dbHint)
 	}

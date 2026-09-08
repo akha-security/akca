@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	sqliErrorRe = regexp.MustCompile(`(?i)(you have an error in your sql syntax|mysql.*syntax|mysql\s+error|mariadb.*syntax|mariadb\s+error|sqlite3?\.OperationalError|postgresql.*ERROR.*syntax|postgresql\s+error|pg_query\(\)|ora-\d{4,5}|sqlstate\[|unclosed quotation mark|quoted string not properly terminated|warning:\s*mysql|syntax error at or near|incorrect syntax near\s+'|microsoft ole db provider|odbc sql server driver|pg::syntaxerror|PDOException.*SQLSTATE|java\.sql\.SQLException|com\.mysql\.jdbc|org\.postgresql\.util\.PSQLException|sql\s+syntax\s+error|syntax\s+error\s+near|db2.*cli driver|db2.*sql error|sybase.*error|adaptive server|informix.*error|h2 database.*error|cockroachdb.*error|crdb.*internal|clickhouse.*exception|code:\s*\d+.*DB::Exception|snowflake.*error|sql compilation error|duckdb.*error)`)
+	sqliErrorRe = regexp.MustCompile(`(?i)(you have an error in your sql syntax|mysql.*syntax|mysql\s+error|mariadb.*syntax|mariadb\s+error|sqlite3?\.OperationalError|postgresql.*ERROR.*syntax|postgresql\s+error|pg_query\(\)|ora-\d{4,5}|sqlstate\[|unclosed quotation mark|quoted string not properly terminated|warning:\s*mysql|syntax error at or near|incorrect syntax near\s+'|microsoft ole db provider|odbc sql server driver|pg::syntaxerror|PDOException.*SQLSTATE|java\.sql\.SQLException|com\.mysql\.jdbc|org\.postgresql\.util\.PSQLException|sql\s+syntax\s+error|db2.*cli driver|db2.*sql error|sybase.*error|adaptive server|informix.*error|h2 database.*error|cockroachdb.*error|crdb.*internal|clickhouse.*exception|code:\s*\d+.*DB::Exception|snowflake.*error|sql compilation error|duckdb.*error|syntax\s*error:\s*unexpected|syntaxerror:\s*unexpected|syntaxerror:\s*unterminated|unclosed\s+(?:quote|quotation)|unterminated\s+(?:quoted\s+)?string|query\s+failed:\s*error|database\s+query\s+error)`)
 	cmdOutRe    = regexp.MustCompile(`(?i)\buid=\d+(?:\([a-z0-9._-]+\))?\s+gid=\d+(?:\([a-z0-9._-]+\))?(?:\s+groups=\d+(?:\([a-z0-9._-]+\))?(?:,\d+(?:\([a-z0-9._-]+\))?)*)?`)
 	cmdWinDirRe = regexp.MustCompile(`(?is)\bvolume serial number is\b.{0,500}\bdirectory of\b`)
 	xssExecRe   = regexp.MustCompile(`(?i)(<script[^>]*>[\s\S]{0,200}alert\s*\(|<svg[^>]+onload\s*=|<img[^>]+onerror\s*=)`)
@@ -25,7 +25,7 @@ func sqliSignalConfirmed(p payloadgen.Payload, body, baseline, signal string) bo
 	if signal == "" || body == "" {
 		return false
 	}
-	if injectionPayloadReflected(p.Value, body, baseline) && signal != "error_based" {
+	if injectionPayloadReflected(p.Value, body, baseline) && signal != "error_based" && signal != "timing_differential" && signal != "stacked_timing" && signal != "delayed_timing_confirmed" {
 		return false
 	}
 	// Normalize volatile fields (timestamps, UUIDs, CSRF tokens) before

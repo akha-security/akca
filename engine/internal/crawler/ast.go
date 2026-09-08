@@ -307,6 +307,20 @@ func objURLMethodFull(toks []token, k int) (rawURL, method string, headers map[s
 					body = s
 				}
 			}
+			if (key == "headers" || key == "header") && isPunct(toks, i+1, ":") {
+				if isPunct(toks, i+2, "{") {
+					parsedH, _ := parseObjectLiteralKeyValue(toks, i+2)
+					if headers == nil {
+						headers = make(map[string]string)
+					}
+					for hk, hv := range parsedH {
+						headers[hk] = hv
+						if strings.EqualFold(hk, "Content-Type") && ct == "" {
+							ct = hv
+						}
+					}
+				}
+			}
 		}
 	}
 	if len(bodyKeys) > 0 && body == "" {
@@ -367,6 +381,17 @@ func parseFetchOptions(toks []token, start int) (method string, headers map[stri
 					bodyKeys = append(bodyKeys, keys...)
 				} else if s, ok := stringAt(toks, i+2); ok {
 					body = s
+				}
+			}
+			if (key == "headers" || key == "header") && isPunct(toks, i+1, ":") {
+				if isPunct(toks, i+2, "{") {
+					parsedH, _ := parseObjectLiteralKeyValue(toks, i+2)
+					for hk, hv := range parsedH {
+						headers[hk] = hv
+						if strings.EqualFold(hk, "Content-Type") && ct == "" {
+							ct = hv
+						}
+					}
 				}
 			}
 		}
@@ -430,6 +455,42 @@ func parseObjectLiteralKeys(toks []token, braceIdx int) ([]string, int) {
 		}
 	}
 	return keys, len(toks)
+}
+
+func parseObjectLiteralKeyValue(toks []token, braceIdx int) (map[string]string, int) {
+	if !isPunct(toks, braceIdx, "{") {
+		return nil, braceIdx
+	}
+	m := make(map[string]string)
+	depth := 0
+	var currentKey string
+	expectValue := false
+	for i := braceIdx; i < len(toks); i++ {
+		if toks[i].kind == tokPunct && toks[i].val == "{" {
+			depth++
+		} else if toks[i].kind == tokPunct && toks[i].val == "}" {
+			depth--
+			if depth == 0 {
+				return m, i
+			}
+		} else if depth == 1 {
+			if expectValue {
+				if toks[i].kind == tokString || toks[i].kind == tokIdent {
+					val := strings.Trim(toks[i].val, `"'`)
+					if currentKey != "" {
+						m[currentKey] = val
+					}
+				}
+				expectValue = false
+				currentKey = ""
+			} else if isPunct(toks, i, ":") && currentKey != "" {
+				expectValue = true
+			} else if toks[i].kind == tokIdent || toks[i].kind == tokString {
+				currentKey = strings.Trim(toks[i].val, `"'`)
+			}
+		}
+	}
+	return m, len(toks)
 }
 
 func buildObjectTemplate(keys []string) string {

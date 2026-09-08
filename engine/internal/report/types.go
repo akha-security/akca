@@ -171,5 +171,6 @@ type Document struct {
 	APIKeyValidations []APIKeySection              `json:"api_key_validations,omitempty"`
 	TrafficEvidence   []TrafficEntry               `json:"traffic_evidence,omitempty"`
 	PathDiscoveries   []PathDiscoveryEntry         `json:"path_discoveries,omitempty"`
+	Warnings          []string                     `json:"warnings,omitempty"`
 	AppendixNotes     string                       `json:"appendix_notes,omitempty"`
 }

@@ -175,8 +175,8 @@ func paramBonus(rawURL string) int {
 			strings.Contains(ln, "page") || strings.Contains(ln, "template") ||
 			strings.Contains(ln, "include") || strings.Contains(ln, "load"):
 			bonus += 9
-		case strings.Contains(ln, "q") || strings.Contains(ln, "search") ||
-			strings.Contains(ln, "query") || strings.Contains(ln, "keyword"):
+		case ln == "q" || ln == "query" || strings.HasPrefix(ln, "q_") ||
+			strings.Contains(ln, "search") || strings.Contains(ln, "query") || strings.Contains(ln, "keyword"):
 			bonus += 6
 		}
 	}

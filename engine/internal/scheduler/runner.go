@@ -76,7 +76,12 @@ func (r *Runner) execute(row storage.ScheduledScanRow) {
 	_ = r.db.UpdateScheduledNextRun(row.ID, storage.NextRunEstimate(row.CronExpression))
 	runID, _ := r.db.StartScheduledRun(row.ID)
 	var cfg config.ScanConfig
-	_ = json.Unmarshal([]byte(row.ConfigJSON), &cfg)
+	if err := json.Unmarshal([]byte(row.ConfigJSON), &cfg); err != nil {
+		if runID > 0 {
+			_ = r.db.FinishScheduledRun(runID, "", "failed_invalid_config")
+		}
+		return
+	}
 	if cfg.ScanID == "" {
 		cfg.ScanID = fmt.Sprintf("sched-%s-%d", row.ID, time.Now().UnixNano())
 	}
@@ -86,7 +91,9 @@ func (r *Runner) execute(row storage.ScheduledScanRow) {
 			status = "failed"
 		}
 	}
-	_ = r.db.FinishScheduledRun(runID, cfg.ScanID, status)
+	if runID > 0 {
+		_ = r.db.FinishScheduledRun(runID, cfg.ScanID, status)
+	}
 }
 
 func ParseCronPreview(expr string) string {

@@ -142,4 +142,3 @@ func TestMutateRequestNestedArrayJSON(t *testing.T) {
 		// BuildProbeRequest fallback might be called, but setJSONPath should not turn users into string
 	}
 }
-

@@ -30,23 +30,59 @@ func (b *Builder) BuildMeta(opts Options) (Document, error) {
 		Partial:       opts.Partial,
 		Title:         templateTitle(opts.Template),
 		Summary:       templateSummary(opts.Template),
-		Scope:         b.buildScope(opts.ScanID),
 	}
+	scopeSec, err := b.buildScope(opts.ScanID)
+	if err != nil {
+		doc.Partial = true
+		doc.Warnings = append(doc.Warnings, fmt.Sprintf("scope retrieval warning: %v", err))
+	}
+	doc.Scope = scopeSec
+
 	metrics, err := b.db.DashboardMetrics(opts.ScanID)
 	if err != nil {
 		return doc, err
 	}
-	doc.Metrics = b.reportMetrics(opts, metrics)
+	repMetrics, err := b.reportMetrics(opts, metrics)
+	if err != nil {
+		doc.Partial = true
+		doc.Warnings = append(doc.Warnings, fmt.Sprintf("metrics calculation warning: %v", err))
+	}
+	doc.Metrics = repMetrics
+
 	groups, err := b.db.ListFindingGroups(opts.ScanID, 100)
 	if err != nil {
 		return doc, err
 	}
 	doc.RootCauseGroups = groups
-	doc.APIKeyValidations = b.buildAPIKeySection(opts.ScanID, opts.Redact)
-	doc.TrafficEvidence = b.buildTrafficSection(opts.ScanID, opts.Redact)
-	doc.PathDiscoveries = b.buildPathDiscoverySection(opts.ScanID, opts.Redact)
+
+	apiKeys, err := b.buildAPIKeySection(opts.ScanID, opts.Redact)
+	if err != nil {
+		doc.Partial = true
+		doc.Warnings = append(doc.Warnings, fmt.Sprintf("api key section warning: %v", err))
+	}
+	doc.APIKeyValidations = apiKeys
+
+	traffic, err := b.buildTrafficSection(opts.ScanID, opts.Redact)
+	if err != nil {
+		doc.Partial = true
+		doc.Warnings = append(doc.Warnings, fmt.Sprintf("traffic section warning: %v", err))
+	}
+	doc.TrafficEvidence = traffic
+
+	paths, err := b.buildPathDiscoverySection(opts.ScanID, opts.Redact)
+	if err != nil {
+		doc.Partial = true
+		doc.Warnings = append(doc.Warnings, fmt.Sprintf("path discovery section warning: %v", err))
+	}
+	doc.PathDiscoveries = paths
+
 	if opts.Template == TemplateInternal || opts.Template == TemplateAppendix {
-		doc.ManualLeads = b.buildManualLeads(opts)
+		leads, err := b.buildManualLeads(opts)
+		if err != nil {
+			doc.Partial = true
+			doc.Warnings = append(doc.Warnings, fmt.Sprintf("manual leads warning: %v", err))
+		}
+		doc.ManualLeads = leads
 	}
 	if opts.Template == TemplateAppendix {
 		doc.AppendixNotes = "Technical evidence appendix - raw request/response excerpts are preserved."
@@ -54,7 +90,7 @@ func (b *Builder) BuildMeta(opts Options) (Document, error) {
 	return doc, nil
 }
 
-func (b *Builder) buildManualLeads(opts Options) []ManualLeadEntry {
+func (b *Builder) buildManualLeads(opts Options) ([]ManualLeadEntry, error) {
 	confidences := opts.Confidences
 	if len(confidences) == 0 {
 		confidences = []string{"Confirmed", "HighConfidence", "Potential", "NeedsManualReview"}
@@ -65,7 +101,7 @@ func (b *Builder) buildManualLeads(opts Options) []ManualLeadEntry {
 		FindingIDs: opts.FindingIDs, SearchQuery: opts.SearchQuery,
 	}
 	var out []ManualLeadEntry
-	_ = b.db.IterateFindingsFiltered(filter, func(rec storage.FindingRecord) error {
+	err := b.db.IterateFindingsFiltered(filter, func(rec storage.FindingRecord) error {
 		entry := FindingFromRecord(rec, opts.Redact)
 		if reportableFinding(entry, opts.Template) {
 			return nil
@@ -76,13 +112,13 @@ func (b *Builder) buildManualLeads(opts Options) []ManualLeadEntry {
 		})
 		return nil
 	})
-	return out
+	return out, err
 }
 
-func (b *Builder) buildTrafficSection(scanID string, redact bool) []TrafficEntry {
+func (b *Builder) buildTrafficSection(scanID string, redact bool) ([]TrafficEntry, error) {
 	records, err := b.db.ListRequestResponses(scanID, 100)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	out := make([]TrafficEntry, 0, len(records))
 	for _, rec := range records {
@@ -93,13 +129,13 @@ func (b *Builder) buildTrafficSection(scanID string, redact bool) []TrafficEntry
 		}
 		out = append(out, TrafficEntry{Method: rec.Method, URL: rec.URL, StatusCode: rec.StatusCode, DurationMs: rec.DurationMs, RawRequest: rawRequest, RawResponse: rawResponse})
 	}
-	return out
+	return out, nil
 }
 
-func (b *Builder) buildPathDiscoverySection(scanID string, redact bool) []PathDiscoveryEntry {
+func (b *Builder) buildPathDiscoverySection(scanID string, redact bool) ([]PathDiscoveryEntry, error) {
 	records, err := b.db.ListFuzzResultRecords(scanID, 500)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	seen := map[string]struct{}{}
 	out := make([]PathDiscoveryEntry, 0, len(records))
@@ -110,7 +146,9 @@ func (b *Builder) buildPathDiscoverySection(scanID string, redact bool) []PathDi
 			IsSoft404  bool   `json:"is_soft_404"`
 			IsArchive  bool   `json:"is_archive"`
 		}
-		_ = json.Unmarshal([]byte(rec.ResultJSON), &result)
+		if err := json.Unmarshal([]byte(rec.ResultJSON), &result); err != nil {
+			continue
+		}
 		if result.IsSoft404 || rec.StatusCode == 404 || rec.StatusCode == 410 || rec.StatusCode <= 0 {
 			continue
 		}
@@ -142,22 +180,30 @@ func (b *Builder) buildPathDiscoverySection(scanID string, redact bool) []PathDi
 		}
 		return out[i].URL < out[j].URL
 	})
-	return out
+	return out, nil
 }
 
-func (b *Builder) buildScope(scanID string) ScopeSection {
+func (b *Builder) buildScope(scanID string) (ScopeSection, error) {
 	sec := ScopeSection{ScanID: scanID}
-	cfg, _ := b.db.GetScanConfig(scanID)
+	cfg, err := b.db.GetScanConfig(scanID)
+	if err != nil {
+		return sec, err
+	}
 	var parsed struct {
 		Targets []string `json:"targets"`
 	}
-	_ = json.Unmarshal([]byte(cfg), &parsed)
+	if err := json.Unmarshal([]byte(cfg), &parsed); err != nil {
+		return sec, err
+	}
 	sec.Targets = parsed.Targets
-	return sec
+	return sec, nil
 }
 
-func (b *Builder) buildAPIKeySection(scanID string, redact bool) []APIKeySection {
-	recs, _ := b.db.ListAPIKeyValidationRecords(scanID, 200)
+func (b *Builder) buildAPIKeySection(scanID string, redact bool) ([]APIKeySection, error) {
+	recs, err := b.db.ListAPIKeyValidationRecords(scanID, 200)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]APIKeySection, 0, len(recs))
 	for _, rec := range recs {
 		details := rec.ResultJSON
@@ -172,7 +218,7 @@ func (b *Builder) buildAPIKeySection(scanID string, redact bool) []APIKeySection
 			Details:     details,
 		})
 	}
-	return out
+	return out, nil
 }
 
 func FindingFromRecord(rec storage.FindingRecord, redact bool) FindingEntry {
@@ -270,12 +316,12 @@ func (b *Builder) CountReportableFindings(opts Options) int {
 	return count
 }
 
-func (b *Builder) reportMetrics(opts Options, base storage.DashboardMetrics) storage.DashboardMetrics {
+func (b *Builder) reportMetrics(opts Options, base storage.DashboardMetrics) (storage.DashboardMetrics, error) {
 	base.TotalFindings = 0
 	base.BySeverity = map[string]int{}
 	base.ByConfidence = map[string]int{}
 	base.ByVulnClass = map[string]int{}
-	_ = b.db.IterateFindingsFiltered(b.Filter(opts), func(rec storage.FindingRecord) error {
+	err := b.db.IterateFindingsFiltered(b.Filter(opts), func(rec storage.FindingRecord) error {
 		entry, ok := b.ReportFinding(rec, opts)
 		if !ok {
 			return nil
@@ -286,7 +332,7 @@ func (b *Builder) reportMetrics(opts Options, base storage.DashboardMetrics) sto
 		base.ByVulnClass[entry.VulnClass]++
 		return nil
 	})
-	return base
+	return base, err
 }
 
 func (b *Builder) Filter(opts Options) storage.FindingsFilter {

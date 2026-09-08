@@ -26,6 +26,18 @@ var sqliStrongKeywords = []string{
 	"microsoft ole db provider",
 	"odbc sql server driver",
 	"pg::syntaxerror",
+	"syntax error: unexpected",
+	"syntaxerror: unexpected",
+	"syntaxerror: unterminated",
+	"syntax error at or near",
+	"syntax error in sql",
+	"incorrect syntax near",
+	"unclosed quote",
+	"unterminated string",
+	"database query failed",
+	"sql command not properly ended",
+	"missing right parenthesis",
+	"right syntax to use near",
 }
 
 // sqliWeakKeywords may appear in non-SQL contexts (e.g. tech stack pages,
@@ -72,6 +84,10 @@ func sqliErrorInBody(body, baseline string) bool {
 				return false
 			}
 		}
+	}
+
+	if hasStrongSignal && !sqliErrorRe.MatchString(base) {
+		return true
 	}
 
 	// A single strong keyword is conclusive.
@@ -452,7 +468,7 @@ func (r *Runner) sqliTimingVerified(ctx context.Context, target ScanTarget, payl
 	zeroMs, zeroSamplesVal, zeroStatus, delivered, zeroOK := r.sqliTimingMedianMs(ctx, target, zeroPayload.Value, 1)
 	zeroDelivered = delivered
 	zeroSamples = zeroSamplesVal
-	if !zeroOK || delayStatus != zeroStatus {
+	if !zeroOK || !acceptableTimingStatusPair(delayStatus, zeroStatus) {
 		reason = "zero_control_incomplete_or_status_mismatch"
 		return false, delayMs, delaySamples, zeroSamplesVal
 	}
@@ -465,7 +481,7 @@ func (r *Runner) sqliTimingVerified(ctx context.Context, target ScanTarget, payl
 	delayDelivered += delivered
 	delaySamples = append(delaySamples, extraDelaySamples...)
 	delayMs = medianInt64(delaySamples)
-	if !extraDelayOK || extraDelayStatus != delayStatus || extraDelayMs == 0 {
+	if !extraDelayOK || !acceptableTimingStatusPair(extraDelayStatus, delayStatus) || extraDelayMs == 0 {
 		reason = "delay_series_incomplete_or_unusable"
 		return false, delayMs, delaySamples, zeroSamplesVal
 	}
@@ -475,7 +491,7 @@ func (r *Runner) sqliTimingVerified(ctx context.Context, target ScanTarget, payl
 	zeroSamplesVal = append(zeroSamplesVal, extraZeroSamples...)
 	zeroSamples = zeroSamplesVal
 	zeroMs = medianInt64(zeroSamplesVal)
-	if !extraZeroOK || extraZeroStatus != zeroStatus || extraZeroMs == 0 {
+	if !extraZeroOK || !acceptableTimingStatusPair(extraZeroStatus, zeroStatus) || extraZeroMs == 0 {
 		reason = "zero_control_incomplete_or_status_mismatch"
 		return false, delayMs, delaySamples, zeroSamplesVal
 	}
@@ -490,7 +506,7 @@ func (r *Runner) sqliTimingVerified(ctx context.Context, target ScanTarget, payl
 		falseDelivered = delivered
 		zeroSamplesVal = append(zeroSamplesVal, falseSamples...)
 		zeroSamples = zeroSamplesVal
-		if !falseOK || falseStatus != delayStatus {
+		if !falseOK || !acceptableTimingStatusPair(falseStatus, delayStatus) {
 			reason = "false_predicate_control_incomplete_or_status_mismatch"
 			return false, delayMs, delaySamples, zeroSamplesVal
 		}
@@ -520,6 +536,18 @@ func sqliTimingPairPlausible(delayMs, zeroMs int64, baseline timingblind.Baselin
 		minDelta = baseline.JitterMs*2 + 350
 	}
 	return delayDelta >= minDelta && float64(delayMs) >= baseline.AvgMs+float64(sleepSec*1000)*0.45
+}
+
+func acceptableTimingStatusPair(a, b int) bool {
+	if a == b {
+		return true
+	}
+	isOK := func(code int) bool { return code >= 200 && code < 400 }
+	isErr := func(code int) bool { return code == 500 || code == 501 }
+	if (isOK(a) && isOK(b)) || (isErr(a) && isOK(b)) || (isErr(b) && isOK(a)) || (isErr(a) && isErr(b)) {
+		return true
+	}
+	return false
 }
 
 func usableTimingSQLiResponse(rr httpclient.ResponseRecord) bool {

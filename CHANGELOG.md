@@ -5,6 +5,46 @@ All notable changes to AKCA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.8] - 2026-09-08
+
+### Added
+
+- **Physical Wire Transport & Budget Enforcement**:
+  - Implemented `WireTransport` interceptor that accurately captures every physical outbound network transaction, including redirect hops and transport-level retries.
+  - Enforced strict global `RequestBudget` on physical wire requests, guaranteeing scans strictly respect user-defined traffic boundaries even during redirection chains.
+  - Enforced per-host rate limiting directly at the wire level.
+- **Enhanced Redirect Security & Sensitive Header Stripping**:
+  - Automatically strip authentication and session headers (`Authorization`, `Cookie`, `Proxy-Authorization`, `X-API-Key`, `X-Auth-Token`, `X-Token`, `Session-Token`, `API-Key`, `Private-Token`, `Token`) on cross-origin redirects.
+  - Enforced credential stripping on HTTPS to HTTP protocol downgrades even on the same host.
+  - Enforced credential stripping on cross-port redirects.
+- **Timing-Differential Blind NoSQL Injection Verification**:
+  - Integrated timing-based blind NoSQL injection verification (`where_sleep`, `$where` JavaScript sleep) alongside differential replay.
+  - Added baseline timing calibration and zero-delay controls (`sleep(0)`) to eliminate false positives in time-based NoSQL attacks.
+  - Added delayed verification scheduling support for NoSQL timing attacks.
+  - Expanded MongoDB error detection signatures with `mongoStrongErrorMarkers` to catch syntax and query evaluation exceptions reliably.
+- **Multipart & XML Native Parameter Discovery**:
+  - Extended native body mutation engine (`mutateNativeBody`) to support `application/xml` and `multipart/form-data` request templates.
+  - Automatic boundary management and field insertion for multipart body fuzzing.
+  - Support for `multipart/form-data` and `application/json` form encodings (`enctype`) in crawler form extraction.
+
+### Fixed & Hardened
+
+- **SQL Injection Engine & Status Code Tolerance**:
+  - Expanded SQLi strong error keywords to capture syntax errors, unclosed quotes, and terminated statement messages across major database engines.
+  - Relaxed strict status code matching in timing-based SQLi probes (`acceptableTimingStatusPair`) to prevent valid delay findings from being dropped when the server returns expected error statuses (e.g. 500) on delayed syntax.
+- **Crawler Bounding & Scope Protection**:
+  - Restricted crawler per-route template saturation (`maxURLsPerRouteTemplate = 30`) to avoid combinatorial explosion on large REST APIs.
+  - Enforced strict redirect domain adoption: by default only canonical apex/www pairs (e.g. `example.com` <-> `www.example.com`) are automatically adopted into scope; wider subdomain adoption requires explicit configuration (`cfg.AutoAdoptSameRootRedirects`).
+  - Pre-compiled text URL regex (`reTextURL`) for improved extraction throughput.
+- **Reflection Analyzer & XSS Sentinels**:
+  - Corrected character sentinel probe definitions and close tags (`CK>DK`, `QK}RK`), with dynamic sentinel payload assembly and regression test coverage.
+- **Platform Telemetry & Scan Management**:
+  - Upgraded Command Center / Health Metrics UI (`HealthMetricsUI`) to report live system stats (active goroutines from `runtime.NumGoroutine()`, allocated memory from `runtime.ReadMemStats()`, and real database write latency).
+  - Enhanced scan comparison engine to list all findings using streaming iteration and improved deduplication key (`VulnClass|EndpointURL|Parameter|Title`).
+  - Enhanced scan initialization to ensure scan records and configuration are properly persisted in the database before starting scan session.
+  - Improved scan ID generation (`deriveTargetScanID`) with target hashing and nanosecond uniqueness to prevent scan ID collisions.
+  - Hardened report builder error handling and added `Warnings` array to report `Document`.
+
 ## [0.1.7] - 2026-09-07
 
 ### Added

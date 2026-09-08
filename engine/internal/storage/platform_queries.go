@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"time"
 )
 
@@ -86,11 +87,20 @@ type CommandCenterRow struct {
 
 func (db *DB) HealthMetricsUI(scanID string) (HealthMetrics, error) {
 	m := HealthMetrics{
-		EngineStatus: "healthy",
-		ModuleBreakdown: map[string]float64{
-			"crawler": 0.22, "fuzzing": 0.18, "vuln_modules": 0.35, "verification": 0.12, "oast": 0.08,
-		},
+		EngineStatus:    "healthy",
+		ModuleBreakdown: make(map[string]float64),
 	}
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	m.Goroutines = runtime.NumGoroutine()
+	currentMemMB := float64(memStats.Alloc) / (1024 * 1024)
+
+	startPing := time.Now()
+	var pingCheck int
+	if err := db.conn.QueryRow(`SELECT 1`).Scan(&pingCheck); err == nil {
+		m.DBWriteLatencyMs = float64(time.Since(startPing).Microseconds()) / 1000.0
+	}
+
 	_ = db.conn.QueryRow(`SELECT COUNT(*) FROM timeline_events WHERE scan_id = ?`, scanID).Scan(&m.EventBacklog)
 	snaps, _ := db.ListHealthSnapshotRecords(scanID, 20)
 	for _, s := range snaps {
@@ -98,8 +108,8 @@ func (db *DB) HealthMetricsUI(scanID string) (HealthMetrics, error) {
 		_ = json.Unmarshal([]byte(s.MetricsJSON), &parsed)
 		m.History = append(m.History, HealthSnapshot{
 			TS:            s.CreatedAt,
-			MemoryMB:      floatOr(parsed, "memory_mb", 128),
-			ThroughputRPS: floatOr(parsed, "throughput_rps", 2.5),
+			MemoryMB:      floatOr(parsed, "memory_mb", currentMemMB),
+			ThroughputRPS: floatOr(parsed, "throughput_rps", 0),
 			EventBacklog:  int(floatOr(parsed, "event_backlog", 0)),
 		})
 	}
@@ -108,11 +118,9 @@ func (db *DB) HealthMetricsUI(scanID string) (HealthMetrics, error) {
 		m.MemoryMB = last.MemoryMB
 		m.ThroughputRPS = last.ThroughputRPS
 	} else {
-		m.MemoryMB = 96
-		m.ThroughputRPS = 2.1
+		m.MemoryMB = currentMemMB
+		m.ThroughputRPS = 0.0
 	}
-	m.DBWriteLatencyMs = 4.2
-	m.Goroutines = 42
 	return m, nil
 }
 

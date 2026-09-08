@@ -120,7 +120,9 @@ func (r *Runner) runSQLi(ctx context.Context, target ScanTarget) []ModuleFinding
 			continue
 		}
 		if (rr.Response.StatusCode == 500 || rr.Response.StatusCode == 501) &&
-			!sqliErrorInBody(rr.Response.Body, baseline.Response.Body) {
+			!sqliErrorInBody(rr.Response.Body, baseline.Response.Body) &&
+			!isTimeBasedSQLi(probePayload) &&
+			!timingblind.IsTimeDelayPayload(probePayload.Value, probePayload.ExpectedSignal) {
 			continue
 		}
 		if sqliErrorInBody(rr.Response.Body, baseline.Response.Body) ||

@@ -108,12 +108,19 @@ func (r *Runner) flushDelayedTimingVerifications(ctx context.Context) []ModuleFi
 		zeroValue := "akca-timing-zero-control"
 		if item.Module == "sqli" {
 			zeroValue = timingblind.SQLiMatchedZeroDelayPayload(item.Payload.Value, r.techDatabaseHint(item.Target.EndpointURL)).Value
+		} else if item.Module == "nosql" {
+			if strings.Contains(item.Payload.Value, "sleep(") {
+				zeroValue = strings.ReplaceAll(item.Payload.Value, "sleep(5000)", "sleep(0)")
+				zeroValue = strings.ReplaceAll(zeroValue, "sleep(5)", "sleep(0)")
+			} else {
+				zeroValue = "akca-nosql-control"
+			}
 		}
 		zeroRR, err := r.probeForModule(ctx, item.Module, item.Target, zeroValue)
 		if err != nil {
 			continue
 		}
-		if item.Module == "sqli" && (!usableTimingSQLiResponse(zeroRR.Response) || zeroRR.Response.StatusCode != rr.Response.StatusCode) {
+		if item.Module == "sqli" && (!usableTimingSQLiResponse(zeroRR.Response) || !acceptableTimingStatusPair(zeroRR.Response.StatusCode, rr.Response.StatusCode)) {
 			continue
 		}
 		zeroMs := responseDurationMs(zeroRR)
@@ -121,7 +128,7 @@ func (r *Runner) flushDelayedTimingVerifications(ctx context.Context) []ModuleFi
 		for len(zeroSamples) < 3 {
 			repeatZero, repeatErr := r.probeForModule(ctx, item.Module, item.Target, zeroValue)
 			if repeatErr != nil || item.Module == "sqli" &&
-				(!usableTimingSQLiResponse(repeatZero.Response) || repeatZero.Response.StatusCode != rr.Response.StatusCode) {
+				(!usableTimingSQLiResponse(repeatZero.Response) || !acceptableTimingStatusPair(repeatZero.Response.StatusCode, rr.Response.StatusCode)) {
 				zeroSamples = nil
 				break
 			}
@@ -137,7 +144,7 @@ func (r *Runner) flushDelayedTimingVerifications(ctx context.Context) []ModuleFi
 		if item.Module == "sqli" {
 			if falseControl, hasFalseControl := timingblind.SQLiXORFalseConditionControl(item.Payload.Value); hasFalseControl {
 				falseRR, falseErr := r.probeForModule(ctx, item.Module, item.Target, falseControl.Value)
-				if falseErr != nil || !usableTimingSQLiResponse(falseRR.Response) || falseRR.Response.StatusCode != rr.Response.StatusCode {
+				if falseErr != nil || !usableTimingSQLiResponse(falseRR.Response) || !acceptableTimingStatusPair(falseRR.Response.StatusCode, rr.Response.StatusCode) {
 					continue
 				}
 				if matched, _ := timingblind.VerifyProbeWithControl(elapsed, responseDurationMs(falseRR), item.Baseline, item.SleepSec); !matched {
@@ -149,7 +156,7 @@ func (r *Runner) flushDelayedTimingVerifications(ctx context.Context) []ModuleFi
 		if err != nil {
 			continue
 		}
-		if item.Module == "sqli" && (!usableTimingSQLiResponse(thirdRR.Response) || thirdRR.Response.StatusCode != rr.Response.StatusCode) {
+		if item.Module == "sqli" && (!usableTimingSQLiResponse(thirdRR.Response) || !acceptableTimingStatusPair(thirdRR.Response.StatusCode, rr.Response.StatusCode)) {
 			continue
 		}
 		thirdMs := responseDurationMs(thirdRR)

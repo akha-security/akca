@@ -202,14 +202,14 @@ var sentinelProbes = []struct {
 	encodedPatterns []string
 }{
 	{"<", "AK<BK", []string{"AK&lt;BK", "AK&#60;BK", "AK&#x3c;BK", "AK%3CBK", "AK%3cbk"}},
-	{">", "CK>DK", []string{"CK&gt;DK", "CK&#62;DK", "CK&#x3e;DK", "CK%3EBK", "CK%3ebk"}},
+	{">", "CK>DK", []string{"CK&gt;DK", "CK&#62;DK", "CK&#x3e;DK", "CK%3EDK", "CK%3edk"}},
 	{"\"", "EK\"FK", []string{"EK&quot;FK", "EK&#34;FK", "EK&#x22;FK", "EK%22FK", "EK\\\"FK"}},
 	{"'", "GK'HK", []string{"GK&#39;HK", "GK&#x27;HK", "GK&apos;HK", "GK%27HK", "GK\\'HK"}},
 	{"`", "IK`JK", []string{"IK&#96;JK", "IK&#x60;JK", "IK%60JK", "IK\\`JK"}},
 	{"(", "KK(LK", []string{"KK&#40;LK", "KK%28LK"}},
 	{")", "MK)NK", []string{"MK&#41;NK", "MK%29NK"}},
 	{"{", "OK{PK", []string{"OK&#123;PK", "OK%7BPK"}},
-	{"}", "QK}RK", []string{"QK&#125;RK", "QK%7DPK"}},
+	{"}", "QK}RK", []string{"QK&#125;RK", "QK%7DRK"}},
 	{"/", "SK/TK", []string{"SK&#47;TK", "SK%2FTK"}},
 	{"\\", "UK\\VK", []string{"UK&#92;VK", "UK%5CVK"}},
 	{"&", "WK&XK", []string{"WK&amp;XK", "WK&#38;XK", "WK%26XK"}},
@@ -217,7 +217,13 @@ var sentinelProbes = []struct {
 }
 
 func buildCharSentinelPayload(canary string) string {
-	return canary + "AK<BK>CK\"DK'EK`FK(GK)HK{IK}JK/KK\\LK&MK;NK" + canary
+	var b strings.Builder
+	b.WriteString(canary)
+	for _, s := range sentinelProbes {
+		b.WriteString(s.rawPattern)
+	}
+	b.WriteString(canary)
+	return b.String()
 }
 
 func evaluateCharSentinels(body string) (available, blocked []string, hasEncoded bool) {

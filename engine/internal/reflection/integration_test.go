@@ -142,4 +142,3 @@ func TestAnalyzerSkipsReprobeOnNoReflection(t *testing.T) {
 		t.Fatal("expected Stable to be false when unreflected")
 	}
 }
-

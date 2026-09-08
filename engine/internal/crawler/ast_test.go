@@ -84,3 +84,30 @@ func TestASTIgnoresComments(t *testing.T) {
 		t.Fatalf("expected exactly 1 real endpoint, got %v", eps)
 	}
 }
+
+func TestASTExtractsHeaders(t *testing.T) {
+	js := `
+		fetch("/api/v1/secure", {
+			method: "POST",
+			headers: {
+				"Authorization": "Bearer token123",
+				"Content-Type": "application/json"
+			},
+			body: "{}"
+		});
+	`
+	eps := ExtractASTFromJSBundle("https://example.com/app.js", js)
+	if len(eps) != 1 {
+		t.Fatalf("expected 1 endpoint, got %d", len(eps))
+	}
+	tmpl := eps[0].RequestTemplate
+	if tmpl == nil {
+		t.Fatal("expected request template to be populated")
+	}
+	if tmpl.Headers["Authorization"] != "Bearer token123" {
+		t.Fatalf("expected Authorization header, got: %v", tmpl.Headers)
+	}
+	if tmpl.ContentType != "application/json" {
+		t.Fatalf("expected Content-Type application/json, got: %q", tmpl.ContentType)
+	}
+}

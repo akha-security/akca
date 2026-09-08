@@ -414,3 +414,18 @@ func TestSPARouteExtractionPrecisionAndGarbageRejection(t *testing.T) {
 		}
 	}
 }
+
+func TestStrictRedirectAdoption(t *testing.T) {
+	if !isApexWwwPair("example.com", "www.example.com") {
+		t.Fatal("expected example.com and www.example.com to be recognized as apex/www pair")
+	}
+	if !isApexWwwPair("www.example.com", "example.com") {
+		t.Fatal("expected www.example.com and example.com to be recognized as apex/www pair")
+	}
+	if isApexWwwPair("tenant.example.com", "example.com") {
+		t.Fatal("subdomain should not be treated as apex/www pair")
+	}
+	if isApexWwwPair("evil.com", "example.com") {
+		t.Fatal("unrelated domains should not be treated as apex/www pair")
+	}
+}

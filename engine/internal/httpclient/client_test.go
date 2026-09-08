@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -194,6 +195,11 @@ func TestHTTPClientProxyAuthenticationAndInsecureTLSConfig(t *testing.T) {
 		t.Fatalf("proxy credentials were not sent: %q", auth)
 	}
 	transport, ok := client.httpClient.Transport.(*http.Transport)
+	if !ok {
+		if wt, isWT := client.httpClient.Transport.(*WireTransport); isWT {
+			transport, ok = wt.base.(*http.Transport)
+		}
+	}
 	if !ok || transport.TLSClientConfig == nil || !transport.TLSClientConfig.InsecureSkipVerify {
 		t.Fatal("insecure TLS setting was not propagated to proxy-aware transport")
 	}
@@ -327,3 +333,79 @@ func TestHTTPClientRedirectTracking(t *testing.T) {
 	}
 }
 
+func TestShouldStripAuthOnRedirect(t *testing.T) {
+	tests := []struct {
+		name     string
+		prev     string
+		next     string
+		expected bool
+	}{
+		{
+			name:     "same origin https",
+			prev:     "https://example.com/login",
+			next:     "https://example.com/dashboard",
+			expected: false,
+		},
+		{
+			name:     "https to http downgrade on same host",
+			prev:     "https://example.com/auth",
+			next:     "http://example.com/insecure",
+			expected: true,
+		},
+		{
+			name:     "cross host redirect",
+			prev:     "https://example.com/out",
+			next:     "https://other.com/landing",
+			expected: true,
+		},
+		{
+			name:     "cross port redirect",
+			prev:     "https://example.com:8443/api",
+			next:     "https://example.com:9443/api",
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u1, _ := url.Parse(tt.prev)
+			u2, _ := url.Parse(tt.next)
+			res := shouldStripAuthOnRedirect(u1, u2)
+			if res != tt.expected {
+				t.Errorf("shouldStripAuthOnRedirect(%s -> %s) = %v; want %v", tt.prev, tt.next, res, tt.expected)
+			}
+		})
+	}
+}
+
+func TestWireTransport_RedirectConsumesNetworkAttempts(t *testing.T) {
+	var serverHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverHits.Add(1)
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "/destination", http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{srv.URL}
+	cfg.FollowRedirects = true
+	cfg.RequestBudget = 1 // Budget is 1 wire request! The initial request succeeds, but redirect hop must be blocked.
+
+	client, err := New(cfg, scope.NewEngine(cfg), ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.Do(context.Background(), http.MethodGet, srv.URL+"/start", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "request budget exhausted") {
+		t.Fatalf("expected redirect to be blocked by budget exhaustion, got err: %v", err)
+	}
+	if serverHits.Load() != 1 {
+		t.Fatalf("expected exactly 1 wire request before budget block, got %d", serverHits.Load())
+	}
+}

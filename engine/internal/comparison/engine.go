@@ -19,10 +19,22 @@ type Diff struct {
 }
 
 func (e *Engine) Compare(prevScanID, currScanID string) (Diff, error) {
-	prevFindings, _ := e.db.ListFindings(prevScanID, 5000, 0)
-	currFindings, _ := e.db.ListFindings(currScanID, 5000, 0)
-	prevEndpoints, _ := e.db.ListEndpointURLs(prevScanID)
-	currEndpoints, _ := e.db.ListEndpointURLs(currScanID)
+	prevFindings, err := e.listAllFindings(prevScanID)
+	if err != nil {
+		return Diff{}, err
+	}
+	currFindings, err := e.listAllFindings(currScanID)
+	if err != nil {
+		return Diff{}, err
+	}
+	prevEndpoints, err := e.db.ListEndpointURLs(prevScanID)
+	if err != nil {
+		return Diff{}, err
+	}
+	currEndpoints, err := e.db.ListEndpointURLs(currScanID)
+	if err != nil {
+		return Diff{}, err
+	}
 
 	prevF := map[string]storage.FindingRecord{}
 	currF := map[string]storage.FindingRecord{}
@@ -76,8 +88,20 @@ func (e *Engine) Compare(prevScanID, currScanID string) (Diff, error) {
 	return diff, nil
 }
 
+func (e *Engine) listAllFindings(scanID string) ([]storage.FindingRecord, error) {
+	if e.db == nil {
+		return nil, nil
+	}
+	var all []storage.FindingRecord
+	err := e.db.IterateFindings(scanID, func(rec storage.FindingRecord) error {
+		all = append(all, rec)
+		return nil
+	})
+	return all, err
+}
+
 func key(f storage.FindingRecord) string {
-	return f.VulnClass + "|" + f.Title + "|" + f.EndpointURL
+	return f.VulnClass + "|" + f.EndpointURL + "|" + f.Parameter + "|" + f.Title
 }
 
 func toSet(urls []string) map[string]bool {

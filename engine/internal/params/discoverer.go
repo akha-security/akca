@@ -1,9 +1,13 @@
 package params
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
@@ -696,13 +700,7 @@ func buildCustomFormProbe(endpointURL, param, value string) (string, []byte) {
 	return endpointURL, []byte(form.Encode())
 }
 
-func buildJSONProbe(endpointURL, param string) (string, []byte) {
-	return buildCustomJSONProbe(endpointURL, param, "akca_probe")
-}
-
-func buildCustomJSONProbe(endpointURL, param, value string) (string, []byte) {
-	return endpointURL, []byte(fmt.Sprintf(`{"%s":"%s"}`, param, value))
-}
+const defaultMultipartBoundary = "----AkcaFormBoundaryDiscovery"
 
 func nativeRequest(endpointURL, method string, template storage.DiscoveryRequestTemplate) (string, []byte, map[string]string) {
 	reqURL := endpointURL
@@ -733,6 +731,47 @@ func mutateNativeBody(template storage.DiscoveryRequestTemplate, param, value st
 		setNestedPath(document, param, value)
 		mutated, err := json.Marshal(document)
 		return mutated, LocationJSON, err == nil
+	}
+
+	isMultipart := strings.Contains(contentType, "multipart")
+	if isMultipart {
+		boundary := ""
+		if _, params, err := mime.ParseMediaType(contentType); err == nil {
+			boundary = params["boundary"]
+		}
+		fields := url.Values{}
+		if boundary != "" && body != "" {
+			mr := multipart.NewReader(strings.NewReader(body), boundary)
+			if form, err := mr.ReadForm(10 << 20); err == nil && form != nil {
+				fields = url.Values(form.Value)
+			}
+		}
+		fields.Set(param, value)
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		if boundary != "" {
+			_ = mw.SetBoundary(boundary)
+		} else {
+			_ = mw.SetBoundary(defaultMultipartBoundary)
+		}
+		for k, vs := range fields {
+			for _, v := range vs {
+				_ = mw.WriteField(k, v)
+			}
+		}
+		_ = mw.Close()
+		return buf.Bytes(), LocationMultipart, true
+	}
+
+	isXML := strings.Contains(contentType, "xml") || (strings.HasPrefix(body, "<") && strings.HasSuffix(body, ">"))
+	if isXML {
+		if body != "" {
+			if idx := strings.LastIndex(body, "</"); idx != -1 {
+				mutated := body[:idx] + fmt.Sprintf("<%s>%s</%s>", param, html.EscapeString(value), param) + body[idx:]
+				return []byte(mutated), LocationXML, true
+			}
+		}
+		return []byte(fmt.Sprintf("<root><%s>%s</%s></root>", param, html.EscapeString(value), param)), LocationXML, true
 	}
 
 	// Form is the compatibility fallback for older endpoint records that do
@@ -768,12 +807,20 @@ func setNestedPath(doc map[string]interface{}, path string, value interface{}) {
 
 func bodyProbeHeaders(base map[string]string, location Location) map[string]string {
 	headers := cloneHeaders(base)
-	if headerValue(headers, "Content-Type") == "" {
-		if location == LocationJSON {
+	existingCT := headerValue(headers, "Content-Type")
+	if existingCT == "" {
+		switch location {
+		case LocationJSON:
 			headers["Content-Type"] = "application/json"
-		} else {
+		case LocationXML:
+			headers["Content-Type"] = "application/xml"
+		case LocationMultipart:
+			headers["Content-Type"] = "multipart/form-data; boundary=" + defaultMultipartBoundary
+		default:
 			headers["Content-Type"] = "application/x-www-form-urlencoded"
 		}
+	} else if location == LocationMultipart && !strings.Contains(existingCT, "boundary=") {
+		headers["Content-Type"] = "multipart/form-data; boundary=" + defaultMultipartBoundary
 	}
 	return headers
 }

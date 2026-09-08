@@ -394,22 +394,18 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 		ResponseBody: rr.Response.Body, FetchedViaGETFallback: false,
 	})
 
-	// Auto-adopt same-root redirect landing hosts into active scope (e.g. domain.com -> www.domain.com or app.domain.com)
+	// Auto-adopt redirect landing hosts into active scope with strict policy (apex <-> www by default)
 	if loc := rr.Response.Headers["Location"]; loc != "" {
 		if u, err := url.Parse(loc); err == nil && u.Hostname() != "" {
 			if curr, err := url.Parse(rawURL); err == nil && curr.Hostname() != "" {
-				if scope.SameRootDomain(u.Hostname(), curr.Hostname()) {
-					c.scope.AdoptHost(u.Hostname())
-				}
+				c.tryAdoptRedirectHost(u.Hostname(), curr.Hostname(), "location_header")
 			}
 		}
 	}
 	if rr.Request.URL != "" && rr.Request.URL != visitURL {
 		if land, err := url.Parse(rr.Request.URL); err == nil && land.Hostname() != "" {
 			if curr, err := url.Parse(visitURL); err == nil && curr.Hostname() != "" {
-				if scope.SameRootDomain(land.Hostname(), curr.Hostname()) {
-					c.scope.AdoptHost(land.Hostname())
-				}
+				c.tryAdoptRedirectHost(land.Hostname(), curr.Hostname(), "final_request_url")
 			}
 		}
 	}
@@ -613,7 +609,16 @@ func (c *Crawler) enqueueCandidate(rawURL, method string, depth int, source Disc
 	if method == "" {
 		method = "GET"
 	}
-	if !c.scope.IsInScope(rawURL) || IsCrawlerTrap(rawURL) {
+	if !c.scope.IsInScope(rawURL) {
+		return
+	}
+	if IsCrawlerTrap(rawURL) {
+		if c.emit != nil {
+			_ = c.emit("url_skipped", fmt.Sprintf("bounded by crawler trap heuristic: %s", rawURL), map[string]interface{}{
+				"url":    rawURL,
+				"reason": "skipped_crawler_trap",
+			})
+		}
 		return
 	}
 
@@ -660,6 +665,19 @@ func (c *Crawler) enqueueCandidate(rawURL, method string, depth int, source Disc
 	}
 	if !c.acceptQueryVariantLocked(norm, method) {
 		c.mu.Unlock()
+		return
+	}
+	// Bound URLs per REST route template to prevent combinatorial explosion on large sites
+	const maxURLsPerRouteTemplate = 30
+	if c.patternSeen[restPattern] >= maxURLsPerRouteTemplate {
+		c.mu.Unlock()
+		if c.emit != nil {
+			_ = c.emit("url_skipped", fmt.Sprintf("bounded by route template saturation (%s)", restPattern), map[string]interface{}{
+				"url":     rawURL,
+				"reason":  "skipped_template_saturation",
+				"pattern": restPattern,
+			})
+		}
 		return
 	}
 	c.seen[key] = struct{}{}
@@ -1139,4 +1157,37 @@ func isStaticMediaAsset(rawURL string) bool {
 		}
 	}
 	return false
+}
+
+func isApexWwwPair(h1, h2 string) bool {
+	h1 = strings.ToLower(strings.TrimSpace(h1))
+	h2 = strings.ToLower(strings.TrimSpace(h2))
+	if h1 == h2 || h1 == "" || h2 == "" {
+		return false
+	}
+	return h1 == "www."+h2 || h2 == "www."+h1
+}
+
+func (c *Crawler) tryAdoptRedirectHost(targetHost, originHost, reason string) {
+	targetHost = strings.ToLower(strings.TrimSpace(targetHost))
+	originHost = strings.ToLower(strings.TrimSpace(originHost))
+	if targetHost == "" || originHost == "" || targetHost == originHost || c.scope == nil {
+		return
+	}
+	// By default, only canonical apex <-> www pairs are adopted automatically.
+	// Wider same-root subdomain adoption requires explicit cfg.AutoAdoptSameRootRedirects.
+	allowed := isApexWwwPair(targetHost, originHost)
+	if !allowed && c.cfg.AutoAdoptSameRootRedirects && scope.SameRootDomain(targetHost, originHost) {
+		allowed = true
+	}
+	if allowed {
+		c.scope.AdoptHost(targetHost)
+		if c.emit != nil {
+			_ = c.emit("scope_expanded", fmt.Sprintf("adopted redirect host %s from %s (%s)", targetHost, originHost, reason), map[string]interface{}{
+				"adopted_host": targetHost,
+				"origin_host":  originHost,
+				"reason":       reason,
+			})
+		}
+	}
 }
