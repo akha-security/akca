@@ -461,7 +461,8 @@ func TestBenchmarkCommandWritesObservedJSON(t *testing.T) {
 		"--strict",
 	})
 	if code != 0 {
-		t.Fatalf("benchmark command exited with %d", code)
+		rawErr, _ := os.ReadFile(output)
+		t.Fatalf("benchmark command exited with %d, output: %s", code, string(rawErr))
 	}
 	raw, err := os.ReadFile(output)
 	if err != nil {

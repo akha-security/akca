@@ -80,7 +80,7 @@ func TestOperationalGateRejectsRegressions(t *testing.T) {
 		{Scenario: "positive", VulnClass: "xss", Detected: true},
 		{Scenario: "module:xss", VulnClass: "xss", Precision: 1, Recall: 1, TruePositive: 1},
 		{
-			Scenario: "aggregate", Requests: 3000, DurationSec: 90,
+			Scenario: "aggregate", Requests: 3000, DurationSec: 300,
 			BaselineRequests: 1000, RequestRegressionRatio: 2,
 			BaselineDurationSec: 30, DurationRegressionRatio: 2,
 			Deterministic: false, GoroutineDelta: 20, ReportSchemaCompatible: false,

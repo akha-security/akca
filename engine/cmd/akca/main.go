@@ -2918,6 +2918,9 @@ func runBenchmarkCommand(args []string) int {
 		return 1
 	}
 	if strict && !gate.Passed {
+		if len(gate.Violations) > 0 {
+			fmt.Fprintf(os.Stderr, "akca benchmark: quality gate failed: %s\n", strings.Join(gate.Violations, "; "))
+		}
 		return 3
 	}
 	return 0
