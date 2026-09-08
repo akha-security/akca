@@ -586,4 +586,3 @@ func isNumericTargetValue(target ScanTarget) bool {
 	}
 	return false
 }
-

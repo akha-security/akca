@@ -203,5 +203,3 @@ func TestDetectEncryptionKeyAndBase64AESKey(t *testing.T) {
 		t.Fatalf("expected kind 'encryption_key', got matches: %+v", matches)
 	}
 }
-
-

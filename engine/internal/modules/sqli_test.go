@@ -795,4 +795,3 @@ func TestNativeTargetValueNestedJSON(t *testing.T) {
 		t.Fatalf("expected items.0.id=999 to be classified as numeric target")
 	}
 }
-

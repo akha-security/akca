@@ -313,4 +313,3 @@ func TestAPIVersioningRedirectAndHTMLRejection(t *testing.T) {
 		t.Fatalf("expected finding for /api/v1, got %s", findings[0].Evidence.Payload.Value)
 	}
 }
-

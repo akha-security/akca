@@ -712,5 +712,3 @@ func TestPerModuleSurfaceAdaptiveBudgetAllocation(t *testing.T) {
 		t.Fatal("cors must not be stopped when sqli exhausts its module quota")
 	}
 }
-
-

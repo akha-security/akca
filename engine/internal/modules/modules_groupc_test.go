@@ -404,7 +404,7 @@ func TestCacheDeceptionRequiresCacheEvidence(t *testing.T) {
 func TestCacheDeceptionSkipsTemplatePathsAndPublicConfirmEmail(t *testing.T) {
 	confirmPage := `<html><body>Please confirm your email address with token: 12345</body></html>`
 	c := &sessionlessGroupCClient{groupCClient: &groupCClient{responses: map[string]string{
-		"/confirm-email/{token}":     confirmPage,
+		"/confirm-email/{token}":      confirmPage,
 		"/confirm-email/{token};.css": confirmPage,
 	}, headers: map[string]map[string]string{
 		"/confirm-email/{token};.css": {"Content-Type": "text/html", "X-Cache": "HIT"},
@@ -419,7 +419,6 @@ func TestCacheDeceptionSkipsTemplatePathsAndPublicConfirmEmail(t *testing.T) {
 		t.Fatalf("template paths like /confirm-email/{token} must never produce cache deception findings, got %+v", findings)
 	}
 }
-
 
 func TestBrokenAuthUsesAnonymousControl(t *testing.T) {
 	c := authenticatedGroupCClient{}
@@ -747,4 +746,3 @@ func TestCORSSkipsStaticAssetsAndEarlyExits(t *testing.T) {
 
 	_ = requestCount
 }
-

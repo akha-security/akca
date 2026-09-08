@@ -158,4 +158,3 @@ func TestHTMLPIILabelIgnored(t *testing.T) {
 		t.Fatal("API payload with PII field should be flagged")
 	}
 }
-

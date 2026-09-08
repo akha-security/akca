@@ -232,7 +232,7 @@ func TestCentralContentHelpersPreserveSpecificProof(t *testing.T) {
 func TestSSRFRejects404AndClientErrors(t *testing.T) {
 	p := payloadgen.Payload{Value: "http://127.0.0.1/", ExpectedSignal: "internal_ip"}
 	base := httpclient.ResponseRecord{Body: "<html><body>Welcome to content page</body></html>", StatusCode: 200}
-	
+
 	// Server responds 404 Not Found to /content/http://127.0.0.1/
 	probe404 := httpclient.ResponseRecord{
 		Body:       "<html><body>404 Not Found: /content/http://127.0.0.1/ does not exist</body></html>",
@@ -267,4 +267,3 @@ func TestCRLFRejectsJSONStateReflection(t *testing.T) {
 		t.Fatal("genuine HTTP response splitting with raw body breakout must be confirmed")
 	}
 }
-

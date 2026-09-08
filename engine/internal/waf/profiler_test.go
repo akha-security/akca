@@ -115,4 +115,3 @@ func TestApplyCautiousModeDynamicSlowdown(t *testing.T) {
 		t.Fatalf("expected multiplier to decay, got %f", decayedMult)
 	}
 }
-

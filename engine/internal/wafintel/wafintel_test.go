@@ -138,4 +138,3 @@ func TestIsURLSafePayload(t *testing.T) {
 		}
 	}
 }
-

@@ -31,6 +31,3 @@ func TestHtpasswdFingerprintRejectsGenericColon(t *testing.T) {
 		t.Fatal("valid htpasswd hash must match")
 	}
 }
-
-
-

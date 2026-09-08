@@ -158,4 +158,3 @@ func TestNoSQLNestedKeySupport(t *testing.T) {
 		t.Fatalf("ControlBody failed to produce nested JSON: %s", control)
 	}
 }
-
