@@ -223,5 +223,14 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - HTML, JSON, Markdown, CSV and SARIF reporting.
 - CWE and OWASP Top 10:2025 report classification.
 
-[Unreleased]: https://github.com/akha-security/akca/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/akha-security/akca/compare/engine/v0.1.8...HEAD
+[0.1.8]: https://github.com/akha-security/akca/releases/tag/engine/v0.1.8
+[0.1.7]: https://github.com/akha-security/akca/releases/tag/v0.1.7
+[0.1.6]: https://github.com/akha-security/akca/releases/tag/v0.1.6
+[0.1.5]: https://github.com/akha-security/akca/releases/tag/v0.1.5
+[0.1.4]: https://github.com/akha-security/akca/releases/tag/v0.1.4
+[0.1.3]: https://github.com/akha-security/akca/releases/tag/v0.1.3
+[0.1.2]: https://github.com/akha-security/akca/releases/tag/v0.1.2
+[0.1.1]: https://github.com/akha-security/akca/releases/tag/v0.1.1
 [0.1.0]: https://github.com/akha-security/akca/releases/tag/v0.1.0
+
