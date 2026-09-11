@@ -536,11 +536,7 @@ func TestCLIEndToEndPassiveScanWritesReport(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	previousDataDir, err := storage.ResolveDataDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	storage.SetDataDirOverride(t.TempDir())
+	previousDataDir := storage.SetDataDirOverride(t.TempDir())
 	defer storage.SetDataDirOverride(previousDataDir)
 
 	reportPath := filepath.Join(t.TempDir(), "reports", "passive.json")

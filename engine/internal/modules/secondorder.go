@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 
-	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/verification"
 )
 
@@ -47,11 +46,6 @@ func (r *Runner) runSecondOrder(ctx context.Context, target ScanTarget) []Module
 		return nil
 	}
 	var out []ModuleFinding
-	baseline := httpclient.RequestResponse{
-		Response: httpclient.ResponseRecord{
-			StatusCode: 200, Body: "", Headers: map[string]string{"Content-Type": "text/html"},
-		},
-	}
 
 	r.storedMu.Lock()
 	storedCopy := make(map[string]string, len(r.stored))
@@ -73,23 +67,24 @@ func (r *Runner) runSecondOrder(ctx context.Context, target ScanTarget) []Module
 		domExecuted := false
 		if r.browser != nil && rr.Request.Method == "GET" && target.EndpointURL != "" {
 			rendered, renderErr := r.browser.Render(ctx, target.EndpointURL)
-			domExecuted = renderErr == nil && (strings.Contains(rendered, marker) || verification.CheckDOMExecution(rendered))
+			domExecuted = renderErr == nil && verification.CheckDOMExecution(rendered) &&
+				!verification.CheckDOMExecution(body)
 		}
 
-		isExecutable := domExecuted || xssExecutableReflection(body, marker) || strings.Contains(body, "<script>") || strings.Contains(body, "onerror=")
-		signal := "cross_endpoint_trigger"
-		if isExecutable {
-			signal = "stored_xss_executable"
+		if !domExecuted {
+			r.emitSkip("second_order", target, "stored marker observed; independent browser execution not confirmed")
+			continue
 		}
+		signal := "stored_xss_executable"
 
 		p := defaultPayload("second_order", "stored_xss_trigger", marker, signal)
-		f := r.verifyAndBuildWithCandidate(ctx, "second_order", target, p, baseline, rr, signal, isExecutable, domExecuted, "", marker, func(c *verification.Candidate) {
+		// The native read is the pre-render baseline. The browser is the independent
+		// execution observation; do not fabricate a pre-injection empty response.
+		f := r.verifyAndBuildWithCandidate(ctx, "second_order", target, p, rr, rr, signal, true, domExecuted, "", marker, func(c *verification.Candidate) {
 			c.DirectTypedSignal = true
 			c.ProofPolicyVersion = verification.CurrentProofPolicyVersion
 			c.RequestedProofType = verification.ProofStoredExecution
-			c.Observations = append(c.Observations,
-				r.observation("second_order", target, verification.RolePositiveProbe, 1, rr),
-			)
+			c.ExpectedEquivalent = true
 		})
 
 		if f != nil {

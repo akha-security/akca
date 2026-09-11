@@ -2,8 +2,12 @@ package modules
 
 import (
 	"context"
+	"fmt"
+	"github.com/akha-security/akca/engine/internal/httpclient"
+
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -32,5 +36,29 @@ func TestParserDifferentialDoesNotMutateStateChangingEndpoint(t *testing.T) {
 	}
 	if got := requests.Load(); got != 0 {
 		t.Fatalf("parser differential sent %d state-changing requests", got)
+	}
+}
+
+func TestParserDifferentialPrivateCanaryBoundary(t *testing.T) {
+	const canary = "private-parser-canary-81439"
+	for _, deniedStatus := range []int{403, 200} {
+		t.Run(fmt.Sprint(deniedStatus), func(t *testing.T) {
+			c := auditDoer(func(_ context.Context, m, u string, b []byte, h map[string]string) (httpclient.RequestResponse, error) {
+				status, body := 200, `{"role":"user","message":"public data"}`
+				if strings.Count(string(b), `"role"`) == 2 {
+					body = `{"secret":"` + canary + `"}`
+				} else if strings.Contains(string(b), `"admin"`) {
+					status = deniedStatus
+					body = `{"error":"denied"}`
+				}
+				return httpclient.RequestResponse{Request: httpclient.RequestRecord{Method: m, URL: u, Body: string(b), Headers: h}, Response: httpclient.ResponseRecord{StatusCode: status, Body: body, Headers: map[string]string{"Content-Type": "application/json"}}}, nil
+			})
+			r := newActiveRunner(t, c)
+			r.cfg.ContentProofPolicies = []config.ContentProofPolicy{{ID: "parser", Module: "parser_differential", URLContains: "/api", PrivateCanary: canary}}
+			fs := r.runParserDifferential(context.Background(), ScanTarget{EndpointURL: "https://example.com/api", Method: "GET", BodyTemplate: `{"role":"user"}`, Location: "json"})
+			if (len(fs) > 0) != (deniedStatus == 403) {
+				t.Fatalf("status %d yielded %d findings", deniedStatus, len(fs))
+			}
+		})
 	}
 }

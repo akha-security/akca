@@ -109,7 +109,7 @@ func moduleSignalConfirmed(
 	case "blind_xss":
 		return false
 	case "open_redirect":
-		return openRedirectHeaderConfirmed(probeHeaders, signal)
+		return (probeStatus == 301 || probeStatus == 302 || probeStatus == 303 || probeStatus == 307 || probeStatus == 308) && openRedirectHeaderConfirmed(probeHeaders, signal)
 	case "host_header":
 		return hostHeaderSignal(body, baseBody)
 	case "host_poisoning":
@@ -124,7 +124,7 @@ func moduleSignalConfirmed(
 		}
 		return false
 	case "cors":
-		return corsSignalConfirmed(baseHeaders, probeHeaders, signal, p.Value)
+		return probeStatus >= 200 && probeStatus < 300 && corsSignalConfirmed(baseHeaders, probeHeaders, signal, p.Value)
 	case "secret_exposure":
 		return secretExposureConfirmed(body, baseBody, signal)
 	case "sensitive_data":
@@ -145,6 +145,9 @@ func moduleSignalConfirmed(
 	case "security_headers", "cookie_security", "tls_misconfig", "api_exposure", "api_versioning":
 		return probeStatus >= 200 && probeStatus < 400
 	case "llm_injection":
+		if signal == "llm_private_canary_disclosure" {
+			return len(p.ExpectedSignal) >= 12 && !strings.Contains(p.Value, p.ExpectedSignal) && !strings.Contains(baseBody, p.ExpectedSignal) && probeStatus == 200 && strings.Contains(extractLLMCompletionOrSanitizedText(body), p.ExpectedSignal)
+		}
 		pr := llmProbe{
 			payload:     p.Value,
 			signal:      signal,
@@ -235,6 +238,9 @@ func moduleSignalConfirmed(
 		return signal == "retrieved_hash_confirmed" && probeStatus == 200 &&
 			p.Value != "" && strings.Contains(body, p.Value)
 	case "second_order":
+		if signal == "stored_xss_executable" {
+			return domExecuted && p.Value != "" && strings.Contains(body, p.Value)
+		}
 		if p.Value != "" && strings.Contains(body, p.Value) && !strings.Contains(baseBody, p.Value) {
 			return true
 		}
@@ -274,15 +280,15 @@ func moduleSignalConfirmed(
 	case "proxy_path_confusion":
 		return probeStatus == 200 && (baseStatus == 401 || baseStatus == 403)
 	case "ws_cswsh":
-		return probeStatus == 101
+		return signal == "browser_private_read" && probeStatus == 101
 	case "jsonp_callback":
-		return probeStatus == 200 && strings.Contains(body, p.Value)
+		return signal == "browser_private_read" && probeStatus == 200 && strings.Contains(body, p.Value)
 	case "react_rsc_rce":
 		return false
 	case "server_side_js_injection":
 		return ssjsSignalConfirmed(body, baseBody, signal, probeStatus, baseStatus)
 	case "csti_detection":
-		return cstiSignalConfirmed(body, baseBody, p.Value, signal, probeStatus)
+		return domExecuted && signal == "angular_dom_execution" && probeStatus == 200
 	case "swagger_exposure":
 		return swaggerExposureSignalConfirmed(signal, body, probeStatus)
 	case "sensitive_file_discovery":
@@ -302,8 +308,12 @@ func moduleSignalConfirmed(
 	case "csrf":
 		return signal == "cross_site_state_mutation" && probeStatus >= 200 && probeStatus < 300 &&
 			resourceFingerprint(body) != resourceFingerprint(baseBody)
+	case "prototype_pollution":
+		if strings.HasPrefix(signal, "client_") || signal == "prototype_behavior_change" || signal == "prototype_error_disclosure" {
+			return false
+		}
+		return differentialWithStatusGuard(body, baseBody, p.Value, probeStatus, baseStatus)
 	case "account_enum",
-		"prototype_pollution",
 		"wordpress_fuzz", "websocket",
 		"cloud_posture",
 		"source_code_disclosure", "script_source",
@@ -467,15 +477,7 @@ func xxeSignalConfirmed(body, baseline, signal string) bool {
 }
 
 func openRedirectHeaderConfirmed(headers map[string]string, signal string) bool {
-	loc := headerCI(headers, "Location")
-	if loc == "" {
-		return false
-	}
-	low := strings.ToLower(loc)
-	if strings.Contains(low, "evil.example") {
-		return true
-	}
-	return signal == "javascript_uri" && strings.HasPrefix(low, "javascript:")
+	return redirectDestinationIsCanary(headerCI(headers, "Location"))
 }
 
 func corsSignalConfirmed(baseHeaders, probeHeaders map[string]string, signal, origin string) bool {
@@ -490,8 +492,8 @@ func corsSignalConfirmed(baseHeaders, probeHeaders map[string]string, signal, or
 	switch signal {
 	case "null_origin":
 		return strings.EqualFold(acao, "null")
-	case "origin_reflection", "partial_origin_match", "pre_domain_match", "protocol_downgrade", "trusted_subdomain",
-		"localhost_origin", "cloud_metadata_origin", "intranet_origin":
+	case "origin_reflection", "partial_origin_match", "pre_domain_match", "protocol_downgrade",
+		"localhost_origin", "cloud_metadata_origin", "intranet_origin", "unquoted_regex_dot_bypass", "special_char_bypass":
 		return acao == origin
 	case "private_network_access":
 		pna := headerCI(probeHeaders, "Access-Control-Allow-Private-Network")

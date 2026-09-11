@@ -164,9 +164,9 @@ VALUES (?, ?)`, name, string(b))
 func (db *DB) LoadLearningProfile(domain, endpointURL string) (LearningProfileData, error) {
 	row := db.conn.QueryRow(`
 SELECT profile_json FROM learning_profiles
-WHERE domain = ? AND (endpoint_url = ? OR endpoint_url IS NULL OR endpoint_url = '')
-ORDER BY CASE WHEN endpoint_url = ? THEN 0 ELSE 1 END, id DESC
-LIMIT 1`, domain, endpointURL, endpointURL)
+WHERE domain = ? AND COALESCE(endpoint_url, '') = ?
+ORDER BY id DESC
+LIMIT 1`, domain, endpointURL)
 	var raw string
 	if err := row.Scan(&raw); err != nil {
 		return LearningProfileData{}, nil
@@ -188,10 +188,13 @@ VALUES (?, ?, ?)`, domain, endpointURL, string(b))
 }
 
 type LearningProfileData struct {
-	Worked        []string `json:"worked"`
-	Blocked       []string `json:"blocked"`
-	Noisy         []string `json:"noisy"`
-	FalsePositive []string `json:"false_positive"`
+	OutcomeCounts map[string]map[string]int `json:"outcome_counts,omitempty"`
+	Stability     map[string]int            `json:"stability,omitempty"`
+	WAFBlocks     map[string]int            `json:"waf_blocks,omitempty"`
+	Worked        []string                  `json:"worked"`
+	Blocked       []string                  `json:"blocked"`
+	Noisy         []string                  `json:"noisy"`
+	FalsePositive []string                  `json:"false_positive"`
 }
 
 func (db *DB) GetTechFingerprint(scanID, host string) (TechFingerprintData, error) {

@@ -11,6 +11,7 @@ import (
 type ObservationRole string
 
 const (
+	RoleCrossOriginRead       ObservationRole = "cross_origin_read"
 	RoleNativeBaseline        ObservationRole = "native_baseline"
 	RoleBaselineReplay        ObservationRole = "baseline_replay"
 	RolePositiveProbe         ObservationRole = "positive_probe"
@@ -35,6 +36,8 @@ const (
 // externally received callback. IDs include the role and attempt so copied
 // response values cannot masquerade as independent executions.
 type Observation struct {
+	BrowserRead     bool            `json:"browser_read,omitempty"`
+	BrowserData     string          `json:"browser_data,omitempty"`
 	ID              string          `json:"id"`
 	ScanID          string          `json:"scan_id"`
 	Module          string          `json:"module"`
@@ -69,7 +72,7 @@ func NewHTTPObservation(scanID, module, endpoint, parameter, location string, ro
 	requestURL = strings.TrimSpace(requestURL)
 	reqHash := hashParts(method, requestURL, requestBody, canonicalHeaders(requestHeaders))
 	respHash := hashParts(response.Body)
-	normHash := hashParts(NormalizeVolatileFields(response.Body))
+	normHash := ProofResponseHash(module, response)
 	id := hashParts(scanID, module, endpoint, parameter, location, string(role),
 		intString(attempt), reqHash, respHash)
 	return Observation{
@@ -79,6 +82,30 @@ func NewHTTPObservation(scanID, module, endpoint, parameter, location string, ro
 		ResponseHash: respHash, NormalizedHash: normHash, StatusCode: response.StatusCode,
 		ContentType: response.ContentType, DurationMs: response.DurationMs, CreatedAt: time.Now().UTC(),
 	}
+}
+
+// ProofResponseHash includes the status and the security-bearing headers for
+// the module. Volatile transport headers (Date, request IDs, etc.) are excluded.
+// The version tag prevents old body-only observations from matching by accident.
+func ProofResponseHash(module string, response ResponseSnapshot) string {
+	selected := map[string]string{}
+	for name, value := range response.Headers {
+		key := strings.ToLower(name)
+		keep := key == "content-type"
+		switch module {
+		case "cors":
+			keep = keep || strings.HasPrefix(key, "access-control-") || key == "vary"
+		case "open_redirect", "oauth", "host_header", "host_poisoning":
+			keep = keep || key == "location" || key == "refresh"
+		case "crlf", "security_headers", "cookie_security":
+			keep = key != "date" && key != "content-length" && key != "x-request-id"
+		}
+		if keep {
+			selected[key] = strings.TrimSpace(value)
+		}
+	}
+	return hashParts("proof-response-v2", intString(response.StatusCode),
+		NormalizeVolatileFields(response.Body), canonicalHeaders(selected))
 }
 
 func NewOASTObservation(scanID, module, endpoint, parameter, location, payloadID, callbackURL string,
@@ -106,6 +133,9 @@ func (o Observation) Valid() bool {
 		strings.TrimSpace(o.Module) == "" || strings.TrimSpace(o.Endpoint) == "" ||
 		strings.TrimSpace(string(o.Role)) == "" || o.Attempt <= 0 || o.CreatedAt.IsZero() {
 		return false
+	}
+	if o.BrowserRead {
+		return (o.Role == RoleCrossOriginRead || o.Role == RoleNegativeControl) && o.ResponseHash == hashParts(o.BrowserData)
 	}
 	if o.Role == RoleOASTCallback {
 		return strings.TrimSpace(o.OASTPayloadID) != "" && strings.TrimSpace(o.RequestURL) != ""
@@ -179,4 +209,10 @@ func intString(v int) string {
 		v /= 10
 	}
 	return string(buf[i:])
+}
+
+// NewBrowserReadObservation records actual script-visible data, without
+// presenting it as an HTTP response. Raw data is retained as proof.
+func NewBrowserReadObservation(scanID, module, endpoint string, role ObservationRole, attempt int, data string) Observation {
+	return Observation{ID: hashParts(scanID, module, endpoint, string(role), intString(attempt), data), ScanID: scanID, Module: module, Endpoint: endpoint, Role: role, Attempt: attempt, BrowserRead: true, BrowserData: data, ResponseHash: hashParts(data), CreatedAt: time.Now().UTC()}
 }

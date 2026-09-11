@@ -9,6 +9,7 @@ import (
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/urlutil"
+	"github.com/akha-security/akca/engine/internal/verification"
 )
 
 type routeVariant struct {
@@ -38,6 +39,10 @@ func (r *Runner) runRouteAuthBypass(ctx context.Context, target ScanTarget) []Mo
 	method := strings.ToUpper(strings.TrimSpace(target.Method))
 	if method == "" {
 		method = http.MethodGet
+	}
+	if method != "GET" && method != "HEAD" && method != "OPTIONS" {
+		r.emitSkip("route_auth_bypass", target, "route proof requires a read-only endpoint")
+		return nil
 	}
 	// Route auth bypass is evaluated with anonymous/sessionless requests to observe
 	// reverse-proxy vs backend normalization discrepancy.
@@ -71,6 +76,11 @@ func (r *Runner) runRouteAuthBypass(ctx context.Context, target ScanTarget) []Mo
 		return nil
 	}
 
+	// Bind a bypass to the exact private resource, not any different public page.
+	owner, ownerErr := r.client.Do(ctx, method, targetURL, nil, nil)
+	canary := r.privateCanary("route_auth_bypass", target)
+	ownerOK := ownerErr == nil && successfulResourceResponse(owner.Response) &&
+		!anonymousExposesSameResource(baselineRR.Response, owner.Response)
 	// Step 2: Negative Control (Catch-All / Soft 404 Guard)
 	// Probe a guaranteed non-existent sibling route to ensure server doesn't blindly return 200 for everything.
 	nonexistentURL := buildNonexistentProbeURL(u)
@@ -126,13 +136,21 @@ func (r *Runner) runRouteAuthBypass(ctx context.Context, target ScanTarget) []Mo
 			}
 		}
 
+		bound := ownerOK && sameResourceFingerprint(owner.Response.Body, probeRR.Response.Body)
+		if canary != "" && !strings.Contains(baselineRR.Response.Body, canary) && strings.Contains(probeRR.Response.Body, canary) {
+			bound = true
+		}
+		if !bound {
+			r.emitDiscovery("route_auth_bypass", target, v.technique, "Alternate route observed without private-resource identity proof")
+			continue
+		}
 		// Dual Replay Confirmation: Replay probe twice to ensure it's not a flaky network/race response
 		replay1, err1 := client.DoWithoutSession(ctx, method, v.url, nil, v.headers)
-		if err1 != nil || !isRouteBypassSuccessful(replay1.Response, baselineRR.Response) {
+		if err1 != nil || (!isRouteBypassSuccessful(replay1.Response, baselineRR.Response) || !sameResourceFingerprint(probeRR.Response.Body, replay1.Response.Body)) {
 			continue
 		}
 		replay2, err2 := client.DoWithoutSession(ctx, method, v.url, nil, v.headers)
-		if err2 != nil || !isRouteBypassSuccessful(replay2.Response, baselineRR.Response) {
+		if err2 != nil || (!isRouteBypassSuccessful(replay2.Response, baselineRR.Response) || !sameResourceFingerprint(probeRR.Response.Body, replay2.Response.Body)) {
 			continue
 		}
 
@@ -142,17 +160,21 @@ func (r *Runner) runRouteAuthBypass(ctx context.Context, target ScanTarget) []Mo
 		}
 
 		p := defaultPayload("route_auth_bypass", v.technique, v.url, v.technique)
-		f := r.verifyAndBuild(ctx, "route_auth_bypass", target, p, baselineRR, probeRR,
-			v.technique, false, false, "", "")
+		f := r.verifyAndBuildWithCandidate(ctx, "route_auth_bypass", target, p, baselineRR, probeRR,
+			v.technique, false, false, "", "", func(c *verification.Candidate) {
+				c.RequestedProofType = verification.ProofDifferentialReplay
+				c.NegativeControlSet = true
+				c.NegativeControlOK = true
+				c.TypedReplayHits = []bool{true, true, true}
+				c.Observations = append(c.Observations, r.observation("route_auth_bypass", target, verification.RoleNegativeControl, 1, baselineRR), r.observation("route_auth_bypass", target, verification.RolePositiveReplay, 2, replay1), r.observation("route_auth_bypass", target, verification.RolePositiveReplay, 3, replay2))
+			})
 
 		if f != nil {
 			f.Title = "Route Authentication Bypass: Proxy/Normalization Discrepancy (" + v.technique + ")"
 			f.Description = fmt.Sprintf("An access-controlled endpoint (%s) returning HTTP %d was successfully bypassed using path normalization variation (%s), granting unauthorized access to private application resources.",
 				targetURL, baselineRR.Response.StatusCode, v.url)
 			f.Severity = "High"
-			if strings.Contains(strings.ToLower(targetURL), "admin") || strings.Contains(strings.ToLower(targetURL), "internal") {
-				f.Severity = "Critical"
-			}
+
 		}
 		r.recordFinding(ctx, &out, f, "route_auth_bypass", v.technique)
 		// One solid, confirmed finding per endpoint is sufficient

@@ -150,6 +150,7 @@ func (r *Runner) cleanupStatefulSecurityProof(ctx context.Context, client profil
 }
 
 func (r *Runner) emitStatefulProofGap(module string, target ScanTarget, reason string) {
+	target.coverage.skipped(reason)
 	r.emitOnce("stateful-proof-gap:"+module+":"+target.EndpointURL, "coverage_gap",
 		"Stateful proof coverage requires an explicit reversible policy",
 		map[string]interface{}{

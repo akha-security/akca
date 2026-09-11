@@ -25,10 +25,13 @@ func BootstrapDataDir() (string, error) {
 	return ResolveDataDir()
 }
 
-func SetDataDirOverride(dir string) {
+// SetDataDirOverride returns the previous override without creating directories.
+func SetDataDirOverride(dir string) string {
 	dataDirMu.Lock()
 	defer dataDirMu.Unlock()
+	previous := dataDirOverride
 	dataDirOverride = strings.TrimSpace(dir)
+	return previous
 }
 
 func ResolveDataDir() (string, error) {

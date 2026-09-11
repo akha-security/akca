@@ -1182,12 +1182,32 @@ function showToast(msg) {
 }
 
 function copyToClipboard(btn, text) {
-    if (!text && btn) {
-        const target = btn.getAttribute('data-copy') || (btn.nextElementSibling ? btn.nextElementSibling.textContent : '');
-        text = target;
+    if (text == null && btn) {
+        const explicit = btn.getAttribute('data-copy');
+        const header = btn.closest('.code-header');
+        const block = header ? header.nextElementSibling : btn.nextElementSibling;
+        text = explicit !== null ? explicit : (block ? block.textContent : '');
     }
-    if (!text) return;
-    navigator.clipboard.writeText(text).then(() => {
+    if (text == null || text === '') { showToast('Nothing to copy'); return; }
+    const fallback = () => {
+        const field = document.createElement('textarea');
+        field.value = text;
+        field.style.position = 'fixed';
+        field.style.opacity = '0';
+        const previous = document.activeElement;
+        document.body.appendChild(field);
+        try {
+            field.select();
+            if (!document.execCommand('copy')) throw new Error('Copy unavailable');
+        } finally {
+            field.remove();
+            if (previous && previous.focus) previous.focus();
+        }
+    };
+    const operation = navigator.clipboard && navigator.clipboard.writeText
+        ? Promise.resolve().then(() => navigator.clipboard.writeText(text)).catch(fallback)
+        : Promise.resolve().then(fallback);
+    return operation.then(() => {
         if (btn) {
             const orig = btn.innerHTML;
             btn.innerHTML = '✓ Copied!';

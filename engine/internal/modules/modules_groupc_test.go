@@ -227,20 +227,20 @@ func TestCORSCloudMetadataSSRF(t *testing.T) {
 		},
 	}
 	target := ScanTarget{EndpointURL: "http://example.com/api/data", Method: "GET", Parameter: "q"}
-	findings := groupCRunner(t, c).runCORS(context.Background(), target)
-	if len(findings) == 0 {
-		t.Fatal("expected cors cloud metadata finding")
-	}
-	found := false
-	for _, f := range findings {
-		if f.Severity == "critical" && strings.Contains(f.Title, "Cloud Metadata") {
-			found = true
-			break
+
+	r := groupCRunner(t, c)
+	discovered := false
+	r.emit = func(kind, _ string, p map[string]interface{}) error {
+		if kind == "module_discovery" && p["signal"] == "internal_origin_allowed" {
+			discovered = true
 		}
+		return nil
 	}
-	if !found {
-		t.Fatalf("expected critical cloud metadata CORS finding, got: %+v", findings)
+	findings := r.runCORS(context.Background(), target)
+	if len(findings) != 0 || !discovered {
+		t.Fatalf("metadata origin must be discovery, got %d findings, discovery=%v", len(findings), discovered)
 	}
+
 }
 
 func TestCORSPrivateNetworkAccess(t *testing.T) {
@@ -257,17 +257,25 @@ func TestCORSPrivateNetworkAccess(t *testing.T) {
 		},
 	}
 	target := ScanTarget{EndpointURL: "http://example.com/api/data", Method: "GET", Parameter: "q"}
-	findings := groupCRunner(t, c).runCORS(context.Background(), target)
-	found := false
+
+	r := groupCRunner(t, c)
+	discovered := false
+	r.emit = func(kind, _ string, p map[string]interface{}) error {
+		if kind == "module_discovery" && p["signal"] == "private_network_access" {
+			discovered = true
+		}
+		return nil
+	}
+	findings := r.runCORS(context.Background(), target)
+	if !discovered {
+		t.Fatal("expected PNA capability discovery")
+	}
 	for _, f := range findings {
-		if strings.Contains(f.Title, "Private Network Access") {
-			found = true
-			break
+		if f.Evidence.Signal == "private_network_access" {
+			t.Fatal("PNA header alone is not private network access proof")
 		}
 	}
-	if !found {
-		t.Fatalf("expected PNA CORS finding, got: %+v", findings)
-	}
+
 }
 
 func TestCORSProbePreservesRequestTemplate(t *testing.T) {

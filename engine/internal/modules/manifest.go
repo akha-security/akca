@@ -397,6 +397,7 @@ func isCriticalOrHighModule(name string) bool {
 }
 
 func (r *Runner) emitSkip(module string, target ScanTarget, reason string) {
+	target.coverage.skipped(reason)
 	if r.emit != nil {
 		_ = r.emit("plugin_skipped", reason, map[string]interface{}{
 			"module": module, "endpoint": target.EndpointURL, "parameter": target.Parameter, "reason": reason,

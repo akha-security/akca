@@ -269,7 +269,7 @@ func (r *Runner) verifyAndBuildWithCandidate(ctx context.Context, module string,
 	confStr := string(result.Confidence)
 	if shouldSuppressLowConfidence(module, signal, result.Score, confStr) {
 		if !domExecuted {
-			r.recordLearning(target.EndpointURL, module, learning.OutcomeFalsePositive)
+			r.recordLearning(target.EndpointURL, module, learning.OutcomeInconclusive)
 			return nil
 		}
 	}
@@ -348,7 +348,7 @@ func buildReplayPlan(module string, target ScanTarget, baseline, probe httpclien
 }
 
 func (r *Runner) recordVerificationOutcome(endpointURL, module string, result verification.Result) {
-	outcome := learning.OutcomeFalsePositive
+	outcome := learning.OutcomeInconclusive
 	for _, reason := range result.DowngradeReasons {
 		switch reason {
 		case verification.ReasonWAFBlockPage:

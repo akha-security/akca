@@ -2,7 +2,6 @@ package modules
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/oast"
@@ -68,8 +67,10 @@ func (r *Runner) runXSS(ctx context.Context, target ScanTarget) []ModuleFinding 
 		}
 		marker := ""
 		if target.Profile.Stable && target.Profile.ReflectionKind == reflection.ReflectionRaw {
-			marker = fmt.Sprintf("akca-stored-%s-%s", target.Parameter, r.scanID)
-			r.trackStoredMarker(target.EndpointURL, target.Parameter, marker)
+			if domErr == nil {
+				marker = domPayload
+				r.trackStoredMarker(target.EndpointURL, target.Parameter, marker)
+			}
 			if signal == "reflected" {
 				signal = "stored_tracking"
 			}

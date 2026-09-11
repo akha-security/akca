@@ -51,6 +51,7 @@ type SmugglingProber interface {
 }
 
 type ScanTarget struct {
+	coverage           *targetRun
 	EndpointURL        string
 	Method             string
 	Parameter          string
@@ -174,7 +175,7 @@ func (r *Runner) ProbeCount() int64 {
 func NewRunner(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *storage.DB,
 	verifier *verification.Engine, oastClient OASTClient, emit EventSink, cfg config.ScanConfig, opts ...RunnerOption) *Runner {
 	r := &Runner{
-		scanID: scanID, client: client, scope: scopeEngine, db: db,
+		scanID: scanID, client: observeHTTP(client), scope: scopeEngine, db: db,
 		verifier: verifier, oast: oastClient, emit: emit, cfg: cfg,
 		stored:          make(map[string]string),
 		baselineCache:   make(map[string]httpclient.RequestResponse),
@@ -200,6 +201,11 @@ func NewRunner(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *st
 			"logic_auth":      new(atomic.Int64),
 			"client_exposure": new(atomic.Int64),
 		}
+	}
+	if guard, ok := client.(interface {
+		ReserveExternal(context.Context, string, string) error
+	}); ok {
+		cfg.NetworkRequestGuard = guard.ReserveExternal
 	}
 	r.tlsInspector = newNetworkTLSInspector(cfg)
 	r.websocket = newNetworkWebSocketProber(cfg, scopeEngine)

@@ -90,6 +90,9 @@ func (c *Client) LogicalProbes() int64 {
 }
 
 func New(cfg config.ScanConfig, scopeEngine *scope.Engine, limiter *ratelimit.Limiter) (*Client, error) {
+	if limiter == nil {
+		limiter = ratelimit.New(cfg.GlobalRateLimit, cfg.PerHostRateLimit)
+	}
 	proxyURL, err := config.NormalizeProxyURL(cfg.ProxyURL)
 	if err != nil {
 		return nil, err

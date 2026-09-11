@@ -1,8 +1,10 @@
 package httpclient
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sync/atomic"
 
 	"github.com/akha-security/akca/engine/internal/ratelimit"
@@ -29,21 +31,56 @@ func NewWireTransport(base http.RoundTripper, limiter *ratelimit.Limiter, counte
 }
 
 func (w *WireTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if w.networkAttempts != nil {
-		attempts := w.networkAttempts.Add(1)
-		if w.maxBudget > 0 && attempts > int64(w.maxBudget) {
-			return nil, fmt.Errorf("global request budget exhausted after %d requests", w.maxBudget)
+	if err := reserveNetwork(req.Context(), req.URL, w.limiter, w.networkAttempts, w.maxBudget); err != nil {
+		return nil, err
+	}
+	return w.base.RoundTrip(req)
+}
+
+func reserveNetwork(ctx context.Context, u *url.URL, limiter *ratelimit.Limiter, counter *atomic.Int64, maxBudget int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if counter != nil && maxBudget > 0 && counter.Load() >= int64(maxBudget) {
+		return fmt.Errorf("global request budget exhausted after %d requests", maxBudget)
+	}
+	if limiter != nil && u != nil && u.Hostname() != "" {
+		if err := limiter.WaitContext(ctx, u.Hostname()); err != nil {
+			return err
 		}
 	}
-
-	if w.limiter != nil && req.URL != nil {
-		host := req.URL.Hostname()
-		if host != "" {
-			if err := w.limiter.WaitContext(req.Context(), host); err != nil {
-				return nil, err
+	if counter != nil {
+		for {
+			n := counter.Load()
+			if maxBudget > 0 && n >= int64(maxBudget) {
+				return fmt.Errorf("global request budget exhausted after %d requests", maxBudget)
+			}
+			if counter.CompareAndSwap(n, n+1) {
+				break
 			}
 		}
 	}
+	return nil
+}
 
-	return w.base.RoundTrip(req)
+// ReserveExternal accounts for raw protocol and browser requests using the same
+// atomic budget and host limiter as HTTP retries and redirects.
+func (c *Client) ReserveExternal(ctx context.Context, rawURL, transport string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+	if u.Scheme == "ws" {
+		u.Scheme = "http"
+	}
+	if u.Scheme == "wss" {
+		u.Scheme = "https"
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("invalid %s target", transport)
+	}
+	if c.scope != nil && !c.scope.IsInScope(u.String()) {
+		return fmt.Errorf("%s target is outside scan scope", transport)
+	}
+	return reserveNetwork(ctx, u, c.limiter, &c.networkAttempts, c.cfg.RequestBudget)
 }

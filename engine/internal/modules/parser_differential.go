@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/urlutil"
+	"github.com/akha-security/akca/engine/internal/verification"
 )
 
 func (r *Runner) runParserDifferential(ctx context.Context, target ScanTarget) []ModuleFinding {
@@ -70,6 +71,17 @@ func (r *Runner) probeJSONDuplicateKeyDifferential(ctx context.Context, target S
 		!authDeniedBody(strings.ToLower(diffRR.Response.Body)) &&
 		len(strings.TrimSpace(diffRR.Response.Body)) > 20 {
 
+		canary := r.privateCanary("parser_differential", target)
+		if canary == "" || strings.Contains(duplicateKeyBody, canary) || strings.Contains(baselineRR.Response.Body, canary) || !strings.Contains(diffRR.Response.Body, canary) {
+			r.emitDiscovery("parser_differential", target, "duplicate_key_accepted", "Duplicate JSON keys accepted; no security boundary violation proven")
+			return nil
+		}
+		allowed, e1 := r.client.Do(ctx, method, targetURL, []byte(`{"role":"user","access":"restricted"}`), headers)
+		denied, e2 := r.client.Do(ctx, method, targetURL, []byte(`{"role":"admin","access":"granted"}`), headers)
+		if e1 != nil || e2 != nil || allowed.Response.StatusCode != 200 || (denied.Response.StatusCode != 401 && denied.Response.StatusCode != 403) ||
+			strings.Contains(allowed.Response.Body, canary) || strings.Contains(denied.Response.Body, canary) {
+			return nil
+		}
 		// Replay confirmation
 		replayRR, replayErr := r.client.Do(ctx, method, targetURL, []byte(duplicateKeyBody), headers)
 		if replayErr != nil || replayRR.Response.StatusCode != http.StatusOK || replayRR.Response.Body != diffRR.Response.Body {
@@ -77,12 +89,17 @@ func (r *Runner) probeJSONDuplicateKeyDifferential(ctx context.Context, target S
 		}
 
 		p := defaultPayload("parser_differential", "json_duplicate_key", duplicateKeyBody, "duplicate_key_precedence_accepted")
-		f := r.verifyAndBuild(ctx, "parser_differential", target, p, baselineRR, diffRR,
-			"duplicate_key_precedence_accepted", false, false, "", "")
+		f := r.verifyAndBuildWithCandidate(ctx, "parser_differential", target, p, baselineRR, diffRR,
+			"duplicate_key_precedence_accepted", false, false, "", "", func(c *verification.Candidate) {
+				c.NegativeControlSet = true
+				c.NegativeControlOK = true
+				c.TypedReplayHits = []bool{true, true}
+				c.Observations = append(c.Observations, r.observation("parser_differential", target, verification.RoleNegativeControl, 1, allowed), r.observation("parser_differential", target, verification.RoleNegativeControl, 2, denied), r.observation("parser_differential", target, verification.RolePositiveReplay, 2, replayRR))
+			})
 		if f != nil {
 			f.Title = "Parser Differential: Duplicate Key Precedence Discrepancy"
-			f.Description = fmt.Sprintf("The endpoint %s accepted conflicting duplicate JSON keys without rejection, exhibiting last-value precedence that may bypass upstream API gateway validation filters.", targetURL)
-			f.Severity = "Medium"
+			f.Description = fmt.Sprintf("The endpoint %s exposed the declared private canary using conflicting duplicate JSON keys in two requests. The single privileged value was denied, and the baseline and unprivileged control did not expose the canary.", targetURL)
+			f.Severity = "high"
 		}
 		r.recordFinding(ctx, &out, f, "parser_differential", "duplicate_key_precedence_accepted")
 	}

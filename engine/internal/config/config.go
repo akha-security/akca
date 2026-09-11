@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -189,6 +190,16 @@ type CacheDeceptionProofPolicy struct {
 	PrivateCanary string `json:"private_canary"`
 }
 
+// ContentProofPolicy declares a private value already present in the test
+// application. It is never inserted into probes. Seeing a keyword such as
+// "token" or a user-requested output marker is not a confidentiality proof.
+type ContentProofPolicy struct {
+	ID            string `json:"id"`
+	Module        string `json:"module"`
+	URLContains   string `json:"url_contains"`
+	PrivateCanary string `json:"private_canary"`
+}
+
 type HPPProofPolicy struct {
 	ID                   string          `json:"id"`
 	URLContains          string          `json:"url_contains"`
@@ -227,6 +238,7 @@ type ScanConfig struct {
 	SessionLifecycleProofPolicies []SessionLifecycleProofPolicy `json:"session_lifecycle_proof_policies,omitempty"`
 	FileUploadProofPolicies       []FileUploadProofPolicy       `json:"file_upload_proof_policies,omitempty"`
 	CacheDeceptionProofPolicies   []CacheDeceptionProofPolicy   `json:"cache_deception_proof_policies,omitempty"`
+	ContentProofPolicies          []ContentProofPolicy          `json:"content_proof_policies,omitempty"`
 	HPPProofPolicies              []HPPProofPolicy              `json:"hpp_proof_policies,omitempty"`
 	ProxyURL                      string                        `json:"proxy_url,omitempty"`
 	ScanIntensity                 string                        `json:"scan_intensity"`
@@ -303,7 +315,9 @@ type ScanConfig struct {
 	InsecureSkipVerify bool `json:"insecure_skip_verify"`
 	// LoginCredentials triggers automated form login before crawling when populated.
 	LoginCredentials *LoginCredentials `json:"login_credentials,omitempty"`
-	// TestRoundTripper is used by integration tests to route lab hostnames to local httptest servers.
+	// NetworkRequestGuard is installed at runtime; it is not user configuration.
+	NetworkRequestGuard func(context.Context, string, string) error `json:"-"`
+	// TestRoundTripper routes integration test hostnames to local servers.
 	TestRoundTripper http.RoundTripper `json:"-"`
 	// SkipAutoReport lets CLI callers avoid the pipeline's internal JSON report
 	// when they will immediately export the requested final format themselves.
@@ -702,6 +716,18 @@ func (c *ScanConfig) Validate() error {
 		if policy.ID == "" || policy.URLContains == "" || policy.PrivateCanary == "" {
 			return fmt.Errorf("cache_deception_proof_policies[%d] is incomplete", index)
 		}
+	}
+	seenContentPolicies := map[string]bool{}
+	for index, policy := range c.ContentProofPolicies {
+		if policy.ID == "" || seenContentPolicies[policy.ID] || policy.URLContains == "" || len(strings.TrimSpace(policy.PrivateCanary)) < 12 {
+			return fmt.Errorf("content_proof_policies[%d] requires a unique id, URL match and private canary of at least 12 characters", index)
+		}
+		switch policy.Module {
+		case "llm_injection", "parser_differential", "route_auth_bypass", "jsonp_callback", "ws_cswsh":
+		default:
+			return fmt.Errorf("content proof policy %q has an unsupported module", policy.ID)
+		}
+		seenContentPolicies[policy.ID] = true
 	}
 	for index, policy := range c.HPPProofPolicies {
 		if policy.ID == "" || policy.URLContains == "" || policy.AuthProfileID == "" ||

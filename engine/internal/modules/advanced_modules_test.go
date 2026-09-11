@@ -184,11 +184,8 @@ func TestCrossSiteWebSocketHijacking(t *testing.T) {
 	target := ScanTarget{EndpointURL: "https://example.com/ws/chat", Method: "GET"}
 	findings := r.runCrossSiteWebSocketHijack(context.Background(), target)
 
-	if len(findings) == 0 {
-		t.Fatal("expected CSWSH finding")
-	}
-	if !strings.Contains(findings[0].Title, "Cross-Site WebSocket Hijacking") {
-		t.Fatalf("unexpected title: %s", findings[0].Title)
+	if len(findings) != 0 {
+		t.Fatal("public upgrade is a discovery, not private access proof")
 	}
 }
 
@@ -245,11 +242,8 @@ func TestJSONPCallback(t *testing.T) {
 	target := ScanTarget{EndpointURL: "https://example.com/api/user?callback=myFunc", Parameter: "callback", Method: "GET"}
 	findings := r.runJSONPCallback(context.Background(), target)
 
-	if len(findings) == 0 {
-		t.Fatal("expected JSONP finding")
-	}
-	if findings[0].Severity != "high" {
-		t.Fatalf("expected high severity due to sensitive user fields, got %s", findings[0].Severity)
+	if len(findings) != 0 {
+		t.Fatal("public user-shaped JSONP data must not produce a vulnerability")
 	}
 }
 

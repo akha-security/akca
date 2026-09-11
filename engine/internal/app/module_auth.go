@@ -29,6 +29,9 @@ func (e *Engine) moduleRunnerOpts() []modules.RunnerOption {
 		)
 		headers, cookies := browserSession(e.session.Config)
 		renderer.SetSession(headers, cookies)
+		if e.client != nil {
+			renderer.SetRequestGuard(e.client.ReserveExternal)
+		}
 		if renderer.Available() {
 			opts = append(opts, modules.WithBrowserRenderer(renderer))
 		}

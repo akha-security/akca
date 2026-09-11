@@ -1,0 +1,41 @@
+=== RUN   TestAuditPublicJSONPProducesHighFinding
+    z_audit_temp_test.go:26: public unauthenticated data => severity=high confidence=HighConfidence title=JSONP Endpoint Callback Wrapper Injection
+--- PASS: TestAuditPublicJSONPProducesHighFinding (0.00s)
+=== RUN   TestAuditLLMRefusalProducesLeakFinding
+    z_audit_temp_test.go:36: refusal without leaked content => severity=high confidence=HighConfidence title=LLM System Prompt Extraction / Disclosure
+--- PASS: TestAuditLLMRefusalProducesLeakFinding (0.00s)
+=== RUN   TestAuditPublicWSWithCustomHeaderProducesHighFinding
+    z_audit_temp_test.go:48: public WS plus Accept-Language => severity=high confidence=HighConfidence title=Cross-Site WebSocket Hijacking (CSWSH) with Ambient Credentials
+--- PASS: TestAuditPublicWSWithCustomHeaderProducesHighFinding (0.00s)
+=== RUN   TestAuditCacheEvidenceAcceptsOrdinarySameSecondResponse
+    z_audit_temp_test.go:54: identical ordinary Date/body, without cache headers => cache hit evidence accepted
+--- PASS: TestAuditCacheEvidenceAcceptsOrdinarySameSecondResponse (0.00s)
+=== RUN   TestAuditSameLengthDifferentBodiesAreSimilar
+    z_audit_temp_test.go:59: 100 A characters and 100 B characters => similar
+--- PASS: TestAuditSameLengthDifferentBodiesAreSimilar (0.00s)
+=== RUN   TestAuditLearning
+    z_audit_temp_test.go:65: 100 false_positive events => rate=0.00
+--- PASS: TestAuditLearning (0.00s)
+=== RUN   TestAuditOrdinaryRouteProducesCriticalBypass
+    z_audit_temp_test.go:80: 404 plus alternate public documentation route => severity=Critical confidence=HighConfidence
+--- PASS: TestAuditOrdinaryRouteProducesCriticalBypass (0.00s)
+=== RUN   TestAuditOrdinaryJSONParserProducesFinding
+    z_audit_temp_test.go:91: normal JSON parser, no gateway or authorization boundary => severity=Medium confidence=HighConfidence
+--- PASS: TestAuditOrdinaryJSONParserProducesFinding (0.00s)
+=== RUN   TestAuditCORSReflectingHTTPOriginsMissed
+    z_audit_temp_test.go:102: reflect arbitrary HTTP(S) Origin with credentials, reject null => zero findings
+--- PASS: TestAuditCORSReflectingHTTPOriginsMissed (0.00s)
+=== RUN   TestAuditSecondOrderExecutionSuppressed
+    z_audit_temp_test.go:113: stored executable payload and browser execution signal => suppressed by invalid proof observations
+--- PASS: TestAuditSecondOrderExecutionSuppressed (0.00s)
+=== RUN   TestAuditReplayHashIgnoresSecurityHeaders
+    z_audit_temp_test.go:120: external redirect and repaired internal redirect have same replay hash: 6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d
+--- PASS: TestAuditReplayHashIgnoresSecurityHeaders (0.00s)
+=== RUN   TestAuditCoverageCountsSkippedTargetAsTested
+    z_audit_temp_test.go:132: missing state/cleanup policy => requests=0 targets_tested=1 coverage=100.0%
+--- PASS: TestAuditCoverageCountsSkippedTargetAsTested (0.00s)
+=== RUN   TestAuditSmugglingProofReplayedAsOrdinaryHTTP
+    z_audit_temp_test.go:145: raw-protocol proof evidence => two ordinary POST replays without attack body => finding suppressed
+--- PASS: TestAuditSmugglingProofReplayedAsOrdinaryHTTP (0.00s)
+PASS
+ok  	github.com/akha-security/akca/engine/internal/modules	0.127s

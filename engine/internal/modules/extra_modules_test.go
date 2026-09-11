@@ -95,11 +95,8 @@ func TestCSTI(t *testing.T) {
 	target := ScanTarget{EndpointURL: "https://example.com/profile?name=guest", Parameter: "name", Method: "GET"}
 	findings := r.runCSTI(context.Background(), target)
 
-	if len(findings) == 0 {
-		t.Fatal("expected CSTI finding")
-	}
-	if !strings.Contains(findings[0].Title, "Client-Side Template Injection") {
-		t.Fatalf("unexpected title: %s", findings[0].Title)
+	if len(findings) != 0 {
+		t.Fatal("HTTP arithmetic output does not prove client-side execution")
 	}
 }
 

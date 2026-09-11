@@ -165,7 +165,7 @@ func TestPositiveProofFamilyMatrix(t *testing.T) {
 		{module: "broken_auth", proofType: ProofAnonymousAccess,
 			roles: []ObservationRole{RoleNativeBaseline, RoleIdentityA, RoleAnonymousProbe, RoleAnonymousProbe}},
 		{module: "second_order", proofType: ProofStoredExecution,
-			roles: []ObservationRole{RoleNativeBaseline, RolePositiveProbe}},
+			roles: []ObservationRole{RoleNativeBaseline, RolePositiveProbe, RoleDOMExecution}, mutate: func(c *Candidate) { c.DOMExecuted = true }},
 		{module: "idor", proofType: ProofIdentityBoundary,
 			roles: []ObservationRole{RoleNativeBaseline, RoleIdentityA, RoleIdentityB, RoleAnonymousControl}},
 		{module: "mass_assignment", proofType: ProofStateMutation,

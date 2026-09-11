@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/verification"
 )
 
 type smugglingVariant struct {
@@ -150,104 +151,117 @@ func (r *Runner) runHTTPSmuggling(ctx context.Context, target ScanTarget) []Modu
 		r.emitSkip("http_smuggling", target, reason)
 		return nil
 	}
-
 	u, err := url.Parse(target.EndpointURL)
-	if err != nil || u.Hostname() == "" {
+	if err != nil || u.Hostname() == "" || !r.scope.IsInScope(target.EndpointURL) {
 		return nil
 	}
-
-	baseline, baselineErr := r.cachedEmptyProbe(ctx, target)
-	if baselineErr != nil || baseline.Response.StatusCode >= 500 {
+	baseline, err := r.cachedEmptyProbe(ctx, target)
+	if err != nil || baseline.Response.StatusCode >= 500 {
 		return nil
 	}
-
-	var out []ModuleFinding
-	host := u.Host
 	path := u.RequestURI()
 	if path == "" {
 		path = "/"
 	}
-
-	port := "80"
-	useTLS := strings.EqualFold(u.Scheme, "https")
-	if useTLS {
-		port = "443"
+	normal := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\n\r\n", path, u.Host)
+	// A clean same-connection sequence is the protocol negative control.
+	control, err := r.rawSmugglingExchange(ctx, target, normal, normal)
+	if err != nil || control.Response.StatusCode < 200 || control.Response.StatusCode >= 400 {
+		return nil
 	}
-	if u.Port() != "" {
-		port = u.Port()
-	}
-	addr := net.JoinHostPort(u.Hostname(), port)
-
+	var out []ModuleFinding
 	for _, variant := range smugglingVariants {
+		// CL:0 followed by a complete GET is ordinary HTTP pipelining. It cannot
+		// establish a proxy/backend parser disagreement by itself.
+		if variant.name == "cl_zero" {
+			continue
+		}
 		if ctx.Err() != nil {
 			break
 		}
-
-		canary := randomProbeToken()
-		rawAttack := variant.buildRawReq(host, path, canary)
-
-		// 1. Send raw attack request over TCP/TLS connection
-		conn, dialErr := dialTarget(ctx, addr, useTLS, u.Hostname(), r.cfg.InsecureSkipVerify)
-		if dialErr != nil {
-			continue
-		}
-
-		setConnDeadline(conn, ctx, 6*time.Second)
-		_, wErr := io.WriteString(conn, rawAttack)
-		if wErr != nil {
-			conn.Close()
-			continue
-		}
-
-		// Read response for attack request
-		respReader := bufio.NewReader(conn)
-		_, _ = readHTTPResponse(respReader)
-
-		// 2. Send follow-up victim request over the same connection to verify if backend processed smuggled request
-		normalReq := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, host)
-		_, _ = io.WriteString(conn, normalReq)
-
-		victimStatus, victimBody := readHTTPResponse(respReader)
-		conn.Close()
-
-		// If follow-up response reflects 404 for smuggled path or returns error containing canary
-		if (victimStatus == 404 && strings.Contains(victimBody, canary)) || (strings.Contains(victimBody, "akca-smuggle-"+canary)) {
-			// Round 2 confirmation with a fresh connection to eliminate transient errors
-			canary2 := randomProbeToken()
-			rawAttack2 := variant.buildRawReq(host, path, canary2)
-
-			conn2, err2 := dialTarget(ctx, addr, useTLS, u.Hostname(), r.cfg.InsecureSkipVerify)
-			if err2 == nil {
-				setConnDeadline(conn2, ctx, 6*time.Second)
-				_, _ = io.WriteString(conn2, rawAttack2)
-				respReader2 := bufio.NewReader(conn2)
-				_, _ = readHTTPResponse(respReader2)
-
-				_, _ = io.WriteString(conn2, normalReq)
-				vStatus2, vBody2 := readHTTPResponse(respReader2)
-				conn2.Close()
-
-				if (vStatus2 == 404 && strings.Contains(vBody2, canary2)) || strings.Contains(vBody2, "akca-smuggle-"+canary2) {
-					signal := "http_desync_" + variant.name
-					p := defaultPayload("http_smuggling", signal, canary2, signal)
-					rr := httpclient.RequestResponse{
-						Request:  httpclient.RequestRecord{Method: "POST", URL: target.EndpointURL, Headers: map[string]string{"Transfer-Encoding": "chunked"}},
-						Response: httpclient.ResponseRecord{StatusCode: vStatus2, Body: vBody2},
-					}
-					f := r.verifyAndBuild(ctx, "http_smuggling", target, p, baseline, rr, signal, false, false, "", "")
-					if f != nil {
-						f.Severity = "critical"
-						f.Title = variant.title
-						f.Description = variant.description + fmt.Sprintf(" Verified via smuggled prefix execution on '%s'.", target.EndpointURL)
-						r.recordFinding(ctx, &out, f, "http_smuggling", signal)
-						return out
-					}
-				}
+		var runs []httpclient.RequestResponse
+		var lastCanary string
+		for i := 0; i < 2; i++ {
+			canary := randomProbeToken()
+			attack := variant.buildRawReq(u.Host, path, canary)
+			rr, e := r.rawSmugglingExchange(ctx, target, attack, normal)
+			if e != nil || !strings.Contains(rr.Response.Body, "akca-smuggle-"+canary) {
+				break
 			}
+			runs = append(runs, rr)
+			lastCanary = canary
+		}
+		if len(runs) != 2 {
+			continue
+		}
+		signal := "http_desync_" + variant.name
+		p := defaultPayload("http_smuggling", signal, lastCanary, signal)
+		f := r.verifyAndBuildWithCandidate(ctx, "http_smuggling", target, p, baseline, runs[1], signal, false, false, "", "", func(c *verification.Candidate) {
+			c.RequestedProofType = verification.ProofProtocolDesync
+			c.NegativeControlSet = true
+			c.NegativeControlOK = true
+			c.TypedReplayHits = []bool{true, true}
+			c.Observations = append(c.Observations, r.observation("http_smuggling", target, verification.RoleNegativeControl, 1, control), r.observation("http_smuggling", target, verification.RolePositiveReplay, 2, runs[0]))
+		})
+		if f != nil {
+			f.Severity = "critical"
+			f.Title = variant.title
+			f.Description = variant.description + " Two independent raw connections reproduced a canary response absent from the clean sequence."
+			r.recordFinding(ctx, &out, f, "http_smuggling", signal)
+			return out
 		}
 	}
-
 	return out
+}
+
+func (r *Runner) rawSmugglingExchange(ctx context.Context, target ScanTarget, first, second string) (httpclient.RequestResponse, error) {
+	u, err := url.Parse(target.EndpointURL)
+	if err != nil {
+		return httpclient.RequestResponse{}, err
+	}
+	port := u.Port()
+	if port == "" {
+		port = "80"
+		if u.Scheme == "https" {
+			port = "443"
+		}
+	}
+	reserve := func() error {
+		if g, ok := r.client.(interface {
+			ReserveExternal(context.Context, string, string) error
+		}); ok {
+			return g.ReserveExternal(ctx, target.EndpointURL, "raw_tcp")
+		}
+		return nil
+	}
+	if err = reserve(); err != nil {
+		return httpclient.RequestResponse{}, err
+	}
+	conn, err := dialTarget(ctx, net.JoinHostPort(u.Hostname(), port), u.Scheme == "https", u.Hostname(), r.cfg.InsecureSkipVerify)
+	if err != nil {
+		return httpclient.RequestResponse{}, err
+	}
+	defer conn.Close()
+	setConnDeadline(conn, ctx, 6*time.Second)
+	reader := bufio.NewReader(conn)
+	if _, err = io.WriteString(conn, first); err != nil {
+		return httpclient.RequestResponse{}, err
+	}
+	if status, _ := readHTTPResponse(reader); status == 0 {
+		return httpclient.RequestResponse{}, fmt.Errorf("raw protocol response unavailable")
+	}
+	if err = reserve(); err != nil {
+		return httpclient.RequestResponse{}, err
+	}
+	if _, err = io.WriteString(conn, second); err != nil {
+		return httpclient.RequestResponse{}, err
+	}
+	status, body := readHTTPResponse(reader)
+	if status == 0 {
+		return httpclient.RequestResponse{}, fmt.Errorf("raw protocol follow-up unavailable")
+	}
+	noteExchange(ctx, nil)
+	return httpclient.RequestResponse{Request: httpclient.RequestRecord{Method: "POST", URL: target.EndpointURL, Body: first + second}, Response: httpclient.ResponseRecord{StatusCode: status, Body: body}}, nil
 }
 
 func dialTarget(ctx context.Context, addr string, useTLS bool, serverName string, skipVerify bool) (net.Conn, error) {

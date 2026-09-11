@@ -1,0 +1,4 @@
+# runtime/cgo
+cgo: C compiler "gcc" not found: exec: "gcc": executable file not found in %PATH%
+FAIL	github.com/akha-security/akca/engine/internal/learning [build failed]
+FAIL

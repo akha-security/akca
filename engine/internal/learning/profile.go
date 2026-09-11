@@ -13,18 +13,20 @@ const (
 	OutcomeWAFBlocked    Outcome = "waf_blocked"
 	OutcomeUnstable      Outcome = "unstable"
 	OutcomeFalsePositive Outcome = "false_positive"
+	OutcomeInconclusive  Outcome = "inconclusive"
 )
 
 type Profile struct {
-	Domain        string         `json:"domain"`
-	EndpointURL   string         `json:"endpoint_url,omitempty"`
-	Worked        []string       `json:"worked,omitempty"`
-	Blocked       []string       `json:"blocked,omitempty"`
-	Noisy         []string       `json:"noisy,omitempty"`
-	FalsePositive []string       `json:"false_positive,omitempty"`
-	Stability     map[string]int `json:"stability,omitempty"`
-	WAFBlocks     map[string]int `json:"waf_blocks,omitempty"`
-	UpdatedAt     time.Time      `json:"updated_at"`
+	OutcomeCounts map[string]map[string]int `json:"outcome_counts,omitempty"`
+	Domain        string                    `json:"domain"`
+	EndpointURL   string                    `json:"endpoint_url,omitempty"`
+	Worked        []string                  `json:"worked,omitempty"`
+	Blocked       []string                  `json:"blocked,omitempty"`
+	Noisy         []string                  `json:"noisy,omitempty"`
+	FalsePositive []string                  `json:"false_positive,omitempty"`
+	Stability     map[string]int            `json:"stability,omitempty"`
+	WAFBlocks     map[string]int            `json:"waf_blocks,omitempty"`
+	UpdatedAt     time.Time                 `json:"updated_at"`
 }
 
 func NewProfile(domain, endpointURL string) Profile {
@@ -37,6 +39,11 @@ func NewProfile(domain, endpointURL string) Profile {
 
 func (p Profile) Record(family string, outcome Outcome) Profile {
 	p.UpdatedAt = time.Now().UTC()
+	p.OutcomeCounts = cloneOutcomeCounts(p.OutcomeCounts)
+	if p.OutcomeCounts[family] == nil {
+		p.OutcomeCounts[family] = map[string]int{}
+	}
+	p.OutcomeCounts[family][string(outcome)]++
 	switch outcome {
 	case OutcomeWorked:
 		p.Worked = appendUnique(p.Worked, family)
@@ -83,20 +90,23 @@ func (p Profile) IsBlocked(key string) bool {
 }
 
 func (p Profile) FalsePositiveRate(family string) float64 {
-	if p.Stability == nil {
+	counts := p.OutcomeCounts[family]
+	fp, worked := counts[string(OutcomeFalsePositive)], counts[string(OutcomeWorked)]
+	if fp+worked == 0 {
 		return 0
 	}
-	total := p.Stability[family]
-	fp := 0
-	for _, f := range p.FalsePositive {
-		if f == family {
-			fp++
+	return float64(fp) / float64(fp+worked)
+}
+
+func cloneOutcomeCounts(in map[string]map[string]int) map[string]map[string]int {
+	out := make(map[string]map[string]int, len(in))
+	for family, counts := range in {
+		out[family] = map[string]int{}
+		for outcome, n := range counts {
+			out[family][outcome] = n
 		}
 	}
-	if total == 0 {
-		return 0
-	}
-	return float64(fp) / float64(total+fp)
+	return out
 }
 
 func (p Profile) ExportJSON() ([]byte, error) {
@@ -119,6 +129,17 @@ func ImportJSON(raw []byte) (Profile, error) {
 
 func Merge(base, overlay Profile) Profile {
 	out := base
+	out.Stability = cloneCounters(base.Stability)
+	out.WAFBlocks = cloneCounters(base.WAFBlocks)
+	out.OutcomeCounts = cloneOutcomeCounts(base.OutcomeCounts)
+	for family, counts := range overlay.OutcomeCounts {
+		if out.OutcomeCounts[family] == nil {
+			out.OutcomeCounts[family] = map[string]int{}
+		}
+		for outcome, n := range counts {
+			out.OutcomeCounts[family][outcome] += n
+		}
+	}
 	out.Worked = union(out.Worked, overlay.Worked)
 	out.Blocked = union(out.Blocked, overlay.Blocked)
 	out.Noisy = union(out.Noisy, overlay.Noisy)
@@ -155,4 +176,12 @@ func union(a, b []string) []string {
 // ToPayloadGen converts to the lightweight struct used by payloadgen.
 func (p Profile) ToPayloadGen() (worked, blocked, noisy, falsePositive []string) {
 	return p.Worked, p.Blocked, p.Noisy, p.FalsePositive
+}
+
+func cloneCounters(in map[string]int) map[string]int {
+	out := map[string]int{}
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

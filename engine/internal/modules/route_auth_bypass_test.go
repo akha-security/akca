@@ -23,6 +23,10 @@ func TestRouteAuthBypass_ConfirmedFinding(t *testing.T) {
 			path = path[:strings.Index(path, "?")]
 		}
 		if path == "/admin/users" {
+			if r.Header.Get("Authorization") == "Bearer owner-test" {
+				w.Write([]byte(`{"users":[{"id":1,"username":"admin","email":"admin@corp.internal"}]}`))
+				return
+			}
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"error":"Forbidden: Admin access required"}`))
 			return
@@ -45,6 +49,7 @@ func TestRouteAuthBypass_ConfirmedFinding(t *testing.T) {
 	cfg.Targets = []string{server.URL}
 	cfg.IncludeDomains = []string{"127.0.0.1"}
 	cfg.ScanID = "test-route-bypass"
+	cfg.CustomHeaders = map[string]string{"Authorization": "Bearer owner-test"}
 	scopeEngine := scope.NewEngine(cfg)
 	limiter := ratelimit.New(cfg.GlobalRateLimit, cfg.PerHostRateLimit)
 	client, err := httpclient.New(cfg, scopeEngine, limiter)

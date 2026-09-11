@@ -126,6 +126,11 @@ func (p *networkTLSInspector) Inspect(ctx context.Context, rawURL string) (TLSIn
 }
 
 func (p *networkTLSInspector) dial(ctx context.Context, address, serverName string, minVersion, maxVersion uint16, suites []uint16) (*tls.Conn, error) {
+	if p.cfg.NetworkRequestGuard != nil {
+		if err := p.cfg.NetworkRequestGuard(ctx, "https://"+address, "tls"); err != nil {
+			return nil, err
+		}
+	}
 	dialer := &tls.Dialer{
 		NetDialer: &net.Dialer{Timeout: 8 * time.Second},
 		Config: &tls.Config{
@@ -192,6 +197,9 @@ func (p *networkWebSocketProber) Probe(ctx context.Context, rawURL, payload stri
 	}
 	if p.scope != nil && !p.scope.IsInScope(httpScopeURL.String()) {
 		return httpclient.RequestResponse{}, fmt.Errorf("scope blocked websocket host: %s", u.Hostname())
+	}
+	if err := reserveProtocolRequests(ctx, p.cfg, u.String(), "raw_protocol", 1); err != nil {
+		return httpclient.RequestResponse{}, err
 	}
 	conn, err := dialURL(ctx, u, p.cfg.InsecureSkipVerify)
 	if err != nil {
@@ -530,6 +538,9 @@ type rawHTTPResponse struct {
 }
 
 func (p *networkSmugglingProber) exchange(ctx context.Context, u *url.URL, raw string) ([]rawHTTPResponse, error) {
+	if err := reserveProtocolRequests(ctx, p.cfg, u.String(), "raw_tcp", 2); err != nil {
+		return nil, err
+	}
 	conn, err := dialURL(ctx, u, p.cfg.InsecureSkipVerify)
 	if err != nil {
 		return nil, err
@@ -715,4 +726,16 @@ func uniqueStrings(values []string) []string {
 func isNetTimeout(err error) bool {
 	var netErr net.Error
 	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func reserveProtocolRequests(ctx context.Context, cfg config.ScanConfig, rawURL, transport string, count int) error {
+	if cfg.NetworkRequestGuard == nil {
+		return nil
+	}
+	for i := 0; i < count; i++ {
+		if err := cfg.NetworkRequestGuard(ctx, rawURL, transport); err != nil {
+			return err
+		}
+	}
+	return nil
 }

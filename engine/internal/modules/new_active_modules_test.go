@@ -76,23 +76,24 @@ func TestNginxOffBySlashTraversal(t *testing.T) {
 }
 
 func TestNginxOffBySlashWildcardRejection(t *testing.T) {
-	// SPA host where every path returns the same index.html
-	spaHTML := "<html><body><div id='app'>SPA React Application Shell</div></body></html>"
-	c := &activeTestClient{
-		responses: map[string]httpclient.ResponseRecord{
-			"GET https://example.com/static/app.js": {
-				StatusCode: 200, Body: "console.log('app');", Headers: map[string]string{"Content-Type": "application/javascript"},
-			},
-		},
-	}
-	// For all unknown URLs, activeTestClient default is modified here to return 200 with spaHTML
-	c.responses["GET https://example.com/static-akca-nonexistent-path-check-"] = httpclient.ResponseRecord{
-		StatusCode: 200, Body: spaHTML, Headers: map[string]string{"Content-Type": "text/html"},
-	}
+
+	// Match the actual randomized path and serve a body long enough to reach
+	// the wildcard similarity guard, instead of the unrelated short-body guard.
+	spaHTML := "<html><body>" + strings.Repeat("SPA application shell ", 100) + "</body></html>"
+	wildcardRequests := 0
+	c := &activeDynamicClient{handler: func(method, rawURL string, headers map[string]string) httpclient.ResponseRecord {
+		if strings.Contains(rawURL, "akca-nonexistent") {
+			wildcardRequests++
+		}
+		return httpclient.ResponseRecord{StatusCode: 200, Body: spaHTML, Headers: map[string]string{"Content-Type": "text/html"}}
+	}}
 
 	r := newActiveRunner(t, c)
 	target := ScanTarget{EndpointURL: "https://example.com/static/app.js", Method: "GET"}
 	findings := r.runNginxAlias(context.Background(), target)
+	if wildcardRequests == 0 {
+		t.Fatal("wildcard control was not exercised")
+	}
 
 	if len(findings) != 0 {
 		t.Fatalf("expected wildcard SPA to be rejected with 0 findings, got %d", len(findings))

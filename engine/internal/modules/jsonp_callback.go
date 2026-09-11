@@ -43,22 +43,16 @@ func (r *Runner) runJSONPCallback(ctx context.Context, target ScanTarget) []Modu
 	body := strings.TrimSpace(rr.Response.Body)
 	// Check if body starts with the injected callback wrapper: e.g. akca_jsonp_cb_1234(...)
 	if strings.HasPrefix(body, canaryFn+"(") || strings.HasPrefix(body, "/**/"+canaryFn+"(") {
-		signal := "jsonp_callback_injection"
-		p := defaultPayload("jsonp_callback", signal, canaryFn, signal)
-		f := r.verifyAndBuild(ctx, "jsonp_callback", target, p, baseline, rr, signal, false, false, "", "")
-		if f != nil {
-			f.Severity = "medium"
-			f.Title = "JSONP Endpoint Callback Wrapper Injection"
-			f.Description = fmt.Sprintf("JSONP endpoint '%s' wraps JSON responses in user-controlled callback function specified by '%s'. If cross-origin credentials (cookies) are supported, this permits Cross-Site Script Inclusion (XSSI) data leakage.", target.EndpointURL, target.Parameter)
 
-			// If sensitive data like email/token/user is present in the JSON payload, bump to High
-			lowerBody := strings.ToLower(body)
-			if strings.Contains(lowerBody, "email") || strings.Contains(lowerBody, "token") || strings.Contains(lowerBody, "password") || strings.Contains(lowerBody, "user_id") {
-				f.Severity = "high"
-				f.Description += " Sensitive user fields were detected inside the reflected JSONP payload."
-			}
-			r.recordFinding(ctx, &out, f, "jsonp_callback", signal)
+		r.emitDiscovery("jsonp_callback", target, "jsonp_callback_wrapper", "JSONP wrapper observed; private browser-readable data requires independent proof")
+		f := r.proveCrossOriginRead(ctx, "jsonp_callback", target, "jsonp", canaryFn, baseline, rr)
+		if f != nil {
+			f.Severity = "high"
+			f.Title = "Cross-Origin JSONP Private Data Disclosure"
+			f.Description = fmt.Sprintf("Browser script at an opaque origin read the configured private canary from %s in two authenticated sessions; an anonymous browser control did not expose it.", target.EndpointURL)
+			r.recordFinding(ctx, &out, f, "jsonp_callback", "browser_private_read")
 		}
+
 	}
 
 	return out

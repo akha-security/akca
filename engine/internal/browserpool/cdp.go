@@ -48,14 +48,15 @@ func (b *synchronizedBuffer) String() string {
 }
 
 type cdpClient struct {
-	conn    *websocket.Conn
-	sendMu  sync.Mutex
-	mu      sync.Mutex
-	nextID  int
-	pending map[int]chan cdpMessage
-	events  chan cdpMessage
-	done    chan struct{}
-	readErr error
+	conn           *websocket.Conn
+	sendMu         sync.Mutex
+	mu             sync.Mutex
+	nextID         int
+	pending        map[int]chan cdpMessage
+	events         chan cdpMessage
+	done           chan struct{}
+	readErr        error
+	requestHandler func(cdpMessage)
 }
 
 func dialCDP(rawURL string) (*cdpClient, error) {
@@ -90,6 +91,13 @@ func (c *cdpClient) readLoop() {
 			if waiter != nil {
 				waiter <- message
 			}
+			continue
+		}
+		c.mu.Lock()
+		handler := c.requestHandler
+		c.mu.Unlock()
+		if message.Method == "Fetch.requestPaused" && handler != nil {
+			go handler(message)
 			continue
 		}
 		select {
@@ -385,6 +393,9 @@ func (r *HeadlessRenderer) Capture(ctx context.Context, rawURL string) (crawler.
 		map[string]interface{}{"source": domInstrumentationScript}, nil)
 
 	state := newCDPCapture()
+	if err := r.guardBrowserRequests(captureCtx, client); err != nil {
+		return crawler.BrowserSnapshot{}, err
+	}
 	if err := client.call(captureCtx, "Page.navigate", map[string]interface{}{"url": rawURL}, nil); err != nil {
 		return crawler.BrowserSnapshot{}, err
 	}

@@ -19,6 +19,8 @@ const (
 
 type ProofType string
 
+const ProofCrossOriginRead ProofType = "cross_origin_read"
+
 const (
 	ProofNone               ProofType = ""
 	ProofDifferentialReplay ProofType = "differential_replay"
@@ -92,6 +94,7 @@ type BooleanPairProof struct {
 }
 
 type Candidate struct {
+	CrossOriginRead      bool
 	ScanID               string                        `json:"scan_id"`
 	Title                string                        `json:"title"`
 	VulnClass            string                        `json:"vuln_class"`

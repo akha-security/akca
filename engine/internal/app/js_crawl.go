@@ -54,7 +54,7 @@ func (e *Engine) runJSDiscoveredCrawlPhase(ctx context.Context) error {
 		if e.session.Config.MaxConcurrency > 0 && browserPoolSize > e.session.Config.MaxConcurrency {
 			browserPoolSize = e.session.Config.MaxConcurrency
 		}
-		c.SetBrowser(browserpool.NewCrawlerBrowserWithSessionAndPoolSize(
+		browser := browserpool.NewCrawlerBrowserWithSessionAndPoolSize(
 			pool,
 			browserpool.HTTPPageFetcher(doFn),
 			e.session.Config.ProxyURL,
@@ -62,7 +62,11 @@ func (e *Engine) runJSDiscoveredCrawlPhase(ctx context.Context) error {
 			browserHeaders,
 			browserCookies,
 			browserPoolSize,
-		))
+		)
+		if e.client != nil {
+			browser.SetRequestGuard(e.client.ReserveExternal)
+		}
+		c.SetBrowser(browser)
 	}
 	budget := crawler.Budget{
 		MaxDepth: e.session.Config.MaxDepth,

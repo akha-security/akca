@@ -2,6 +2,7 @@ package modules
 
 import (
 	"context"
+	"net/url"
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
@@ -47,47 +48,29 @@ func (r *Runner) runOpenRedirect(ctx context.Context, target ScanTarget) []Modul
 }
 
 func openRedirectSignal(rr httpclient.RequestResponse, value string) bool {
-	// Check HTTP 3xx Redirect Location Header
+	// A Location query value is not a navigation destination. Inspect the
+	// authority without decoding nested query parameters or userinfo.
 	status := rr.Response.StatusCode
-	if status >= 300 && status <= 308 {
-		for k, v := range rr.Response.Headers {
-			if strings.EqualFold(k, "Location") {
-				low := strings.ToLower(strings.TrimSpace(v))
-				if strings.Contains(low, "evil.example") {
-					return true
-				}
-				if strings.HasPrefix(low, "javascript:") && strings.Contains(strings.ToLower(value), "javascript:") {
-					return true
-				}
-				if strings.HasPrefix(low, "data:") && strings.Contains(strings.ToLower(value), "data:") {
-					return true
-				}
-				break
-			}
-		}
+	if status != 301 && status != 302 && status != 303 && status != 307 && status != 308 {
+		return false
 	}
-	// Check HTML Meta Refresh and JavaScript Redirection in 200 OK responses
-	if status == 200 {
-		bodyLow := strings.ToLower(rr.Response.Body)
-		if strings.Contains(bodyLow, "evil.example") {
-			// 1. Meta refresh
-			if strings.Contains(bodyLow, "http-equiv=\"refresh\"") || strings.Contains(bodyLow, "http-equiv='refresh'") || strings.Contains(bodyLow, "http-equiv=refresh") {
-				return true
-			}
-			// 2. JavaScript-based redirects
-			jsRedirectPatterns := []string{
-				"window.location", "window.location.href", "window.location.replace",
-				"window.location.assign", "document.location", "document.location.href",
-				"location.href", "location.replace", "location.assign", "window.open",
-			}
-			for _, pat := range jsRedirectPatterns {
-				if strings.Contains(bodyLow, pat) {
-					return true
-				}
-			}
-		}
+	return redirectDestinationIsCanary(headerValue(rr.Response.Headers, "Location"))
+}
+
+func redirectDestinationIsCanary(location string) bool {
+	location = strings.TrimSpace(location)
+	if strings.ContainsAny(location, "\r\n\x00") {
+		return false
 	}
-	return false
+	location = strings.ReplaceAll(location, `\`, "/")
+	if strings.HasPrefix(location, "//") {
+		location = "https://" + strings.TrimLeft(location, "/")
+	}
+	u, err := url.Parse(location)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSuffix(u.Hostname(), "."), "evil.example")
 }
 
 func (r *Runner) runHostHeader(ctx context.Context, target ScanTarget) []ModuleFinding {

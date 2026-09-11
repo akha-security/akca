@@ -38,7 +38,7 @@ func (e *Engine) runCrawlerPhase(ctx context.Context, targets []string) error {
 		if e.session.Config.MaxConcurrency > 0 && browserPoolSize > e.session.Config.MaxConcurrency {
 			browserPoolSize = e.session.Config.MaxConcurrency
 		}
-		c.SetBrowser(browserpool.NewCrawlerBrowserWithSessionAndPoolSize(
+		browser := browserpool.NewCrawlerBrowserWithSessionAndPoolSize(
 			pool,
 			browserpool.HTTPPageFetcher(doFn),
 			e.session.Config.ProxyURL,
@@ -46,7 +46,11 @@ func (e *Engine) runCrawlerPhase(ctx context.Context, targets []string) error {
 			browserHeaders,
 			browserCookies,
 			browserPoolSize,
-		))
+		)
+		if e.client != nil {
+			browser.SetRequestGuard(e.client.ReserveExternal)
+		}
+		c.SetBrowser(browser)
 	}
 
 	if err := c.Crawl(ctx, targets); err != nil {

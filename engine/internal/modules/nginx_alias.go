@@ -150,6 +150,7 @@ func isStaticAssetContentType(ct string) bool {
 }
 
 func bodiesSimilar(a, b string) bool {
+	a, b = normalizeVolatileFields(a), normalizeVolatileFields(b)
 	if a == b {
 		return true
 	}
@@ -165,5 +166,6 @@ func bodiesSimilar(a, b string) bool {
 	if lb > maxLen {
 		maxLen = lb
 	}
-	return float64(diff)/float64(maxLen) < 0.08
+	// Length is only a prefilter. Equal-sized unrelated resources are not equal.
+	return float64(diff)/float64(maxLen) < 0.08 && bodyDiffRatio(a, b) < 0.08
 }

@@ -206,18 +206,19 @@ func hasCacheHitEvidence(headers map[string]string, prevHeaders map[string]strin
 	}
 	for _, h := range cdnCacheHeaders {
 		val := strings.ToLower(headerValue(headers, h))
-		if strings.Contains(val, "hit") || strings.Contains(val, "cached") || strings.Contains(val, "revalidated") {
-			return true
+		if h == "X-Cache-Hits" {
+			if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && n > 0 {
+				return true
+			}
+		}
+		for _, token := range strings.FieldsFunc(val, func(c rune) bool { return c == ' ' || c == ',' || c == '_' || c == ';' || c == '/' }) {
+			if token == "hit" || token == "cached" || token == "revalidated" {
+				return true
+			}
 		}
 	}
 
-	// 3. Frozen dynamic headers (Date / Last-Modified) with identical body hash
-	date1 := headerValue(headers, "Date")
-	date2 := headerValue(prevHeaders, "Date")
-	if date1 != "" && date1 == date2 && prevBody != "" && prevBody == currentBody {
-		return true
-	}
-
+	// Date has one-second resolution. Equal Date/body values do not prove a cache.
 	return false
 }
 

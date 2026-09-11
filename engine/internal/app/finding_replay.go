@@ -76,6 +76,12 @@ func (e *Engine) ReplayFinding(ctx context.Context, findingID int64) (FindingRep
 		return out, nil
 	}
 	out.OriginalProofType = evidence.Verification.ProofType
+	switch verification.ProofType(out.OriginalProofType) {
+	case verification.ProofCrossOriginRead, verification.ProofOAST, verification.ProofTiming, verification.ProofDOMExecution,
+		verification.ProofStoredExecution, verification.ProofProtocolDesync, verification.ProofRuntimeTrace:
+		out.Reason = "this proof requires its original browser, timing, callback, runtime or protocol verifier; HTTP body replay cannot determine whether it is fixed"
+		return out, nil
+	}
 	observations, err := e.db.ListVerificationObservations(scanID, findingID, 1000)
 	if err != nil {
 		return out, err

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/verification"
 )
 
 func (r *Runner) runCORS(ctx context.Context, target ScanTarget) []ModuleFinding {
@@ -15,198 +16,98 @@ func (r *Runner) runCORS(ctx context.Context, target ScanTarget) []ModuleFinding
 		r.emitSkip("cors", target, reason)
 		return nil
 	}
-	// 1. Skip static assets (.css, .js, images, fonts) - CORS credential theft is not applicable
 	if isStaticAssetURL(target.EndpointURL) {
 		return nil
 	}
-
-	var out []ModuleFinding
-	baseline, err := r.probeCORS(ctx, target, "https://benign.example")
+	baseline, err := r.probeCORS(ctx, target, "")
 	if err != nil {
 		return nil
 	}
-	targetHost := "example.com"
-	if u, err := url.Parse(target.EndpointURL); err == nil && u.Hostname() != "" {
-		targetHost = u.Hostname()
+	u, err := url.Parse(target.EndpointURL)
+	if err != nil {
+		return nil
 	}
-
-	baseACAO := headerValue(baseline.Response.Headers, "Access-Control-Allow-Origin")
-	baseACAC := headerValue(baseline.Response.Headers, "Access-Control-Allow-Credentials")
-	corsActive := hasCORSHeaders(baseline.Response.Headers)
-
-	handleProbeResult := func(pr struct{ origin, signal string }, rr httpclient.RequestResponse) {
-		if hasCORSHeaders(rr.Response.Headers) {
-			corsActive = true
+	probes := []struct{ origin, signal string }{
+		{"https://evil.example", "origin_reflection"}, {"https://another-evil.example", "origin_reflection"},
+		{"null", "null_origin"}, {"https://" + u.Hostname() + ".evil.example", "partial_origin_match"},
+		{"https://evil" + u.Hostname(), "pre_domain_match"}, {"http://" + u.Hostname(), "protocol_downgrade"},
+		{"https://" + strings.Replace(u.Hostname(), ".", "x", 1), "unquoted_regex_dot_bypass"},
+		{"https://" + u.Hostname() + "_.evil.example", "special_char_bypass"},
+	}
+	var out []ModuleFinding
+	for _, pr := range probes {
+		if originURL, e := url.Parse(pr.origin); e == nil && strings.EqualFold(originURL.Scheme, u.Scheme) && strings.EqualFold(originURL.Host, u.Host) {
+			continue
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		rr, err := r.probeCORS(ctx, target, pr.origin)
+		if err != nil {
+			continue
+		}
+		if corsWildcardCredentials(rr.Response.Headers) {
+			r.emitDiscovery("cors", target, "wildcard_credentials", "Wildcard ACAO with credentials is not browser-readable credentialed access")
+			continue
+		}
+		if rr.Response.StatusCode < 200 || rr.Response.StatusCode >= 300 {
+			r.emitDiscovery("cors", target, "cors_error_response", "CORS headers on an unsuccessful response do not prove readable application data")
+			continue
 		}
 		if !corsSignal(rr.Response.Headers, pr.origin, pr.signal) {
-			return
+			continue
+		}
+		// Preserve the native request. No-Origin is the negative control; a second
+		// arbitrary reflected origin would itself be a positive test, not a control.
+		control, err := r.probeCORS(ctx, target, "")
+		if err != nil || !usableNegativeControl(baseline.Response, control.Response) ||
+			corsSignal(control.Response.Headers, pr.origin, pr.signal) {
+			continue
+		}
+		var replays []httpclient.RequestResponse
+		for i := 0; i < 2; i++ {
+			replay, e := r.probeCORS(ctx, target, pr.origin)
+			if e != nil || replay.Response.StatusCode < 200 || replay.Response.StatusCode >= 300 || !corsSignal(replay.Response.Headers, pr.origin, pr.signal) {
+				break
+			}
+			replays = append(replays, replay)
+		}
+		if len(replays) != 2 {
+			continue
 		}
 		p := defaultPayload("cors", pr.signal, pr.origin, pr.signal)
-		f := r.verifyAndBuild(ctx, "cors", target, p, baseline, rr, pr.signal, false, false, "", "")
+		f := r.verifyAndBuildWithCandidate(ctx, "cors", target, p, baseline, rr, pr.signal, false, false, "", "", func(c *verification.Candidate) {
+			c.RequestedProofType = verification.ProofHeaderEvidence
+			c.NegativeControlSet = true
+			c.NegativeControlOK = true
+			c.TypedReplayHits = []bool{true, true, true}
+			c.Observations = append(c.Observations, r.observation("cors", target, verification.RoleNegativeControl, 1, control))
+			for i, replay := range replays {
+				c.Observations = append(c.Observations, r.observation("cors", target, verification.RolePositiveReplay, i+2, replay))
+			}
+		})
 		if f != nil {
-			acac := headerValue(rr.Response.Headers, "Access-Control-Allow-Credentials")
-			acao := headerValue(rr.Response.Headers, "Access-Control-Allow-Origin")
-			hasCreds := strings.EqualFold(acac, "true")
-
-			// Populate ResponseMarkers for yellow highlight in HTML report
-			if acao != "" {
-				f.Evidence.ResponseMarkers = append(f.Evidence.ResponseMarkers, acao, "Access-Control-Allow-Origin: "+acao)
+			f.Severity = "low"
+			f.Title = "CORS permits an untrusted origin"
+			f.Description = fmt.Sprintf("The response repeatedly allows origin %q. Cross-origin policy exposure is confirmed; private data access is not inferred from headers alone.", pr.origin)
+			if strings.EqualFold(headerValue(rr.Response.Headers, "Access-Control-Allow-Credentials"), "true") {
+				f.Severity = "medium"
+				f.Title = "CORS permits an untrusted origin with credentials"
 			}
-			if hasCreds {
-				f.Evidence.ResponseMarkers = append(f.Evidence.ResponseMarkers, "Access-Control-Allow-Credentials: "+acac)
-			}
-
-			switch pr.signal {
-			case "null_origin":
-				if hasCreds {
-					f.Severity = "high"
-					f.Title = "CORS Null Origin Allowed with Credentials"
-					f.Description = "The server allowed 'null' origin with Access-Control-Allow-Credentials: true. An attacker can exploit sandboxed iframes (<iframe sandbox=\"allow-scripts allow-forms\">) or local file schemes to steal authenticated victim data."
-				} else {
-					f.Severity = "medium"
-					f.Title = "CORS Null Origin Allowed"
-					f.Description = "The server reflected or allowed 'Origin: null' in Access-Control-Allow-Origin. Sandboxed iframes, local file schemes, and data: URIs generate null origin requests."
-				}
-			case "cloud_metadata_origin":
-				if hasCreds {
-					f.Severity = "critical"
-					f.Title = "CORS Cloud Metadata Origin Allowed with Credentials"
-					f.Description = fmt.Sprintf("Insecure CORS configuration reflected origin '%s' with Access-Control-Allow-Credentials: true. An attacker can leverage this configuration to conduct client-side pivot and steal cloud metadata tokens.", pr.origin)
-				} else {
-					f.Severity = "low"
-					f.Title = "CORS Cloud Metadata Origin Reflected"
-					f.Description = fmt.Sprintf("Insecure CORS configuration reflected origin '%s' without credentials (Access-Control-Allow-Origin: %s).", pr.origin, pr.origin)
-				}
-			case "localhost_origin", "intranet_origin":
-				if hasCreds {
-					f.Severity = "high"
-				} else {
-					f.Severity = "medium"
-				}
-				f.Title = fmt.Sprintf("CORS Intranet/Localhost Origin Allowed (%s)", pr.origin)
-				f.Description = fmt.Sprintf("Insecure CORS configuration allowed internal network origin '%s' (Access-Control-Allow-Origin: %s). An attacker can exploit this to pivot through victim browsers into internal network services (Client-Side SSRF).", pr.origin, pr.origin)
-				if hasCreds {
-					f.Description += " Access-Control-Allow-Credentials is also set to true."
-				}
-			default:
-				if hasCreds {
-					f.Severity = "high"
-					f.Title = "CORS Misconfiguration with Credentials (" + pr.signal + ")"
-					f.Description = fmt.Sprintf("Insecure CORS configuration reflected origin '%s' with Access-Control-Allow-Credentials: true. An attacker can steal sensitive user data across origins.", pr.origin)
-				} else {
-					f.Severity = "low"
-					f.Title = "CORS Permissive Origin Allowed (" + pr.signal + ")"
-					f.Description = fmt.Sprintf("Insecure CORS configuration reflected arbitrary origin '%s' (Access-Control-Allow-Origin: %s). While credentials are not allowed, this allows unauthenticated cross-origin data reads.", pr.origin, pr.origin)
-				}
-			}
+			r.recordFinding(ctx, &out, f, "cors", pr.signal)
 		}
-		r.recordFinding(ctx, &out, f, "cors", pr.signal)
 	}
 
-	// Case 1: Arbitrary Origin Reflected directly in baseline probe!
-	if baseACAO == "https://benign.example" {
-		handleProbeResult(struct{ origin, signal string }{"https://benign.example", "origin_reflection"}, baseline)
-		if nullRR, err := r.probeCORS(ctx, target, "null"); err == nil {
-			handleProbeResult(struct{ origin, signal string }{"null", "null_origin"}, nullRR)
+	// Internal-origin allowlists and PNA headers describe capabilities. A header
+	// alone does not demonstrate an attacker-controlled origin or an SSRF.
+	for _, origin := range []string{"http://169.254.169.254", "http://localhost", "http://127.0.0.1", "http://192.168.1.1", "https://trusted-sub." + u.Hostname()} {
+		if rr, err := r.probeCORS(ctx, target, origin); err == nil && headerValue(rr.Response.Headers, "Access-Control-Allow-Origin") == origin {
+			r.emitDiscovery("cors", target, "internal_origin_allowed", "CORS allows "+origin+"; attacker control and private access are unproven")
 		}
-		return out
 	}
-
-	// Case 2: Wildcard origin in baseline
-	if baseACAO == "*" {
-		if strings.EqualFold(baseACAC, "true") {
-			p := defaultPayload("cors", "wildcard_credentials", "*", "wildcard_credentials")
-			f := r.verifyAndBuild(ctx, "cors", target, p, baseline, baseline, "wildcard_credentials", false, false, "", "")
-			if f != nil {
-				f.Severity = "high"
-				f.Title = "CORS Wildcard with Credentials"
-			}
-			r.recordFinding(ctx, &out, f, "cors", "wildcard_credentials")
-		}
-		if nullRR, err := r.probeCORS(ctx, target, "null"); err == nil {
-			handleProbeResult(struct{ origin, signal string }{"null", "null_origin"}, nullRR)
-		}
-		return out
+	if rr, err := r.probeCORSOptionsPNA(ctx, target, "https://evil.example"); err == nil && pnaAllowed(rr.Response.Headers) {
+		r.emitDiscovery("cors", target, "private_network_access", "PNA permission header observed; private network data access is unproven")
 	}
-
-	// Core probes: covers all distinct CORS vulnerability classes
-	coreProbes := []struct {
-		origin, signal string
-	}{
-		{"null", "null_origin"},
-		{"https://evil.example", "origin_reflection"},
-		{"http://169.254.169.254", "cloud_metadata_origin"},
-		{"http://localhost", "localhost_origin"},
-		{"https://" + targetHost + ".evil.example", "partial_origin_match"},
-		{"https://trusted-sub." + targetHost, "trusted_subdomain"},
-	}
-
-	for _, pr := range coreProbes {
-		if ctx.Err() != nil {
-			break
-		}
-		rr, err := r.probeCORS(ctx, target, pr.origin)
-		if err != nil {
-			continue
-		}
-		handleProbeResult(pr, rr)
-	}
-
-	// If neither baseline nor any core probe produced any CORS header,
-	// the endpoint completely ignores Origin and does not have CORS enabled.
-	if !corsActive {
-		return out
-	}
-
-	// Secondary bypass probes (only run if CORS is confirmed active on this endpoint)
-	secondaryProbes := []struct {
-		origin, signal string
-	}{
-		{"http://evil.example", "origin_reflection"},
-		{"http://127.0.0.1", "localhost_origin"},
-		{"http://192.168.1.1", "intranet_origin"},
-		{"https://evil" + targetHost, "pre_domain_match"},
-		{"http://" + targetHost, "protocol_downgrade"},
-		{"https://" + strings.Replace(targetHost, ".", "x", 1), "unquoted_regex_dot_bypass"},
-		{"https://" + targetHost + "_.evil.example", "special_char_bypass"},
-		{"https://" + targetHost + ":8080", "port_bypass"},
-	}
-
-	for _, pr := range secondaryProbes {
-		if ctx.Err() != nil {
-			break
-		}
-		rr, err := r.probeCORS(ctx, target, pr.origin)
-		if err != nil {
-			continue
-		}
-		handleProbeResult(pr, rr)
-	}
-
-	// withCredentials + wildcard check
-	if rr, err := r.probeCORS(ctx, target, "https://evil.example"); err == nil && corsWildcardCredentials(rr.Response.Headers) {
-		p := defaultPayload("cors", "wildcard_credentials", "*", "wildcard_credentials")
-		f := r.verifyAndBuild(ctx, "cors", target, p, baseline, rr, "wildcard_credentials", false, false, "", "")
-		if f != nil {
-			f.Severity = "high"
-			f.Title = "CORS Wildcard with Credentials"
-		}
-		r.recordFinding(ctx, &out, f, "cors", "wildcard_credentials")
-	}
-
-	// W3C Private Network Access (PNA) Preflight Probe
-	if pnaRR, pnaErr := r.probeCORSOptionsPNA(ctx, target, "https://evil.example"); pnaErr == nil && pnaAllowed(pnaRR.Response.Headers) {
-		p := defaultPayload("cors", "pna_allowed", "https://evil.example", "private_network_access")
-		f := r.verifyAndBuild(ctx, "cors", target, p, baseline, pnaRR, "private_network_access", false, false, "", "")
-		if f != nil {
-			f.Severity = "high"
-			f.Title = "CORS Private Network Access (PNA) Allowed"
-			f.Description = "The endpoint responded with Access-Control-Allow-Private-Network: true to a public origin. This allows public websites to bypass browser PNA restrictions and send cross-origin requests to private/internal network resources."
-		}
-		r.recordFinding(ctx, &out, f, "cors", "private_network_access")
-	}
-
-	// Server-Side Origin Validation SSRF Probe via OAST (run once per host/origin, only if CORS is active)
 	if r.cfg.EnableOAST && r.oast != nil && r.endpointModuleOnce("cors_oast", target) {
 		if oastURL := strings.TrimSpace(r.oastURL(ctx, "cors-ssrf", target, "cors")); oastURL != "" {
 			r.sendOASTProbe(ctx, target, oastURL)
@@ -215,7 +116,6 @@ func (r *Runner) runCORS(ctx context.Context, target ScanTarget) []ModuleFinding
 			_, _ = r.probeCORSServerSideSSRF(ctx, target, oastURL)
 		}
 	}
-
 	return out
 }
 
@@ -279,7 +179,15 @@ func (r *Runner) probeCORS(ctx context.Context, target ScanTarget, origin string
 	if target.RequestTemplate.ContentType != "" && headerValue(headers, "Content-Type") == "" {
 		headers["Content-Type"] = target.RequestTemplate.ContentType
 	}
-	headers["Origin"] = origin
+	if origin != "" {
+		headers["Origin"] = origin
+	} else {
+		for key := range headers {
+			if strings.EqualFold(key, "Origin") {
+				delete(headers, key)
+			}
+		}
+	}
 	headers = mergeHeaders(headers, r.wafHeadersForModule("cors", rawURL))
 	headers = sanitizeProbeHeaders(method, body, headers)
 	return r.client.Do(ctx, method, rawURL, body, headers)
@@ -346,7 +254,7 @@ func corsSignal(headers map[string]string, origin, signal string) bool {
 	case "null_origin":
 		return strings.EqualFold(acao, "null")
 	case "origin_reflection", "partial_origin_match", "pre_domain_match", "protocol_downgrade", "trusted_subdomain",
-		"localhost_origin", "cloud_metadata_origin", "intranet_origin":
+		"localhost_origin", "cloud_metadata_origin", "intranet_origin", "unquoted_regex_dot_bypass", "special_char_bypass":
 		return acao == origin
 	case "private_network_access":
 		return pnaAllowed(headers)

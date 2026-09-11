@@ -309,7 +309,7 @@ func ScoreConfidence(c Candidate, r Result) (ConfidenceLevel, float64) {
 	switch r.ProofType {
 	case ProofHeaderEvidence:
 		score += 0.10
-	case ProofContentEvidence, ProofConfiguration, ProofSchemaExposure:
+	case ProofCrossOriginRead, ProofContentEvidence, ProofConfiguration, ProofSchemaExposure:
 		score += 0.25
 	case ProofProtocolDesync, ProofRequestPolicy, ProofAnonymousAccess:
 		score += 0.80

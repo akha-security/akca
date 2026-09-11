@@ -34,6 +34,7 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 	var mu sync.Mutex
 	var findings []ModuleFinding
 	var testedCount atomic.Int64
+	var attemptedCount, skippedOtherCount, failedCount atomic.Int64
 	var skippedBudgetCount atomic.Int64
 	errorsBefore := r.executionErrors.Load()
 	targetCh := make(chan ScanTarget, moduleQueueCapacity(workers, len(targets)))
@@ -58,17 +59,41 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 					continue
 				}
 				if !r.scope.IsInScope(target.EndpointURL) {
+					skippedOtherCount.Add(1)
 					continue
 				}
-				testedCount.Add(1)
+				state := &targetRun{}
+				target.coverage = state
+				targetCtx := context.WithValue(ctx, targetRunKey{}, state)
 				func() {
 					defer func() {
 						if rec := recover(); rec != nil {
 							r.executionErrors.Add(1)
+							failedCount.Add(1)
 							_ = r.emit("log", fmt.Sprintf("RunModule(%s) target %s recovered from panic: %v", module, target.EndpointURL, rec), map[string]interface{}{"scan_id": r.scanID})
 						}
 					}()
-					localFindings := r.runSingleModule(ctx, module, target)
+					localFindings := r.runSingleModule(targetCtx, module, target)
+					if state.requests.Load() > 0 {
+						attemptedCount.Add(1)
+					}
+					state.mu.Lock()
+					skipReason := state.skip
+					state.mu.Unlock()
+					status := "skipped"
+					if state.failures.Load() > 0 || ctx.Err() != nil {
+						status = "error"
+						failedCount.Add(1)
+					} else if skipReason == "" && state.evidence.Load() {
+						status = "completed"
+						testedCount.Add(1)
+					} else {
+						skippedOtherCount.Add(1)
+					}
+					if len(localFindings) > 0 && status != "completed" {
+						status = "verified"
+					}
+					_ = r.emit("module_target_finished", module+" target "+status, map[string]interface{}{"scan_id": r.scanID, "module": module, "endpoint": target.EndpointURL, "method": target.Method, "parameter": target.Parameter, "location": target.Location, "status": status, "reason": skipReason, "requests": state.requests.Load(), "findings": len(localFindings)})
 					if len(localFindings) > 0 {
 						mu.Lock()
 						findings = append(findings, localFindings...)
@@ -87,13 +112,15 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 	totalTargets := len(targets)
 	tested := int(testedCount.Load())
 	skipped := int(skippedBudgetCount.Load())
-	coveragePct := 100.0
+	coveragePct := 0.0
 	if totalTargets > 0 {
 		coveragePct = float64(tested) / float64(totalTargets) * 100.0
 	}
 	_ = r.emit("vuln_module_finished", module+" scanning finished", map[string]interface{}{
 		"scan_id": r.scanID, "module": module, "findings": len(findings),
 		"targets_tested": tested, "targets_total": totalTargets,
+		"targets_unprocessed": int64(totalTargets) - testedCount.Load() - failedCount.Load() - skippedOtherCount.Load() - skippedBudgetCount.Load(),
+		"targets_attempted":   attemptedCount.Load(), "targets_skipped": skippedOtherCount.Load(), "targets_failed": failedCount.Load(), "targets_budget_exhausted": skippedBudgetCount.Load(),
 		"coverage_percentage": fmt.Sprintf("%.1f%%", coveragePct),
 	})
 	if skipped > 0 {
@@ -102,6 +129,8 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 			map[string]interface{}{
 				"scan_id": r.scanID, "module": module,
 				"targets_tested": tested, "targets_total": totalTargets,
+				"targets_unprocessed": int64(totalTargets) - testedCount.Load() - failedCount.Load() - skippedOtherCount.Load() - skippedBudgetCount.Load(),
+				"targets_attempted":   attemptedCount.Load(), "targets_skipped": skippedOtherCount.Load(), "targets_failed": failedCount.Load(), "targets_budget_exhausted": skippedBudgetCount.Load(),
 				"coverage_pct": coveragePct,
 			},
 		)

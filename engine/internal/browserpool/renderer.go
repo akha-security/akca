@@ -13,12 +13,13 @@ import (
 // HeadlessRenderer uses an installed Chromium-compatible browser. Dumping the
 // post-execution DOM lets XSS verification observe mutations made by JavaScript.
 type HeadlessRenderer struct {
-	binary      string
-	sem         chan struct{}
-	proxyURL    string
-	insecureTLS bool
-	headers     map[string]string
-	cookies     map[string]string
+	requestGuard func(context.Context, string, string) error
+	binary       string
+	sem          chan struct{}
+	proxyURL     string
+	insecureTLS  bool
+	headers      map[string]string
+	cookies      map[string]string
 }
 
 func NewHeadlessRenderer() *HeadlessRenderer {
@@ -87,7 +88,7 @@ func (r *HeadlessRenderer) Render(ctx context.Context, rawURL string) (string, e
 	// Authenticated rendering must use CDP so configured headers and cookies
 	// are installed before navigation. Falling back to the CLI dump-DOM path
 	// would silently render the anonymous page and could corrupt proof.
-	if len(r.headers) > 0 || len(r.cookies) > 0 {
+	if r.requestGuard != nil || len(r.headers) > 0 || len(r.cookies) > 0 {
 		snapshot, err := r.Capture(ctx, rawURL)
 		if err != nil {
 			return "", err

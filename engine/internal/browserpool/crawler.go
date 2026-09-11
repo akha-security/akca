@@ -96,3 +96,9 @@ func HTTPPageFetcher(do func(ctx context.Context, method, url string, body []byt
 		return do(ctx, http.MethodGet, url, nil, nil)
 	}
 }
+
+func (b *CrawlerBrowser) SetRequestGuard(guard func(context.Context, string, string) error) {
+	if b != nil && b.renderer != nil {
+		b.renderer.SetRequestGuard(guard)
+	}
+}

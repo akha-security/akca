@@ -38,6 +38,9 @@ func (p *H2SmugglingProber) ProbeH2Desync(ctx context.Context, rawURL, variant s
 		return SmugglingProbeResult{}, errors.New("HTTP/2 framing probes require HTTPS scheme")
 	}
 
+	if err := reserveProtocolRequests(ctx, p.cfg, rawURL, "http2", 2); err != nil {
+		return SmugglingProbeResult{}, err
+	}
 	address := hostPort(u, "443")
 	tlsConfig := &tls.Config{
 		ServerName:         u.Hostname(),
@@ -255,6 +258,9 @@ func (p *H2SmugglingProber) ProbeH2CUpgrade(ctx context.Context, rawURL string) 
 		return SmugglingProbeResult{}, errors.New("invalid target URL for h2c probe")
 	}
 
+	if err := reserveProtocolRequests(ctx, p.cfg, rawURL, "h2c", 1); err != nil {
+		return SmugglingProbeResult{}, err
+	}
 	conn, err := dialURL(ctx, u, p.cfg.InsecureSkipVerify)
 	if err != nil {
 		return SmugglingProbeResult{}, err

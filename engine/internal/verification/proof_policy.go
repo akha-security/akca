@@ -52,7 +52,7 @@ var proofPolicies = map[string]ModuleProofPolicy{
 	"hpp":                    statePolicy("hpp", ProofStateMutation),
 	"broken_auth":            anonymousPolicy("broken_auth"),
 	"improper_auth":          anonymousPolicy("improper_auth"),
-	"route_auth_bypass":      contentPolicy("route_auth_bypass"),
+	"route_auth_bypass":      replayPolicy("route_auth_bypass", ProofDifferentialReplay),
 	"tenant_isolation":       identityPolicy("tenant_isolation"),
 	"account_recovery":       statePolicy("account_recovery", ProofStateMutation),
 	"webhook_security":       statePolicy("webhook_security", ProofStateMutation),
@@ -97,15 +97,15 @@ var proofPolicies = map[string]ModuleProofPolicy{
 	"saas_exposure":            contentPolicy("saas_exposure"),
 	"cpdos":                    contentPolicy("cpdos"),
 	"proxy_path_confusion":     contentPolicy("proxy_path_confusion"),
-	"ws_cswsh":                 contentPolicy("ws_cswsh"),
+	"ws_cswsh":                 crossOriginPolicy("ws_cswsh"),
 	"pdf_injection":            contentPolicy("pdf_injection"),
-	"jsonp_callback":           contentPolicy("jsonp_callback"),
+	"jsonp_callback":           crossOriginPolicy("jsonp_callback"),
 	"react_rsc_rce":            replayPolicy("react_rsc_rce", ProofRuntimeTrace),
 	"server_side_js_injection": contentPolicy("server_side_js_injection"),
-	"csti_detection":           contentPolicy("csti_detection"),
+	"csti_detection":           domPolicy("csti_detection"),
 	"swagger_exposure":         contentPolicy("swagger_exposure"),
 	"sensitive_file_discovery": contentPolicy("sensitive_file_discovery"),
-	"http_smuggling":           contentPolicy("http_smuggling"),
+	"http_smuggling":           protocolPolicy("http_smuggling"),
 	"race_condition_sync":      statePolicy("race_condition_sync", ProofStateMutation),
 	"oauth_flow_audit":         contentPolicy("oauth_flow_audit"),
 	"cloud_native_exposure":    contentPolicy("cloud_native_exposure"),
@@ -122,6 +122,10 @@ var proofPolicies = map[string]ModuleProofPolicy{
 		AllowedProofTypes: []ProofType{ProofFileRetrieval, ProofHeaderEvidence},
 		EvidenceClass:     "method_policy", RequiresTypedSignal: true,
 	},
+}
+
+func crossOriginPolicy(module string) ModuleProofPolicy {
+	return ModuleProofPolicy{Module: module, Version: CurrentProofPolicyVersion, MinimumIndependentRuns: 2, RequiresNativeBaseline: true, RequiresNegativeControl: true, RequiresTypedSignal: true, AllowedProofTypes: []ProofType{ProofCrossOriginRead}, EvidenceClass: "browser_private_read"}
 }
 
 func replayPolicy(module string, allowed ...ProofType) ModuleProofPolicy {
@@ -313,6 +317,8 @@ func evaluateProofPolicy(candidate Candidate, result Result) (ProofType, bool) {
 		return proofType, false
 	}
 	switch proofType {
+	case ProofCrossOriginRead:
+		return proofType, candidate.CrossOriginRead && roles[RoleCrossOriginRead] >= 2 && negativeControlSatisfied(candidate, result, roles, false)
 	case ProofOAST:
 		return proofType, roles[RoleOASTCallback] > 0
 	case ProofDOMExecution:
@@ -358,7 +364,7 @@ func evaluateProofPolicy(candidate Candidate, result Result) (ProofType, bool) {
 	case ProofAnonymousAccess:
 		return proofType, roles[RoleIdentityA] > 0 && roles[RoleAnonymousProbe] >= policy.MinimumIndependentRuns
 	case ProofStoredExecution:
-		return proofType, roles[RolePositiveProbe] > 0
+		return proofType, candidate.DOMExecuted && roles[RoleDOMExecution] > 0 && roles[RolePositiveProbe] > 0
 	default:
 		return proofType, false
 	}

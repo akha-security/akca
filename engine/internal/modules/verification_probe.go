@@ -9,6 +9,7 @@ import (
 
 	"github.com/akha-security/akca/engine/internal/config"
 	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/learning"
 	"github.com/akha-security/akca/engine/internal/payloadgen"
 	"github.com/akha-security/akca/engine/internal/verification"
 )
@@ -119,7 +120,7 @@ func (r *Runner) enrichVerification(ctx context.Context, module string, target S
 
 func usesModuleManagedProof(module string) bool {
 	switch module {
-	case "client_ssti", "idor", "bfla", "mass_assignment", "jwt", "oauth",
+	case "csti_detection", "jsonp_callback", "ws_cswsh", "parser_differential", "cors", "second_order", "http_smuggling", "route_auth_bypass", "client_ssti", "idor", "bfla", "mass_assignment", "jwt", "oauth",
 		"rate_limit", "account_enum", "race_condition", "business_logic", "file_upload",
 		"cache_poisoning", "cache_deception", "cpdos", "broken_auth", "csrf", "smuggling", "websocket", "http_methods",
 		"account_recovery", "webhook_security", "tenant_isolation", "session_lifecycle", "secret_exposure":
@@ -313,6 +314,10 @@ func (r *Runner) buildCandidate(ctx context.Context, module string, target ScanT
 		DirectTypedSignal:  true,
 		ProofPolicyVersion: verification.CurrentProofPolicyVersion,
 		RequestedProofType: verification.DefaultProofType(module),
+	}
+	if r.db != nil {
+		profile := learning.NewStore(r.db).Load(hostFromModuleURL(target.EndpointURL), target.EndpointURL)
+		candidate.LearningFP = profile.FalsePositiveRate(module)
 	}
 	baselineObservation := r.observation(module, target, verification.RoleNativeBaseline, 1, baseline)
 	if baselineObservation.Valid() {

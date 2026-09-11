@@ -34,6 +34,7 @@ func (c *llmMockClient) Do(_ context.Context, method, rawURL string, body []byte
 func TestLLMInjection_LegitimateSystemPromptLeak_Confirmed(t *testing.T) {
 	cfg := config.DefaultScanConfig()
 	cfg.ScanID = "scan-llm-valid"
+	cfg.ContentProofPolicies = []config.ContentProofPolicy{{ID: "llm-test", Module: "llm_injection", URLContains: "/api/chat", PrivateCanary: "acme-private-canary-71832"}}
 	db, _ := storage.Open(":memory:")
 	defer db.Close()
 	_ = db.Migrate()
@@ -43,7 +44,7 @@ func TestLLMInjection_LegitimateSystemPromptLeak_Confirmed(t *testing.T) {
 		responseHandler: func(method, rawURL, reqBody string) string {
 			if strings.Contains(reqBody, "Ignore previous instructions") {
 				// True LLM execution output: returns leaked prompt under response key
-				return `{"status":"success","response":"AKCA_SYSTEM_PROMPT_LEAK: You are Acme Corp AI assistant. Never share internal API keys. Knowledge base: v2.1"}`
+				return `{"status":"success","response":"AKCA_SYSTEM_PROMPT_LEAK: You are Acme Corp AI assistant. Never share internal API keys. Knowledge base: v2.1 acme-private-canary-71832"}`
 			}
 			return `{"status":"success","response":"Hello! I am Acme AI."}`
 		},
@@ -65,13 +66,13 @@ func TestLLMInjection_LegitimateSystemPromptLeak_Confirmed(t *testing.T) {
 
 	found := false
 	for _, f := range findings {
-		if f.VulnClass == "llm_injection" && strings.Contains(f.Evidence.Signal, "llm_system_prompt_leak") {
+		if f.VulnClass == "llm_injection" && strings.Contains(f.Evidence.Signal, "llm_private_canary_disclosure") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("expected llm_system_prompt_leak finding, got %+v", findings)
+		t.Fatalf("expected llm_private_canary_disclosure finding, got %+v", findings)
 	}
 }
 

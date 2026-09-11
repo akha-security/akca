@@ -2,7 +2,10 @@ package learning
 
 import (
 	"github.com/akha-security/akca/engine/internal/storage"
+	"sync"
 )
+
+var outcomeWriteMu sync.Mutex
 
 type Store struct {
 	db *storage.DB
@@ -23,14 +26,20 @@ func (s *Store) Load(domain, endpointURL string) Profile {
 	}
 	epRaw, _ := s.db.LoadLearningProfile(domain, endpointURL)
 	ep := profileFromData(domain, endpointURL, epRaw)
-	return Merge(p, ep)
+	merged := Merge(p, ep)
+	// Domain statistics already contain these endpoint events. Use endpoint counts
+	// when available instead of adding the same events a second time.
+	if len(ep.OutcomeCounts) > 0 {
+		merged.OutcomeCounts = cloneOutcomeCounts(ep.OutcomeCounts)
+	}
+	return merged
 }
 
 func profileFromData(domain, endpointURL string, raw storage.LearningProfileData) Profile {
 	return Profile{
 		Domain: domain, EndpointURL: endpointURL,
 		Worked: raw.Worked, Blocked: raw.Blocked, Noisy: raw.Noisy, FalsePositive: raw.FalsePositive,
-		Stability: map[string]int{}, WAFBlocks: map[string]int{},
+		Stability: raw.Stability, WAFBlocks: raw.WAFBlocks, OutcomeCounts: raw.OutcomeCounts,
 	}
 }
 
@@ -40,12 +49,22 @@ func (s *Store) Save(p Profile) error {
 	}
 	data := storage.LearningProfileData{
 		Worked: p.Worked, Blocked: p.Blocked, Noisy: p.Noisy, FalsePositive: p.FalsePositive,
+		OutcomeCounts: p.OutcomeCounts, Stability: p.Stability, WAFBlocks: p.WAFBlocks,
 	}
 	return s.db.SaveLearningProfile(p.Domain, p.EndpointURL, data)
 }
 
 func (s *Store) RecordOutcome(domain, endpointURL, family string, outcome Outcome) error {
-	p := s.Load(domain, endpointURL)
+	if s.db == nil {
+		return nil
+	}
+	outcomeWriteMu.Lock()
+	defer outcomeWriteMu.Unlock()
+	raw, err := s.db.LoadLearningProfile(domain, endpointURL)
+	if err != nil {
+		return err
+	}
+	p := profileFromData(domain, endpointURL, raw)
 	p.Domain = domain
 	p.EndpointURL = endpointURL
 	p = p.Record(family, outcome)

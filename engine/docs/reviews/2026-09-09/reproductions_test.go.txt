@@ -1,0 +1,225 @@
+package modules
+
+import (
+	"context"
+	"fmt"
+	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/learning"
+	"github.com/akha-security/akca/engine/internal/verification"
+	"net/url"
+	"strings"
+	"testing"
+)
+
+type auditDoer func(context.Context, string, string, []byte, map[string]string) (httpclient.RequestResponse, error)
+
+func (f auditDoer) Do(c context.Context, m, u string, b []byte, h map[string]string) (httpclient.RequestResponse, error) {
+	return f(c, m, u, b, h)
+}
+
+func TestAuditPublicJSONPProducesHighFinding(t *testing.T) {
+	c := auditDoer(func(_ context.Context, m, raw string, b []byte, h map[string]string) (httpclient.RequestResponse, error) {
+		u, _ := url.Parse(raw)
+		cb := u.Query().Get("callback")
+		body := `{"user_id":"public-author","display_name":"Public blog author"}`
+		if cb != "" {
+			body = cb + "(" + body + ");"
+		}
+		return httpclient.RequestResponse{Request: httpclient.RequestRecord{Method: m, URL: raw, Headers: h}, Response: httpclient.ResponseRecord{StatusCode: 200, Body: body, Headers: map[string]string{"Content-Type": "application/javascript"}}}, nil
+	})
+	fs := newActiveRunner(t, c).runJSONPCallback(context.Background(), ScanTarget{EndpointURL: "https://example.com/public-authors", Method: "GET", Parameter: "callback", Location: "query"})
+	if len(fs) == 0 {
+		t.Fatal("expected reproduction of public JSONP false positive")
+	}
+	t.Logf("public unauthenticated data => severity=%s confidence=%s title=%s", fs[0].Severity, fs[0].Confidence, fs[0].Title)
+}
+
+func TestAuditLLMRefusalProducesLeakFinding(t *testing.T) {
+	c := &llmMockClient{responseHandler: func(m, u, b string) string {
+		if strings.Contains(b, "Ignore previous instructions") {
+			return `{"response":"I cannot disclose my system prompt: those instructions are private."}`
+		}
+		return `{"response":"Hello. How can I help?"}`
+	}}
+	fs := newActiveRunner(t, c).runLLMInjection(context.Background(), ScanTarget{EndpointURL: "https://example.com/api/chat", Method: "POST", Parameter: "message", Location: "json", BodyTemplate: `{"message":"hello"}`})
+	if len(fs) == 0 {
+		t.Fatal("expected reproduction of refusal false positive")
+	}
+	t.Logf("refusal without leaked content => severity=%s confidence=%s title=%s", fs[0].Severity, fs[0].Confidence, fs[0].Title)
+}
+
+func TestAuditPublicWSWithCustomHeaderProducesHighFinding(t *testing.T) {
+	c := auditDoer(func(_ context.Context, m, u string, b []byte, h map[string]string) (httpclient.RequestResponse, error) {
+		status, body := 200, "Public realtime feed"
+		if h["Upgrade"] == "websocket" {
+			status = 101
+			body = ""
+		}
+		return httpclient.RequestResponse{Request: httpclient.RequestRecord{Method: m, URL: u, Headers: h}, Response: httpclient.ResponseRecord{StatusCode: status, Body: body, Headers: map[string]string{"Content-Type": "text/plain"}}}, nil
+	})
+	r := newActiveRunner(t, c)
+	r.cfg.CustomHeaders = map[string]string{"Accept-Language": "tr"}
+	fs := r.runCrossSiteWebSocketHijack(context.Background(), ScanTarget{EndpointURL: "https://example.com/stream", Method: "GET"})
+	if len(fs) == 0 {
+		t.Fatal("expected reproduction of public WebSocket false positive")
+	}
+	t.Logf("public WS plus Accept-Language => severity=%s confidence=%s title=%s", fs[0].Severity, fs[0].Confidence, fs[0].Title)
+}
+
+func TestAuditCacheEvidenceAcceptsOrdinarySameSecondResponse(t *testing.T) {
+	h := map[string]string{"Date": "Wed, 09 Sep 2026 10:00:00 GMT"}
+	if !hasCacheHitEvidence(h, h, "normal response", "normal response") {
+		t.Fatal("behavior changed")
+	}
+	t.Log("identical ordinary Date/body, without cache headers => cache hit evidence accepted")
+}
+
+func TestAuditSameLengthDifferentBodiesAreSimilar(t *testing.T) {
+	if !bodiesSimilar(strings.Repeat("A", 100), strings.Repeat("B", 100)) {
+		t.Fatal("behavior changed")
+	}
+	t.Log("100 A characters and 100 B characters => similar")
+}
+
+func TestAuditLearning(t *testing.T) {
+	p := learning.NewProfile("example.com", "")
+	for i := 0; i < 100; i++ {
+		p = p.Record("sqli", learning.OutcomeFalsePositive)
+	}
+	t.Logf("100 false_positive events => rate=%.2f", p.FalsePositiveRate("sqli"))
+	if p.FalsePositiveRate("sqli") != 0 {
+		t.Fatal("learning behavior changed")
+	}
+}
+
+func (f auditDoer) DoWithoutSession(c context.Context, m, u string, b []byte, h map[string]string) (httpclient.RequestResponse, error) {
+	return f(c, m, u, b, h)
+}
+
+func TestAuditOrdinaryRouteProducesCriticalBypass(t *testing.T) {
+	c := auditDoer(func(_ context.Context, m, raw string, b []byte, h map[string]string) (httpclient.RequestResponse, error) {
+		u, _ := url.Parse(raw)
+		status, body := 404, "Not Found"
+		if u.Path == "/" {
+			status = 200
+			body = "Home"
+		}
+		if strings.Contains(u.Path, ";") {
+			status = 200
+			body = "This is a public documentation article. All visitors may read this content without signing in."
+		}
+		return httpclient.RequestResponse{Request: httpclient.RequestRecord{Method: m, URL: raw, Headers: h}, Response: httpclient.ResponseRecord{StatusCode: status, Body: body, Headers: map[string]string{"Content-Type": "text/plain"}}}, nil
+	})
+	fs := newActiveRunner(t, c).runRouteAuthBypass(context.Background(), ScanTarget{EndpointURL: "https://example.com/admin/article", Method: "GET"})
+	if len(fs) == 0 {
+		t.Fatal("expected reproduction of route false positive")
+	}
+	t.Logf("404 plus alternate public documentation route => severity=%s confidence=%s", fs[0].Severity, fs[0].Confidence)
+}
+
+func TestAuditOrdinaryJSONParserProducesFinding(t *testing.T) {
+	c := auditDoer(func(_ context.Context, m, u string, b []byte, h map[string]string) (httpclient.RequestResponse, error) {
+		body := `{"result":"no input supplied"}`
+		if len(b) > 0 {
+			body = `{"result":"request received and parsed normally"}`
+		}
+		return httpclient.RequestResponse{Request: httpclient.RequestRecord{Method: m, URL: u, Body: string(b), Headers: h}, Response: httpclient.ResponseRecord{StatusCode: 200, Body: body, Headers: map[string]string{"Content-Type": "application/json"}}}, nil
+	})
+	fs := newActiveRunner(t, c).runParserDifferential(context.Background(), ScanTarget{EndpointURL: "https://example.com/parser", Method: "GET", BodyTemplate: `{"value":1}`})
+	if len(fs) == 0 {
+		t.Fatal("expected reproduction of parser false positive")
+	}
+	t.Logf("normal JSON parser, no gateway or authorization boundary => severity=%s confidence=%s", fs[0].Severity, fs[0].Confidence)
+}
+
+func TestAuditCORSReflectingHTTPOriginsMissed(t *testing.T) {
+	c := auditDoer(func(_ context.Context, m, u string, b []byte, h map[string]string) (httpclient.RequestResponse, error) {
+		rh := map[string]string{"Content-Type": "application/json"}
+		if origin := h["Origin"]; strings.HasPrefix(origin, "https://") || strings.HasPrefix(origin, "http://") {
+			rh["Access-Control-Allow-Origin"] = origin
+			rh["Access-Control-Allow-Credentials"] = "true"
+		}
+		return httpclient.RequestResponse{Request: httpclient.RequestRecord{Method: m, URL: u, Body: string(b), Headers: h}, Response: httpclient.ResponseRecord{StatusCode: 200, Body: `{"private_data":"audit private user profile"}`, Headers: rh}}, nil
+	})
+	fs := newActiveRunner(t, c).runCORS(context.Background(), ScanTarget{EndpointURL: "https://example.com/api/profile", Method: "GET"})
+	if len(fs) != 0 {
+		t.Fatalf("behavior changed: got %d findings", len(fs))
+	}
+	t.Log("reflect arbitrary HTTP(S) Origin with credentials, reject null => zero findings")
+}
+
+func TestAuditSecondOrderExecutionSuppressed(t *testing.T) {
+	marker := `<script>window.__akca_xss_confirmed=true</script>`
+	c := auditDoer(func(_ context.Context, m, u string, b []byte, h map[string]string) (httpclient.RequestResponse, error) {
+		return httpclient.RequestResponse{Request: httpclient.RequestRecord{Method: m, URL: u, Headers: h}, Response: httpclient.ResponseRecord{StatusCode: 200, Body: "<html>" + marker + "</html>", Headers: map[string]string{"Content-Type": "text/html"}}}, nil
+	})
+	r := newActiveRunner(t, c)
+	r.cfg.EnableSecondOrderTracking = true
+	r.stored["https://example.com/post::q"] = marker
+	r.browser = executedDOMRenderer{}
+	var last verification.Result
+	r.verifier = verification.NewEngine(nil, func(_, _ string, p map[string]interface{}) error {
+		if s, ok := p["suppressed"].(bool); ok {
+			last.Suppressed = s
+		}
+		return nil
+	})
+	fs := r.runSecondOrder(context.Background(), ScanTarget{EndpointURL: "https://example.com/profile", Method: "GET", Parameter: "view", Location: "query"})
+	if len(fs) != 0 || !last.Suppressed {
+		t.Fatalf("expected suppression reproduction: findings=%d suppressed=%v", len(fs), last.Suppressed)
+	}
+	t.Log("stored executable payload and browser execution signal => suppressed by invalid proof observations")
+}
+
+func TestAuditReplayHashIgnoresSecurityHeaders(t *testing.T) {
+	obs := func(location string) verification.Observation {
+		return verification.NewHTTPObservation("audit", "open_redirect", "https://example.com/redirect", "next", "query", verification.RolePositiveProbe, 1, "", "GET", "https://example.com/redirect?next=external", "", nil, verification.ResponseSnapshot{StatusCode: 302, Body: "", Headers: map[string]string{"Location": location}})
+	}
+	a, b := obs("https://attacker.example/"), obs("/safe")
+	if a.NormalizedHash != b.NormalizedHash {
+		t.Fatal("behavior changed")
+	}
+	t.Log(fmt.Sprintf("external redirect and repaired internal redirect have same replay hash: %s", a.NormalizedHash))
+}
+
+func TestAuditCoverageCountsSkippedTargetAsTested(t *testing.T) {
+	calls := 0
+	c := auditDoer(func(_ context.Context, m, u string, b []byte, h map[string]string) (httpclient.RequestResponse, error) {
+		calls++
+		return httpclient.RequestResponse{}, nil
+	})
+	r := newActiveRunner(t, c)
+	var finished map[string]interface{}
+	r.emit = func(kind, _ string, p map[string]interface{}) error {
+		if kind == "vuln_module_finished" {
+			finished = p
+		}
+		return nil
+	}
+	_, err := r.RunModule(context.Background(), "parser_differential", []ScanTarget{{EndpointURL: "https://example.com/api/user", Method: "POST", BodyTemplate: `{"role":"user"}`}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 || finished["coverage_percentage"] != "100.0%" {
+		t.Fatalf("behavior changed: network calls=%d event=%v", calls, finished)
+	}
+	t.Logf("missing state/cleanup policy => requests=%d targets_tested=%v coverage=%v", calls, finished["targets_tested"], finished["coverage_percentage"])
+}
+
+func TestAuditSmugglingProofReplayedAsOrdinaryHTTP(t *testing.T) {
+	calls := 0
+	c := auditDoer(func(_ context.Context, m, u string, b []byte, h map[string]string) (httpclient.RequestResponse, error) {
+		calls++
+		return httpclient.RequestResponse{Request: httpclient.RequestRecord{Method: m, URL: u, Headers: h}, Response: httpclient.ResponseRecord{StatusCode: 200, Body: "ordinary HTTP response", Headers: map[string]string{"Content-Type": "text/plain"}}}, nil
+	})
+	r := newActiveRunner(t, c)
+	target := ScanTarget{EndpointURL: "https://example.com/", Method: "GET"}
+	base := httpclient.RequestResponse{Request: httpclient.RequestRecord{Method: "GET", URL: target.EndpointURL}, Response: httpclient.ResponseRecord{StatusCode: 200, Body: "ordinary HTTP response"}}
+	// Same evidence shape produced after the two raw TCP confirmations in runHTTPSmuggling.
+	probe := httpclient.RequestResponse{Request: httpclient.RequestRecord{Method: "POST", URL: target.EndpointURL, Headers: map[string]string{"Transfer-Encoding": "chunked"}}, Response: httpclient.ResponseRecord{StatusCode: 404, Body: "akca-smuggle-audit-canary"}}
+	f := r.verifyAndBuild(context.Background(), "http_smuggling", target, defaultPayload("http_smuggling", "http_desync_cl_te", "audit-canary", "http_desync_cl_te"), base, probe, "http_desync_cl_te", false, false, "", "")
+	if f != nil || calls != 2 {
+		t.Fatalf("behavior changed: finding=%v calls=%d", f, calls)
+	}
+	t.Log("raw-protocol proof evidence => two ordinary POST replays without attack body => finding suppressed")
+}

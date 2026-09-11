@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/net/html"
 	"net/url"
 	"strings"
 	"time"
@@ -15,18 +16,22 @@ import (
 )
 
 func (r *Runner) runClientSSTI(ctx context.Context, target ScanTarget) []ModuleFinding {
-	if ok, reason := r.shouldRunModule("client_ssti", target); !ok {
-		r.emitSkip("client_ssti", target, reason)
+	return r.runBrowserCSTI(ctx, target, "client_ssti")
+}
+
+func (r *Runner) runBrowserCSTI(ctx context.Context, target ScanTarget, module string) []ModuleFinding {
+	if ok, reason := r.shouldRunModule(module, target); !ok {
+		r.emitSkip(module, target, reason)
 		return nil
 	}
 	if r.browser == nil {
 		r.runClientSSTICoverage(ctx, target, "browser execution is unavailable")
-		r.emitSkip("client_ssti", target, "browser execution is unavailable; reflection alone is not proof")
+		r.emitSkip(module, target, "browser execution is unavailable; reflection alone is not proof")
 		return nil
 	}
-	if strings.ToUpper(target.Method) != "" && strings.ToUpper(target.Method) != "GET" {
+	if (target.Location != "" && target.Location != "query") || strings.ToUpper(target.Method) != "" && strings.ToUpper(target.Method) != "GET" {
 		r.emitClientSSTIGap(target, "browser confirmation currently requires a GET/query surface", false, false)
-		r.emitSkip("client_ssti", target, "browser confirmation currently requires a GET/query surface")
+		r.emitSkip(module, target, "browser confirmation currently requires a GET/query surface")
 		return nil
 	}
 	baseline, err := r.probe(ctx, target, "akca-base")
@@ -45,15 +50,21 @@ func (r *Runner) runClientSSTI(ctx context.Context, target ScanTarget) []ModuleF
 			continue
 		}
 		dom, renderErr := r.browser.Render(ctx, rr.Request.URL)
-		if renderErr != nil || !strings.Contains(dom, `data-akca-csti="`+marker+`"`) {
+		if renderErr != nil || !rootDOMMarker(dom, "data-akca-csti", marker) || rootDOMMarker(rr.Response.Body, "data-akca-csti", marker) {
 			continue
 		}
-		p := defaultPayload("client_ssti", pr.signal, pr.payload, pr.signal)
-		f := r.verifyAndBuild(ctx, "client_ssti", target, p, baseline, rr, pr.signal, true, true, "", "")
+		controlDOM, controlErr := r.browser.Render(ctx, baseline.Request.URL)
+		replayDOM, replayErr := r.browser.Render(ctx, rr.Request.URL)
+		if controlErr != nil || replayErr != nil || rootDOMMarker(controlDOM, "data-akca-csti", marker) || !rootDOMMarker(replayDOM, "data-akca-csti", marker) {
+			continue
+		}
+		p := defaultPayload(module, pr.signal, pr.payload, pr.signal)
+		f := r.verifyAndBuildWithCandidate(ctx, module, target, p, baseline, rr, pr.signal, true, true, "", "", func(c *verification.Candidate) { c.ExpectedEquivalent = true })
 		if f != nil {
+			f.Title = "Client-Side Template Injection (browser execution)"
 			f.Description = "Browser execution set the unique DOM marker " + marker + "; reflection-only responses are not reported."
 		}
-		r.recordFinding(ctx, &out, f, "client_ssti", pr.signal)
+		r.recordFinding(ctx, &out, f, module, pr.signal)
 	}
 	return out
 }
@@ -253,15 +264,7 @@ func (r *Runner) runPrototypePollution(ctx context.Context, target ScanTarget) [
 				continue
 			}
 			if ok, signal := sspp.Analyze(baseline.Response.Body, baseline.Response.StatusCode, rr.Response.Body, rr.Response.StatusCode, pr); ok {
-				p := defaultPayload("prototype_pollution", pr.Name, pr.Body, signal)
-				f := r.verifyAndBuild(ctx, "prototype_pollution", target, p, baseline, rr, signal, false, false, "", "")
-				if f != nil {
-					f.Title = "Client-Side Prototype Pollution (" + signal + ")"
-					f.Severity = "high"
-					f.Description = "Client-side prototype pollution vulnerability detected via DOM property / gadget injection."
-					r.recordFinding(ctx, &out, f, "prototype_pollution", signal)
-					break
-				}
+				r.emitDiscovery("prototype_pollution", target, signal, "Response text changed; Object.prototype mutation in a browser has not been demonstrated")
 			}
 		}
 	}
@@ -485,4 +488,21 @@ func (r *Runner) runInsecureDeserialization(ctx context.Context, target ScanTarg
 		}
 	}
 	return out
+}
+
+func rootDOMMarker(body, key, value string) bool {
+	doc, err := html.Parse(strings.NewReader(body))
+	if err != nil {
+		return false
+	}
+	for n := doc.FirstChild; n != nil; n = n.NextSibling {
+		if n.Type == html.ElementNode && n.Data == "html" {
+			for _, attr := range n.Attr {
+				if attr.Key == key && attr.Val == value {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

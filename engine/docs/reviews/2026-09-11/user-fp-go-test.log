@@ -1,0 +1,87 @@
+ok  	github.com/akha-security/akca/engine/cmd/akca	21.978s
+?   	github.com/akha-security/akca/engine/cmd/akca-api	[no test files]
+?   	github.com/akha-security/akca/engine/cmd/akca-policy	[no test files]
+ok  	github.com/akha-security/akca/engine/internal/anomaly	0.657s
+ok  	github.com/akha-security/akca/engine/internal/apikeyvalidator	0.373s
+ok  	github.com/akha-security/akca/engine/internal/apinative	0.753s
+ok  	github.com/akha-security/akca/engine/internal/app	3.772s
+ok  	github.com/akha-security/akca/engine/internal/auth	2.597s
+ok  	github.com/akha-security/akca/engine/internal/benchmark	14.446s
+?   	github.com/akha-security/akca/engine/internal/branding	[no test files]
+ok  	github.com/akha-security/akca/engine/internal/browserpool	4.304s
+ok  	github.com/akha-security/akca/engine/internal/businesslogic	1.483s
+ok  	github.com/akha-security/akca/engine/internal/bypass403	2.494s
+ok  	github.com/akha-security/akca/engine/internal/casesense	0.521s
+ok  	github.com/akha-security/akca/engine/internal/checkpoint	1.490s
+ok  	github.com/akha-security/akca/engine/internal/cloudposture	0.800s
+ok  	github.com/akha-security/akca/engine/internal/comparison	1.344s
+ok  	github.com/akha-security/akca/engine/internal/config	0.686s
+ok  	github.com/akha-security/akca/engine/internal/correlation	1.049s
+ok  	github.com/akha-security/akca/engine/internal/crawler	1.699s
+ok  	github.com/akha-security/akca/engine/internal/deeptraversal	0.343s
+ok  	github.com/akha-security/akca/engine/internal/deserialization	0.376s
+ok  	github.com/akha-security/akca/engine/internal/distributed	1.652s
+ok  	github.com/akha-security/akca/engine/internal/domtaint	0.831s
+ok  	github.com/akha-security/akca/engine/internal/events	0.716s
+ok  	github.com/akha-security/akca/engine/internal/evidencemarkers	0.613s
+?   	github.com/akha-security/akca/engine/internal/evidencestore	[no test files]
+ok  	github.com/akha-security/akca/engine/internal/findingevent	0.584s
+ok  	github.com/akha-security/akca/engine/internal/findingtext	0.682s
+ok  	github.com/akha-security/akca/engine/internal/fingerprint	2.771s
+ok  	github.com/akha-security/akca/engine/internal/fuzzing	1.463s
+ok  	github.com/akha-security/akca/engine/internal/gitrecover	0.611s
+ok  	github.com/akha-security/akca/engine/internal/graphqlattack	0.602s
+ok  	github.com/akha-security/akca/engine/internal/httpclient	7.503s
+ok  	github.com/akha-security/akca/engine/internal/integrations	1.098s
+ok  	github.com/akha-security/akca/engine/internal/jsanalyzer	0.535s
+ok  	github.com/akha-security/akca/engine/internal/learning	1.384s
+ok  	github.com/akha-security/akca/engine/internal/logincapture	1.038s
+?   	github.com/akha-security/akca/engine/internal/models	[no test files]
+ok  	github.com/akha-security/akca/engine/internal/modules	11.141s
+ok  	github.com/akha-security/akca/engine/internal/modules/cve	0.532s
+ok  	github.com/akha-security/akca/engine/internal/mutation	0.629s
+ok  	github.com/akha-security/akca/engine/internal/nosql	0.644s
+ok  	github.com/akha-security/akca/engine/internal/notifications	2.057s
+ok  	github.com/akha-security/akca/engine/internal/oast	1.412s
+ok  	github.com/akha-security/akca/engine/internal/observability	1.544s
+ok  	github.com/akha-security/akca/engine/internal/packs	1.771s
+ok  	github.com/akha-security/akca/engine/internal/params	1.772s
+ok  	github.com/akha-security/akca/engine/internal/payloadgen	1.699s
+ok  	github.com/akha-security/akca/engine/internal/planner	1.500s
+ok  	github.com/akha-security/akca/engine/internal/plugins	0.747s
+ok  	github.com/akha-security/akca/engine/internal/policy	1.365s
+ok  	github.com/akha-security/akca/engine/internal/proxy	0.636s
+?   	github.com/akha-security/akca/engine/internal/queue	[no test files]
+ok  	github.com/akha-security/akca/engine/internal/ratelimit	1.405s
+ok  	github.com/akha-security/akca/engine/internal/reflection	1.441s
+ok  	github.com/akha-security/akca/engine/internal/report	4.698s
+ok  	github.com/akha-security/akca/engine/internal/resilience	24.577s
+ok  	github.com/akha-security/akca/engine/internal/rulesdk	0.606s
+ok  	github.com/akha-security/akca/engine/internal/safemutation	0.588s
+ok  	github.com/akha-security/akca/engine/internal/scanapi	1.584s
+ok  	github.com/akha-security/akca/engine/internal/scheduler	2.460s
+ok  	github.com/akha-security/akca/engine/internal/scope	0.918s
+ok  	github.com/akha-security/akca/engine/internal/scriptsurface	0.636s
+ok  	github.com/akha-security/akca/engine/internal/secrets	0.884s
+ok  	github.com/akha-security/akca/engine/internal/secretscan	1.008s
+ok  	github.com/akha-security/akca/engine/internal/sensitivedata	0.898s
+ok  	github.com/akha-security/akca/engine/internal/sensor	1.071s
+ok  	github.com/akha-security/akca/engine/internal/session	0.891s
+ok  	github.com/akha-security/akca/engine/internal/sessionhealer	0.842s
+ok  	github.com/akha-security/akca/engine/internal/shadowapi	0.632s
+ok  	github.com/akha-security/akca/engine/internal/sourcedisclosure	0.583s
+ok  	github.com/akha-security/akca/engine/internal/specingest	0.794s
+ok  	github.com/akha-security/akca/engine/internal/sspp	0.727s
+ok  	github.com/akha-security/akca/engine/internal/sstibypass	1.284s
+ok  	github.com/akha-security/akca/engine/internal/stategraph	1.808s
+ok  	github.com/akha-security/akca/engine/internal/storage	4.054s
+ok  	github.com/akha-security/akca/engine/internal/subdomain	1.972s
+?   	github.com/akha-security/akca/engine/internal/testfixtures	[no test files]
+ok  	github.com/akha-security/akca/engine/internal/testlab	6.121s
+ok  	github.com/akha-security/akca/engine/internal/timingblind	1.352s
+ok  	github.com/akha-security/akca/engine/internal/urlutil	0.698s
+ok  	github.com/akha-security/akca/engine/internal/verification	1.558s
+ok  	github.com/akha-security/akca/engine/internal/waf	0.864s
+ok  	github.com/akha-security/akca/engine/internal/wafintel	1.221s
+ok  	github.com/akha-security/akca/engine/internal/workflow	0.933s
+ok  	github.com/akha-security/akca/engine/internal/workspace	0.714s
