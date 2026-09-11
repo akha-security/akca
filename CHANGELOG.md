@@ -5,6 +5,31 @@ All notable changes to AKCA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.9] - 2026-09-11
+
+### Fixed
+
+- Reduce false positives in CORS, open redirects, CSTI, JSONP, WebSocket, prototype pollution, parser differential and route authentication checks by requiring evidence of the claimed security effect.
+- Validate actual redirect destinations instead of attacker URLs embedded in nested query parameters.
+- Repair stored-XSS tracking and raw HTTP smuggling verification; preserve raw request and response evidence.
+- Include response status and security-relevant headers in finding replay comparisons.
+- Correct coverage accounting, persistent learning outcome counts, response similarity and cache-hit detection.
+- Share request budgets across HTTP, browser HTTP and raw protocol probe paths.
+- Restore Copy Response, Copy Request and Copy cURL in HTML reports, including a clipboard fallback.
+- Isolate the CLI integration test from the user's data directory.
+
+### Added
+
+- Private-canary proof policies and browser cross-origin read observations.
+- Regression tests for the reported false positives, raw protocol replay, clipboard behavior and shared budgets.
+- Audit and validation reports documenting remaining verification limits.
+
+### Validation
+
+- The preceding changes passed tests in 80 Go packages and `go vet`.
+- The strict observed benchmark passed for the existing corpus.
+- Live third-party/browser coverage is not inferred from fixture tests; local race testing required an unavailable GCC toolchain.
+
 ## [0.1.8] - 2026-09-08
 
 ### Added
@@ -223,7 +248,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - HTML, JSON, Markdown, CSV and SARIF reporting.
 - CWE and OWASP Top 10:2025 report classification.
 
-[Unreleased]: https://github.com/akha-security/akca/compare/engine/v0.1.8...HEAD
+[Unreleased]: https://github.com/akha-security/akca/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/akha-security/akca/releases/tag/v0.1.9
 [0.1.8]: https://github.com/akha-security/akca/releases/tag/engine/v0.1.8
 [0.1.7]: https://github.com/akha-security/akca/releases/tag/v0.1.7
 [0.1.6]: https://github.com/akha-security/akca/releases/tag/v0.1.6
