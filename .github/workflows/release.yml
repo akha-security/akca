@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-      - 'engine/v*'
 
 permissions:
   contents: write
