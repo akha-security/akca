@@ -1364,7 +1364,7 @@ func findingMetaHTML(f FindingEntry) string {
 }
 
 func httpEvidenceHTML(ev HTTPEvidence) string {
-	if ev.RawRequest == "" && ev.RawResponse == "" && ev.CurlCommand == "" && ev.Payload == "" {
+	if ev.RawRequest == "" && ev.RawResponse == "" && ev.RespBody == "" && ev.CurlCommand == "" && ev.Payload == "" {
 		return ""
 	}
 	markers := evidencemarkers.ForReport(ev.Payload, ev.Signal, ev.RespBody, ev.ResponseMarkers)
@@ -1416,6 +1416,9 @@ func httpEvidenceHTML(ev HTTPEvidence) string {
 	if ev.RawResponse != "" {
 		b.WriteString(`<details><summary>▼ Show Raw HTTP Response (proof highlighted)</summary><div class="code-header"><span>HTTP Response</span><button type="button" class="copy-btn" onclick="copyToClipboard(this)">📋 Copy Response</button></div><pre class="http">` +
 			highlightEvidence(template.HTMLEscapeString(ev.RawResponse), markers) + `</pre></details>`)
+	} else if ev.RespBody != "" {
+		b.WriteString(`<details open><summary>▼ Show Response Evidence (finding highlighted)</summary><div class="code-header"><span>Response excerpt</span><button type="button" class="copy-btn" onclick="copyToClipboard(this)">📋 Copy Response</button></div><pre class="http">` +
+			highlightEvidence(template.HTMLEscapeString(ev.RespBody), markers) + `</pre></details>`)
 	}
 	if ev.CurlCommand != "" {
 		b.WriteString(`<details><summary>▼ Show cURL Command (Reproduce)</summary><div class="code-header"><span>cURL Reproduction Command</span><button type="button" class="copy-btn" onclick="copyToClipboard(this)">📋 Copy cURL</button></div><pre class="http">` + template.HTMLEscapeString(ev.CurlCommand) + `</pre></details>`)

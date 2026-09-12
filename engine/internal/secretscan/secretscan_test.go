@@ -109,6 +109,19 @@ func TestEvidenceJSONKeepsRawSecretForCompleteReporting(t *testing.T) {
 	}
 }
 
+func TestEvidenceJSONWithResponseKeepsBoundedMatchingExcerpt(t *testing.T) {
+	raw := testfixtures.GitHubToken()
+	body := strings.Repeat("a", 500) + `{"api_key":"` + raw + `"}` + strings.Repeat("z", 500)
+	ev := EvidenceJSONWithResponse("github_token", raw, "https://example.com/app.js", 7, body)
+	if !strings.Contains(ev, `"resp_body"`) || !strings.Contains(ev, `"response_markers"`) ||
+		!strings.Contains(ev, raw) {
+		t.Fatalf("response evidence is incomplete: %s", ev)
+	}
+	if strings.Contains(ev, strings.Repeat("a", 400)) || strings.Contains(ev, strings.Repeat("z", 400)) {
+		t.Fatalf("response evidence stored the whole large response: %s", ev)
+	}
+}
+
 func TestReportableFiltersPublicAndLowConfidenceIdentifiers(t *testing.T) {
 	if !IsReportable(Match{Kind: "github_token", Confidence: 0.9}) {
 		t.Fatal("provider credential should remain reportable")

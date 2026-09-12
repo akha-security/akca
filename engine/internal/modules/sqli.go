@@ -56,8 +56,9 @@ func (r *Runner) runSQLi(ctx context.Context, target ScanTarget) []ModuleFinding
 		if p.IsNegativeControl || p.IsControl {
 			continue
 		}
-		// Fast-fail: if initial core error/boolean probes produce zero signal or error, terminate.
-		if idx >= fastFailLimit && !earlySignalFound && len(out) == 0 {
+		// Only an explicitly fast scan may stop the classic family after its
+		// initial scouts. Normal/unlimited scans must reach later dialects.
+		if r.cfg.ScanIntensity == "fast" && idx >= fastFailLimit && !earlySignalFound && len(out) == 0 {
 			break
 		}
 		// Content-difference SQLi must be evaluated as a matched true/false
@@ -163,6 +164,12 @@ func (r *Runner) runSQLi(ctx context.Context, target ScanTarget) []ModuleFinding
 				continue
 			}
 			syntaxControl := sqliSyntaxPreservingControl(probePayload.Value)
+			if isNumeric && (syntaxControl == "''" || syntaxControl == `""`) {
+				syntaxControl = nativeVal
+				if syntaxControl == "" {
+					syntaxControl = "1"
+				}
+			}
 			controlRR, controlErr := r.probeForModule(ctx, "sqli", probeTarget, syntaxControl)
 			if controlErr != nil || sqliErrorInBody(controlRR.Response.Body, baseline.Response.Body) {
 				continue
@@ -221,6 +228,10 @@ func (r *Runner) runSQLi(ctx context.Context, target ScanTarget) []ModuleFinding
 		}
 	}
 
+	if findings := r.numericArithmeticSQLiProbe(ctx, target, baseline); len(findings) > 0 {
+		out = append(out, findings...)
+		return out
+	}
 	if findings := r.booleanBlindSQLiProbe(ctx, target, baseline); len(findings) > 0 {
 		out = append(out, findings...)
 		return out

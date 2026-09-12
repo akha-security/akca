@@ -439,7 +439,8 @@ func (r *Runner) fallbackTargetsFromEndpoints(limit int) ([]ScanTarget, error) {
 		}
 		names := paramsFromURL(ep.URL)
 		pathNames := pathParamsFromURL(ep.URL)
-		if len(names) == 0 && len(pathNames) == 0 {
+		bodyParams, bodyLoc := paramsFromBody(ep.RequestTemplate.Body, ep.RequestTemplate.ContentType)
+		if len(names) == 0 && len(pathNames) == 0 && len(bodyParams) == 0 {
 			continue
 		}
 		for _, name := range names {
@@ -488,7 +489,6 @@ func (r *Runner) fallbackTargetsFromEndpoints(limit int) ([]ScanTarget, error) {
 				},
 			})
 		}
-		bodyParams, bodyLoc := paramsFromBody(ep.RequestTemplate.Body, ep.RequestTemplate.ContentType)
 		for _, name := range bodyParams {
 			key := ep.URL + "::" + method + "::" + name + "::" + bodyLoc
 			if _, ok := seen[key]; ok {

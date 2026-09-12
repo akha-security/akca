@@ -53,6 +53,9 @@ func (r *Runner) scheduleDelayedTimingProbe(entry delayedTimingProbe) {
 	r.timingMu.Lock()
 	defer r.timingMu.Unlock()
 	r.delayedTiming = append(r.delayedTiming, entry)
+	if entry.Target.coverage != nil {
+		entry.Target.coverage.pendingTiming.Add(1)
+	}
 }
 
 func (r *Runner) flushDelayedTimingVerifications(ctx context.Context) []ModuleFinding {
@@ -90,8 +93,15 @@ func (r *Runner) flushDelayedTimingVerifications(ctx context.Context) []ModuleFi
 	}
 	var out []ModuleFinding
 	for _, item := range pending {
+		ctx := ctx
+		if item.Target.coverage != nil {
+			ctx = withTargetRun(ctx, item.Target.coverage)
+		}
 		if ctx.Err() != nil {
 			break
+		}
+		if item.Target.coverage != nil {
+			item.Target.coverage.pendingTiming.Add(-1)
 		}
 		start := time.Now()
 		rr, err := r.probeForModule(ctx, item.Module, item.Target, item.Payload.Value)

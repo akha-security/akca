@@ -45,7 +45,7 @@ func (a *Analyzer) AnalyzeContent(jsURL, body string) AnalysisResult {
 	filtered := FilterByConfidence(merged, MinConfidence)
 
 	return AnalysisResult{
-		JSURL: jsURL, Truncated: truncated, PreviewOnly: previewOnly, BytesAnalyzed: len(content),
+		SourceContent: content, JSURL: jsURL, Truncated: truncated, PreviewOnly: previewOnly, BytesAnalyzed: len(content),
 		Endpoints: filtered, Secrets: DetectSecrets(content),
 		SourceMaps: DetectSourceMaps(jsURL, content), InternalPaths: DetectInternalPaths(content),
 		AnalyzedAt: nowTS(),
@@ -123,7 +123,7 @@ func (a *Analyzer) publishResult(result AnalysisResult) {
 			"scan_id": a.scanID, "from_file": sm.FromFile, "map_url": sm.URL,
 		})
 		title := "Exposed JavaScript Source Map"
-		evidence := passiveEvidenceJSON("secret_exposure", "source_map_exposed", sm.URL, sm.FromFile)
+		evidence := passiveEvidenceJSON("secret_exposure", "source_map_exposed", sm.URL, sm.FromFile, result.SourceContent)
 		findingID, err := a.db.SaveFinding(a.scanID, title, "info", "secret_exposure",
 			"Source map reference found in JavaScript: "+sm.URL, sm.FromFile, "", 0.9, evidence)
 		if err == nil {
@@ -145,7 +145,7 @@ func (a *Analyzer) publishResult(result AnalysisResult) {
 		}
 		title := "Secret-like string in JavaScript (" + sec.Kind + ")"
 		desc := sec.Kind + " pattern detected in JS source: " + sec.Value
-		evidence := secretscan.EvidenceJSON(sec.Kind, sec.Value, result.JSURL, sec.LineHint)
+		evidence := secretscan.EvidenceJSONWithResponse(sec.Kind, sec.Value, result.JSURL, sec.LineHint, result.SourceContent)
 		severity := secretscan.Severity(sec.Confidence)
 		findingID, err := a.db.SaveFinding(a.scanID, title, severity, "secret_exposure",
 			desc, result.JSURL, "", sec.Confidence, evidence)
@@ -167,7 +167,7 @@ func (a *Analyzer) publishResult(result AnalysisResult) {
 		// third-party package imports are skipped to avoid noise.
 		if ip.Kind == "internal" {
 			title := "Internal path reference in JavaScript"
-			evidence := passiveEvidenceJSON("information_disclosure", "internal_path_disclosure", ip.Path, result.JSURL)
+			evidence := passiveEvidenceJSON("information_disclosure", "internal_path_disclosure", ip.Path, result.JSURL, result.SourceContent)
 			findingID, err := a.db.SaveFinding(a.scanID, title, "info", "information_disclosure",
 				"Internal path/module reference found in JS: "+ip.Path, result.JSURL, "", ip.Confidence, evidence)
 			if err == nil {
@@ -210,7 +210,7 @@ func (a *Analyzer) verifySourceMaps(ctx context.Context, refs []SourceMapRef) []
 	return verified
 }
 
-func passiveEvidenceJSON(module, signal, payload, sourceURL string) string {
+func passiveEvidenceJSON(module, signal, payload, sourceURL string, responseBody ...string) string {
 	evidence := map[string]interface{}{
 		"module":   module,
 		"signal":   signal,
@@ -219,6 +219,12 @@ func passiveEvidenceJSON(module, signal, payload, sourceURL string) string {
 		"request": map[string]interface{}{
 			"method": "GET", "url": sourceURL,
 		},
+	}
+	if len(responseBody) > 0 {
+		if excerpt := secretscan.ResponseSnippet(responseBody[0], payload); excerpt != "" {
+			evidence["resp_body"] = excerpt
+			evidence["response_markers"] = []string{payload}
+		}
 	}
 	raw, _ := json.Marshal(evidence)
 	return string(raw)

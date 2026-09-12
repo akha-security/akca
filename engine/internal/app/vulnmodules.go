@@ -130,15 +130,16 @@ func (e *Engine) vulnModuleRunner() *modules.Runner {
 		oastClient = e.oast
 	}
 	cfg := e.session.Config
+	opts := e.moduleRunnerOpts()
 	if cfg.RequestBudget > 0 && e.client != nil {
 		spent := int(e.client.TotalRequests())
 		remaining := cfg.RequestBudget - spent
 		if remaining < 0 {
 			remaining = 0
 		}
-		cfg.RequestBudget = remaining
+		opts = append(opts, modules.WithRemainingRequestBudget(remaining))
 	}
-	e.moduleRunner = modules.NewRunner(e.session.ID, e.client, e.scope, e.db, e.verifier, oastClient, e.Emit, cfg, e.moduleRunnerOpts()...)
+	e.moduleRunner = modules.NewRunner(e.session.ID, e.client, e.scope, e.db, e.verifier, oastClient, e.Emit, cfg, opts...)
 	return e.moduleRunner
 }
 

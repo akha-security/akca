@@ -22,11 +22,16 @@ func (r *Runner) probe(ctx context.Context, target ScanTarget, payload string) (
 }
 
 func (r *Runner) probeForModule(ctx context.Context, module string, target ScanTarget, payload string) (httpclient.RequestResponse, error) {
-	if module != "" && !r.canModuleProbe(module) {
-		return httpclient.RequestResponse{}, fmt.Errorf("request budget exhausted for module %s", module)
+	if target.coverage != nil {
+		ctx = withTargetRun(ctx, target.coverage)
+	}
+	if module != "" && !managedTarget(ctx) && !r.canModuleProbe(module) {
+		err := fmt.Errorf("request budget exhausted for module %s", module)
+		noteExchange(ctx, err)
+		return httpclient.RequestResponse{}, err
 	}
 	r.probeCount.Add(1)
-	if module != "" {
+	if module != "" && !managedTarget(ctx) {
 		r.recordModuleProbeUsage(module)
 	}
 	method := strings.ToUpper(target.Method)
@@ -44,7 +49,7 @@ func (r *Runner) probeForModule(ctx context.Context, module string, target ScanT
 		headers := r.wafHeadersForModule(module, target.EndpointURL)
 		headers = sanitizeProbeHeaders(method, nil, headers)
 		rr, err := r.client.Do(ctx, method, target.EndpointURL, nil, headers)
-		if err != nil && strings.Contains(err.Error(), "budget exhausted") {
+		if err != nil && strings.Contains(err.Error(), "global request budget exhausted") {
 			r.markBudgetExhausted(module, target.EndpointURL)
 		}
 		return rr, err
@@ -72,7 +77,7 @@ func (r *Runner) probeForModule(ctx context.Context, module string, target ScanT
 	headers = sanitizeProbeHeaders(effMethod, body, headers)
 	headers = r.registerRuntimeProbe(target, payload, headers)
 	rr, err := r.client.Do(ctx, effMethod, probeURL, body, headers)
-	if err != nil && strings.Contains(err.Error(), "budget exhausted") {
+	if err != nil && strings.Contains(err.Error(), "global request budget exhausted") {
 		r.markBudgetExhausted(module, target.EndpointURL)
 	}
 	return rr, err

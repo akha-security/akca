@@ -48,7 +48,8 @@ func TestPassiveSecretIsPublishedAndPersisted(t *testing.T) {
 		t.Fatal("live and report evidence must both contain the exact detected value")
 	}
 	technical := storage.ParseEvidenceBody(findings[0].EvidenceJSON)
-	if technical.Payload != raw || technical.Signal != "github_token" {
+	if technical.Payload != raw || technical.Signal != "github_token" ||
+		!strings.Contains(technical.RespBody, raw) || len(technical.ResponseMarkers) != 1 {
 		t.Fatalf("incomplete report evidence: %+v", technical)
 	}
 }
@@ -91,6 +92,10 @@ func TestPassiveSupplyChainDetection(t *testing.T) {
 	if !strings.Contains(findings[0].EvidenceJSON, "polyfill.io") {
 		t.Fatalf("evidence must contain polyfill.io: %s", findings[0].EvidenceJSON)
 	}
+	technical := storage.ParseEvidenceBody(findings[0].EvidenceJSON)
+	if !strings.Contains(technical.RespBody, "polyfill.io") || len(technical.ResponseMarkers) != 1 {
+		t.Fatalf("supply-chain response location is missing: %+v", technical)
+	}
 }
 
 func TestSupplyChainRequiresActualURLReference(t *testing.T) {
@@ -126,6 +131,10 @@ func TestPassiveThirdPartyScriptRequiresSRI(t *testing.T) {
 	}
 	if len(findings) != 1 || !strings.Contains(findings[0].EvidenceJSON, "cdn.example.test/app.js") {
 		t.Fatalf("got %+v, want one third-party SRI finding", findings)
+	}
+	technical := storage.ParseEvidenceBody(findings[0].EvidenceJSON)
+	if !strings.Contains(technical.RespBody, "https://cdn.example.test/app.js") || len(technical.ResponseMarkers) != 1 {
+		t.Fatalf("SRI response location is missing: %+v", technical)
 	}
 
 	c.scanThirdPartyScriptIntegrity("https://app.example.test/index.html", `<script src="https://cdn.example.test/app.js" integrity="sha384-valid"></script>`)

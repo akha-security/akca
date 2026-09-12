@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 )
 
 func (r *Runner) RunModuleFromDB(ctx context.Context, module string, limit int) ([]ModuleFinding, error) {
@@ -19,124 +18,159 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 	if !r.cfg.AllowsModule(module) {
 		return nil, nil
 	}
-	_ = r.emit("vuln_module_started", module+" scanning started", map[string]interface{}{
-		"scan_id": r.scanID, "module": module, "targets": len(targets),
-	})
+	allocation := r.allocateModuleBudget(module, targets)
+	defer r.finishModuleBudget(module, allocation)
+	eligible := 0
+	for _, target := range targets {
+		if r.budgetEligible(module, target) {
+			eligible++
+		}
+	}
+	planData := map[string]interface{}{"scan_id": r.scanID, "module": module, "targets": len(targets), "targets_eligible": eligible, "budget_mode": "unlimited"}
+	if allocation != nil {
+		planData["budget_mode"] = "adaptive"
+		planData["requests_allocated"] = allocation.allocated
+	}
+	_ = r.emit("module_budget_planned", module+" request allocation", planData)
+	_ = r.emit("vuln_module_started", module+" scanning started", planData)
 
 	workers := r.cfg.PerHostConcurrency
 	if workers <= 0 {
 		workers = 8
 	}
-	if workers > len(targets) {
-		workers = len(targets)
+	workers = min(workers, len(targets))
+	type result struct {
+		state    *targetRun
+		findings []ModuleFinding
+		panicked bool
 	}
-
-	var mu sync.Mutex
-	var findings []ModuleFinding
-	var testedCount atomic.Int64
-	var attemptedCount, skippedOtherCount, failedCount atomic.Int64
-	var skippedBudgetCount atomic.Int64
+	results := make([]result, len(targets))
 	errorsBefore := r.executionErrors.Load()
-	targetCh := make(chan ScanTarget, moduleQueueCapacity(workers, len(targets)))
-
+	jobs := make(chan int, moduleQueueCapacity(workers, len(targets)))
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
+	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			defer func() {
-				if rec := recover(); rec != nil {
-					r.executionErrors.Add(1)
-					_ = r.emit("log", fmt.Sprintf("RunModule(%s) worker recovered from panic: %v", module, rec), map[string]interface{}{"scan_id": r.scanID})
-				}
-			}()
-			for target := range targetCh {
+			for i := range jobs {
 				if ctx.Err() != nil {
 					return
 				}
-				if !r.canModuleProbe(module) {
-					skippedBudgetCount.Add(1)
+				target := targets[i]
+				state := &targetRun{managed: true}
+				results[i].state = state
+				if !r.budgetEligible(module, target) {
+					state.skipped("no applicable in-scope mutation surface")
 					continue
 				}
-				if !r.scope.IsInScope(target.EndpointURL) {
-					skippedOtherCount.Add(1)
-					continue
+				if allocation != nil {
+					state.reserve = func() error { return allocation.reserve(i) }
 				}
-				state := &targetRun{}
 				target.coverage = state
-				targetCtx := context.WithValue(ctx, targetRunKey{}, state)
 				func() {
 					defer func() {
+						if ctx.Err() != nil {
+							state.interrupted.Store(true)
+						}
+					}()
+					if allocation != nil {
+						defer allocation.release(i)
+					}
+					defer func() {
 						if rec := recover(); rec != nil {
+							results[i].panicked = true
 							r.executionErrors.Add(1)
-							failedCount.Add(1)
 							_ = r.emit("log", fmt.Sprintf("RunModule(%s) target %s recovered from panic: %v", module, target.EndpointURL, rec), map[string]interface{}{"scan_id": r.scanID})
 						}
 					}()
-					localFindings := r.runSingleModule(targetCtx, module, target)
-					if state.requests.Load() > 0 {
-						attemptedCount.Add(1)
-					}
-					state.mu.Lock()
-					skipReason := state.skip
-					state.mu.Unlock()
-					status := "skipped"
-					if state.failures.Load() > 0 || ctx.Err() != nil {
-						status = "error"
-						failedCount.Add(1)
-					} else if skipReason == "" && state.evidence.Load() {
-						status = "completed"
-						testedCount.Add(1)
-					} else {
-						skippedOtherCount.Add(1)
-					}
-					if len(localFindings) > 0 && status != "completed" {
-						status = "verified"
-					}
-					_ = r.emit("module_target_finished", module+" target "+status, map[string]interface{}{"scan_id": r.scanID, "module": module, "endpoint": target.EndpointURL, "method": target.Method, "parameter": target.Parameter, "location": target.Location, "status": status, "reason": skipReason, "requests": state.requests.Load(), "findings": len(localFindings)})
-					if len(localFindings) > 0 {
-						mu.Lock()
-						findings = append(findings, localFindings...)
-						mu.Unlock()
-					}
+					results[i].findings = r.runSingleModule(withTargetRun(ctx, state), module, target)
 				}()
 			}
 		}()
 	}
-	feedModuleTargets(ctx, targetCh, targets)
+feed:
+	for i := range targets {
+		select {
+		case <-ctx.Done():
+			break feed
+		case jobs <- i:
+		}
+	}
+	close(jobs)
 	wg.Wait()
-
+	var findings []ModuleFinding
+	for _, result := range results {
+		findings = append(findings, result.findings...)
+	}
+	// Delayed probes retain their target's allocation and coverage state. Report
+	// completion only after those probes have had a chance to finish.
 	if module == "sqli" || module == "command_injection" {
 		findings = append(findings, r.flushDelayedTimingVerifications(ctx)...)
 	}
-	totalTargets := len(targets)
-	tested := int(testedCount.Load())
-	skipped := int(skippedBudgetCount.Load())
-	coveragePct := 0.0
-	if totalTargets > 0 {
-		coveragePct = float64(tested) / float64(totalTargets) * 100.0
+	tested, attempted, skipped, failed, exhausted, unprocessed := 0, 0, 0, 0, 0, 0
+	for i, result := range results {
+		state := result.state
+		if state == nil {
+			unprocessed++
+			continue
+		}
+		if state.requests.Load() > 0 {
+			attempted++
+		}
+		state.mu.Lock()
+		reason := state.skip
+		state.mu.Unlock()
+		status := "skipped"
+		switch {
+		case state.budgetExhausted.Load():
+			status = "incomplete"
+			exhausted++
+		case state.interrupted.Load() || state.pendingTiming.Load() > 0:
+			status = "incomplete"
+			reason = "verification did not finish"
+			if ctx.Err() != nil {
+				reason = ctx.Err().Error()
+			}
+			unprocessed++
+		case result.panicked || state.failures.Load() > 0:
+			status = "error"
+			failed++
+		case reason == "" && state.evidence.Load():
+			status = "completed"
+			tested++
+		default:
+			skipped++
+		}
+		target := targets[i]
+		_ = r.emit("module_target_finished", module+" target "+status, map[string]interface{}{
+			"scan_id": r.scanID, "module": module, "endpoint": target.EndpointURL, "method": target.Method,
+			"parameter": target.Parameter, "location": target.Location, "status": status, "reason": reason,
+			"requests": state.requests.Load(), "findings": len(result.findings),
+		})
 	}
-	_ = r.emit("vuln_module_finished", module+" scanning finished", map[string]interface{}{
-		"scan_id": r.scanID, "module": module, "findings": len(findings),
-		"targets_tested": tested, "targets_total": totalTargets,
-		"targets_unprocessed": int64(totalTargets) - testedCount.Load() - failedCount.Load() - skippedOtherCount.Load() - skippedBudgetCount.Load(),
-		"targets_attempted":   attemptedCount.Load(), "targets_skipped": skippedOtherCount.Load(), "targets_failed": failedCount.Load(), "targets_budget_exhausted": skippedBudgetCount.Load(),
-		"coverage_percentage": fmt.Sprintf("%.1f%%", coveragePct),
-	})
-	if skipped > 0 {
-		r.emitOnce("module_budget_starved:"+module, "coverage_gap",
-			fmt.Sprintf("Module %s was budget-starved: tested %d of %d targets (%.1f%% coverage)", module, tested, totalTargets, coveragePct),
-			map[string]interface{}{
-				"scan_id": r.scanID, "module": module,
-				"targets_tested": tested, "targets_total": totalTargets,
-				"targets_unprocessed": int64(totalTargets) - testedCount.Load() - failedCount.Load() - skippedOtherCount.Load() - skippedBudgetCount.Load(),
-				"targets_attempted":   attemptedCount.Load(), "targets_skipped": skippedOtherCount.Load(), "targets_failed": failedCount.Load(), "targets_budget_exhausted": skippedBudgetCount.Load(),
-				"coverage_pct": coveragePct,
-			},
-		)
+	coverage := 0.0
+	if eligible > 0 {
+		coverage = float64(tested) / float64(eligible) * 100
 	}
-	if failed := r.executionErrors.Load() - errorsBefore; failed > 0 {
-		return findings, fmt.Errorf("module %s completed with %d execution or persistence errors", module, failed)
+	data := map[string]interface{}{
+		"scan_id": r.scanID, "module": module, "findings": len(findings), "targets_total": len(targets), "targets_eligible": eligible,
+		"targets_tested": tested, "targets_attempted": attempted, "targets_skipped": skipped, "targets_failed": failed,
+		"targets_budget_exhausted": exhausted, "targets_unprocessed": unprocessed,
+		"coverage_percentage": fmt.Sprintf("%.1f%%", coverage), "coverage_pct": coverage,
+	}
+	if allocation != nil {
+		data["requests_allocated"] = allocation.allocated
+		data["requests_used"] = allocation.used
+	}
+	_ = r.emit("vuln_module_finished", module+" scanning finished", data)
+	if exhausted > 0 || unprocessed > 0 {
+		_ = r.emit("coverage_gap", fmt.Sprintf("Module %s incomplete: %d budget-limited and %d unfinished targets", module, exhausted, unprocessed), data)
+	}
+	if ctx.Err() != nil {
+		return findings, ctx.Err()
+	}
+	if count := r.executionErrors.Load() - errorsBefore; count > 0 {
+		return findings, fmt.Errorf("module %s completed with %d execution or persistence errors", module, count)
 	}
 	return findings, nil
 }

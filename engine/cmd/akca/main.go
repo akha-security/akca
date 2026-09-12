@@ -589,7 +589,7 @@ func printDetailedUsage() {
 		{"--max-depth <n>", "Optional crawl depth cap; 0 means unlimited"},
 		{"--crawler-budget <n>", "Discovery request budget; 0 means unlimited"},
 		{"--request-budget <n>", "Maximum total requests; 0 means unlimited"},
-		{"--requests-per-target <n>", "Derive budget as N requests per discovered target; 0 means unlimited"},
+		{"--requests-per-target <n>", "Module budget: N requests per discovered URL/method; 0 means unlimited"},
 		{"--time-budget <duration>", "Maximum duration such as 30m or 2h; 0 means unlimited"},
 		{"--memory-limit <mb>", "Process memory limit; 0 means automatic"},
 		{"--include-linked-api-subdomains", "Also crawl linked API/service subdomains under the same root"},
@@ -1899,7 +1899,7 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		cw.mu.Lock()
 		cw.coverageGaps++
 		cw.mu.Unlock()
-		if cw.mode == "verbose" {
+		if cw.mode == "verbose" || payloadInt(e.Payload, "targets_budget_exhausted") > 0 || payloadInt(e.Payload, "targets_unprocessed") > 0 {
 			fmt.Fprintf(cw.outputWriter(), "%s[COVERAGE]%s  %s%s%s\n", bAmber, rst, cAmber, safeTerminalText(e.Message), rst)
 		}
 

@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/akha-security/akca/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/akha-security/akca/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/akha-security/akca/releases"><img alt="Version" src="https://img.shields.io/badge/version-v0.1.9-6f42c1"></a>
+  <a href="https://github.com/akha-security/akca/releases"><img alt="Version" src="https://img.shields.io/badge/version-v0.2.0-6f42c1"></a>
   <a href="https://go.dev/"><img alt="Go" src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
 </p>
@@ -20,7 +20,7 @@ baseline, exercises a targeted probe, applies vulnerability-specific controls,
 and stores the evidence used to reach its decision.
 
 > [!IMPORTANT]
-> AKCA is currently an early `v0.1.9` release. Use it on systems you own or are
+> AKCA is currently an early `v0.2.0` release. Use it on systems you own or are
 > explicitly authorized to test, validate findings before acting on them, and
 > avoid production-impacting scan profiles without an agreed test window.
 
@@ -236,6 +236,40 @@ Replay a stored finding independently:
 ```bash
 akca replay --finding 42
 ```
+
+## Request budgets and scan coverage
+
+The default module scan has no request cap. It tests the discovered parameter
+surfaces without the old hidden XSS/SQL quotas. Crawl limits, selected profiles,
+scope and verification requirements still apply; no scanner can guarantee that
+every vulnerability will be found.
+
+For a bounded scan, `--request-budget 5000` keeps a hard total wire-request limit,
+including discovery, retries and redirects. The remaining module budget is
+divided by enabled modules and estimated probe work, then reserved across URLs
+and their parameters. Earlier URLs cannot consume later URLs' reserved shares.
+Unused shares are available to subsequent work.
+
+Alternatively, `--requests-per-target 200` allocates 200 module requests per
+distinct discovered URL/method after discovery. Query-value variants and extra
+parameters share that URL's allocation instead of multiplying it. Newly discovered
+URLs expand this derived budget. A positive `--request-budget` takes precedence;
+the crawler retains its separate discovery limit.
+
+```bash
+# Full module coverage of discovered surfaces, without a request quota
+akca -u https://staging.example.com --request-budget 0 --requests-per-target 0
+
+# Scale the bounded module budget with the discovered URLs
+akca -u https://staging.example.com --requests-per-target 200
+```
+
+A finite request or time limit may leave checks unfinished. Budget-cut targets
+are recorded as `incomplete`, not completed; coverage warnings appear without
+verbose mode, and allocation/target summaries are saved in the scan timeline.
+Unused budget moves forward; an already interrupted target is not automatically
+replayed. Use unlimited mode when completing the configured checks matters more
+than keeping a fixed request count.
 
 ## CI example
 

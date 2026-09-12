@@ -165,6 +165,18 @@ func ForReport(payload, signal, probeBody string, persisted []string) []string {
 	for _, marker := range markers {
 		seen[strings.ToLower(marker)] = struct{}{}
 	}
+	// Report highlighting is presentation-only. If the exact recorded payload
+	// appears in the preserved response, show that location even when the
+	// module uses a passive or module-specific signal. This does not promote the
+	// value to verification proof.
+	payload = strings.TrimSpace(payload)
+	if payload != "" && len(payload) <= 4096 && containsFold(probeBody, payload) {
+		key := strings.ToLower(payload)
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
+			markers = append(markers, actualCaseMarker(probeBody, payload))
+		}
+	}
 	for _, marker := range persisted {
 		marker = strings.TrimSpace(marker)
 		if !isValidPersistedMarker(marker) || !containsFold(probeBody, marker) {

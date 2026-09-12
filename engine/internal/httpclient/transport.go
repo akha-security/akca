@@ -49,6 +49,9 @@ func reserveNetwork(ctx context.Context, u *url.URL, limiter *ratelimit.Limiter,
 			return err
 		}
 	}
+	if err := ReserveRequestBudget(ctx); err != nil {
+		return err
+	}
 	if counter != nil {
 		for {
 			n := counter.Load()

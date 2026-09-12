@@ -699,9 +699,9 @@ func TestPerModuleSurfaceAdaptiveBudgetAllocation(t *testing.T) {
 		runner.recordModuleProbeUsage("sqli")
 	}
 
-	// SQLi quota exhausted
-	if runner.canModuleProbe("sqli") {
-		t.Fatal("expected sqli to be exhausted after reaching its target quota")
+	// An estimate must never truncate an unlimited scan.
+	if !runner.canModuleProbe("sqli") {
+		t.Fatal("unlimited SQLi must continue beyond its estimated request count")
 	}
 
 	// Crucial: SSRF and CORS must still be allowed to run!

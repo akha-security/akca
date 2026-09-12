@@ -285,7 +285,7 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 		}
 
 		if err != nil {
-			if isTimeoutErr(err) || !isSafeMethod(method) || attempt == 2 {
+			if strings.Contains(err.Error(), "request budget exhausted") || isTimeoutErr(err) || !isSafeMethod(method) || attempt == 2 {
 				return RequestResponse{}, c.proxyError(err)
 			}
 			time.Sleep(500 * time.Millisecond)

@@ -880,7 +880,7 @@ func (c *Crawler) scanSecrets(sourceURL, body string) {
 		sev := secretscan.Severity(m.Confidence)
 		title := "Secret exposed in response (" + m.Kind + ")"
 		desc := m.Kind + " detected in response body: " + m.Value
-		evidence := secretscan.EvidenceJSON(m.Kind, m.Value, sourceURL, m.Line)
+		evidence := secretscan.EvidenceJSONWithResponse(m.Kind, m.Value, sourceURL, m.Line, content)
 		findingID, err := c.db.SaveFinding(c.scanID,
 			title,
 			sev,
@@ -939,7 +939,14 @@ func (c *Crawler) scanSupplyChain(sourceURL, body string) {
 			title := "Supply Chain Security Risk: " + bad.name
 			sev := "high"
 			desc := "The page references a known compromised third-party script/CDN domain (" + bad.domain + ") vulnerable to supply chain attacks (CWE-829)."
-			evidence := `{"domain":"` + bad.domain + `","url":"` + sourceURL + `","cwe":"CWE-829"}`
+			evidenceBytes, _ := json.Marshal(map[string]interface{}{
+				"module": "supply_chain", "signal": "compromised_supply_chain_domain",
+				"payload": map[string]string{"value": bad.domain}, "location": "response_body",
+				"request":          map[string]string{"method": "GET", "url": sourceURL},
+				"resp_body":        secretscan.ResponseSnippet(body, bad.domain),
+				"response_markers": []string{bad.domain}, "cwe": "CWE-829",
+			})
+			evidence := string(evidenceBytes)
 			findingID, err := c.db.SaveFinding(c.scanID, title, sev, "supply_chain", desc, sourceURL, "", 0.95, evidence)
 			if err == nil {
 				_ = c.emit("finding_detected", title, findingevent.Payload(findingevent.Data{
@@ -994,7 +1001,16 @@ func (c *Crawler) scanThirdPartyScriptIntegrity(sourceURL, body string) {
 
 		title := "Third-party script is missing Subresource Integrity"
 		desc := "The page loads a third-party script without an integrity attribute. A compromised CDN or package publisher could alter code executed by visitors."
-		evidence := `{"page_url":` + jsonString(sourceURL) + `,"script_url":` + jsonString(scriptURL.String()) + `,"control":"subresource_integrity","cwe":"CWE-353"}`
+		marker := src
+		evidenceBytes, _ := json.Marshal(map[string]interface{}{
+			"module": "supply_chain", "signal": "third_party_script_missing_sri",
+			"payload": map[string]string{"value": marker}, "location": "response_body",
+			"request":          map[string]string{"method": "GET", "url": sourceURL},
+			"resp_body":        secretscan.ResponseSnippet(body, marker),
+			"response_markers": []string{marker}, "script_url": scriptURL.String(),
+			"control": "subresource_integrity", "cwe": "CWE-353",
+		})
+		evidence := string(evidenceBytes)
 		findingID, err := c.db.SaveFinding(c.scanID, title, "low", "supply_chain", desc, sourceURL, "", 0.78, evidence)
 		if err != nil {
 			_ = c.emit("log", "passive SRI finding could not be persisted", map[string]interface{}{
@@ -1036,13 +1052,6 @@ func isKnownSupplyChainDomain(host string) bool {
 		}
 	}
 	return false
-}
-
-func jsonString(value string) string {
-	// The values originate from parsed URLs, but quote them defensively before
-	// storing evidence JSON so a malformed target cannot corrupt an evidence row.
-	encoded, _ := json.Marshal(value)
-	return string(encoded)
 }
 
 // responseReferencesDomain accepts an actual URL reference, not a domain name

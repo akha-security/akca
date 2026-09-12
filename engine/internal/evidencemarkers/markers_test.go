@@ -78,3 +78,11 @@ func TestForResponseHighlightsReflectedPayloadWithoutHTMLScaffold(t *testing.T) 
 		t.Fatalf("HTML scaffold leaked into typed markers: %v", markers)
 	}
 }
+
+func TestForReportHighlightsExactPassivePayload(t *testing.T) {
+	secret := "ghp_abcdefghijklmnopqrstuvwxyz123456"
+	markers := ForReport(secret, "github_token", `{"api_key":"`+secret+`"}`, nil)
+	if len(markers) != 1 || markers[0] != secret {
+		t.Fatalf("expected exact passive value as display marker, got %v", markers)
+	}
+}

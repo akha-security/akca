@@ -234,7 +234,7 @@ product characteristics are:
 
 ## Project maturity
 
-`v0.1.9` is an early public release. AKCA has an extensive automated test suite,
+`v0.2.0` is an early public release. AKCA has an extensive automated test suite,
 but no scanner can guarantee complete vulnerability coverage or zero false
 positives. Production adoption should begin with controlled staging targets,
 explicit budgets, and human review.

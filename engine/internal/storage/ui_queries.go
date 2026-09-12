@@ -791,7 +791,7 @@ func applyTypedEvidenceFallback(raw string, body *EvidenceBody) {
 	if body.RawRequest == "" {
 		body.RawRequest = buildRawRequest(body.Method, body.URL, body.ReqHeaders, body.ReqBody)
 	}
-	if body.RawResponse == "" {
+	if body.RawResponse == "" && (body.StatusCode > 0 || body.RespHeaders != "") {
 		body.RawResponse = buildRawResponse(body.StatusCode, body.RespHeaders, body.RespBody)
 	}
 	if body.CurlCommand == "" {

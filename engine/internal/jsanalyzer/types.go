@@ -40,6 +40,7 @@ type InternalPath struct {
 }
 
 type AnalysisResult struct {
+	SourceContent string              `json:"-"`
 	JSURL         string              `json:"js_url"`
 	Truncated     bool                `json:"truncated"`
 	PreviewOnly   bool                `json:"preview_only"`

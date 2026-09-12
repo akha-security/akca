@@ -795,3 +795,63 @@ func TestNativeTargetValueNestedJSON(t *testing.T) {
 		t.Fatalf("expected items.0.id=999 to be classified as numeric target")
 	}
 }
+
+func TestSQLiNumericArithmeticProbeDetectsMathEvaluation(t *testing.T) {
+	c := &groupBClient{
+		responses: map[string]string{
+			"__default__":        "user: admin profile",
+			"1/((6-4)*(2-1)-2)": "user not found",
+			"(1-999999)":         "user not found",
+			"1-1":                "user not found",
+			"1*0":                "user not found",
+		},
+	}
+	r := groupBRunner(t, c)
+	target := ScanTarget{
+		EndpointURL: "http://example.com/user?id=1",
+		Method:      "GET",
+		Parameter:   "id",
+		Location:    "query",
+	}
+	baseRR := httpclient.RequestResponse{
+		Request: httpclient.RequestRecord{
+			Method: "GET",
+			URL:    "http://example.com/user?id=1",
+		},
+		Response: httpclient.ResponseRecord{
+			StatusCode: 200,
+			Body:       "user: admin profile",
+		},
+	}
+	findings := r.numericArithmeticSQLiProbe(context.Background(), target, baseRR)
+	if len(findings) == 0 {
+		t.Fatalf("expected numeric arithmetic probe to detect SQL injection")
+	}
+	if findings[0].VulnClass != "sqli" {
+		t.Fatalf("expected sqli finding, got %s", findings[0].VulnClass)
+	}
+}
+
+func TestSQLiBooleanPairsIncludeLikeAndUncommentedNumeric(t *testing.T) {
+	target := ScanTarget{
+		EndpointURL: "http://example.com/search?q=laptop",
+		Parameter:   "q",
+		Location:    "query",
+	}
+	pairs := sqliBooleanPairs("test-scan", target)
+	var foundLike, foundNumericDirect bool
+	for _, p := range pairs {
+		if strings.Contains(p.variant, "like") {
+			foundLike = true
+		}
+		if p.variant == "boolean_numeric_and_direct" {
+			foundNumericDirect = true
+		}
+	}
+	if !foundLike {
+		t.Fatalf("expected LIKE-clause boolean pairs in sqliBooleanPairs")
+	}
+	if !foundNumericDirect {
+		t.Fatalf("expected boolean_numeric_and_direct in sqliBooleanPairs")
+	}
+}

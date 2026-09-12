@@ -1,0 +1,109 @@
+package modules
+
+import (
+	"context"
+	"net/url"
+	"testing"
+
+	"github.com/akha-security/akca/engine/internal/config"
+	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/scope"
+	"github.com/akha-security/akca/engine/internal/storage"
+	"github.com/akha-security/akca/engine/internal/verification"
+)
+
+// Diagnostic characterization, not a desired-behavior regression test.
+type durationDiagnosticClient struct { calls map[string]int }
+
+func (c *durationDiagnosticClient) Do(ctx context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	u, _ := url.Parse(rawURL)
+	c.calls[u.Path]++
+	if u.Path == "/vulnerable" {
+		return (reflectedXSSSurfaceClient{}).Do(ctx, method, rawURL, body, headers)
+	}
+	return httpclient.RequestResponse{
+		Request: httpclient.RequestRecord{Method: method, URL: rawURL},
+		Response: httpclient.ResponseRecord{StatusCode: 200, Body: "<html><body>stable safe page</body></html>", Headers: map[string]string{"Content-Type": "text/html"}},
+	}, nil
+}
+
+func TestDiagnosticProductionLoaderStarvation(t *testing.T) {
+	db, err := storage.Open(t.TempDir() + "/diagnostic.db")
+	if err != nil { t.Fatal(err) }
+	defer db.Close()
+	if err := db.Migrate(); err != nil { t.Fatal(err) }
+	if err := db.EnsureScan("duration-loader"); err != nil { t.Fatal(err) }
+	for _, path := range []string{"/a-safe", "/b-safe", "/vulnerable"} {
+		if err := db.SaveDiscoveredEndpoint("duration-loader", map[string]interface{}{
+			"url": "http://example.com" + path + "?q=hello", "method": "GET", "source": "test", "confidence": 1.0,
+		}); err != nil { t.Fatal(err) }
+	}
+	cfg := config.DefaultScanConfig()
+	cfg.RequestBudget = 0
+	cfg.PerHostConcurrency = 1
+	cfg.EnableOAST = false
+	cfg.SmartScanProfile = ""
+	client := &durationDiagnosticClient{calls: map[string]int{}}
+	var finished map[string]interface{}
+	r := NewRunner("duration-loader", client, scope.NewEngine(cfg), db, verification.NewEngine(db, nil), nil,
+		func(kind, _ string, data map[string]interface{}) error {
+			if kind == "vuln_module_finished" { finished = data }
+			return nil
+		}, cfg)
+	findings, err := r.RunModuleFromDB(context.Background(), "xss", 100)
+	if err != nil { t.Fatal(err) }
+	t.Logf("actual DB loader: requests=%v findings=%d cap=%d finished=%v", client.calls, len(findings), r.moduleBudgets["xss"], finished)
+}
+
+func TestDiagnosticScanDurationCoverage(t *testing.T) {
+	for _, module := range []string{"xss", "sqli"} {
+		for _, capped := range []bool{false, true} {
+			name := module + "/without_surface_cap"
+			if capped { name = module + "/production_surface_cap" }
+			t.Run(name, func(t *testing.T) {
+				cfg := config.DefaultScanConfig()
+				cfg.RequestBudget = 0
+				cfg.PerHostConcurrency = 1
+				cfg.EnableOAST = false
+				client := &durationDiagnosticClient{calls: map[string]int{}}
+				var finished map[string]interface{}
+				r := NewRunner("duration-diagnostic", client, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+					func(kind, _ string, data map[string]interface{}) error {
+						if kind == "vuln_module_finished" { finished = data }
+						return nil
+					}, cfg)
+				target := ScanTarget{EndpointURL: "http://example.com/safe", Method: "GET", Parameter: "q", Location: "query"}
+				if capped { r.AdjustCategoryBudgetsFromTargets([]ScanTarget{target}) }
+				_, err := r.RunModule(context.Background(), module, []ScanTarget{target})
+				if err != nil { t.Fatal(err) }
+				t.Logf("requests=%v cap=%d finished=%v", client.calls, r.moduleBudgets[module], finished)
+			})
+		}
+	}
+	for _, capped := range []bool{false, true} {
+		name := "xss_two_endpoints_without_cap"
+		if capped { name = "xss_two_endpoints_production_cap" }
+		t.Run(name, func(t *testing.T) {
+			cfg := config.DefaultScanConfig()
+			cfg.RequestBudget = 0
+			cfg.PerHostConcurrency = 1
+			cfg.EnableOAST = false
+			client := &durationDiagnosticClient{calls: map[string]int{}}
+			var finished map[string]interface{}
+			r := NewRunner("duration-diagnostic", client, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+				func(kind, _ string, data map[string]interface{}) error {
+					if kind == "vuln_module_finished" { finished = data }
+					return nil
+				}, cfg)
+			targets := []ScanTarget{
+				{EndpointURL: "http://example.com/safe", Method: "GET", Parameter: "q", Location: "query"},
+				{EndpointURL: "http://example.com/vulnerable", Method: "GET", Parameter: "q", Location: "query"},
+			}
+			if capped { r.AdjustCategoryBudgetsFromTargets(targets) }
+			findings, err := r.RunModule(context.Background(), "xss", targets)
+			if err != nil { t.Fatal(err) }
+			t.Logf("requests=%v findings=%d cap=%d finished=%v", client.calls, len(findings), r.moduleBudgets["xss"], finished)
+			if !capped && len(findings) == 0 { t.Fatal("positive control must detect XSS") }
+		})
+	}
+}

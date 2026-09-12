@@ -18,8 +18,8 @@ import (
 )
 
 func TestVersionIsStableReleaseString(t *testing.T) {
-	if version != "0.1.9" {
-		t.Fatalf("version=%q, want 0.1.9", version)
+	if version != "0.2.0" {
+		t.Fatalf("version=%q, want 0.2.0", version)
 	}
 }
 
@@ -48,7 +48,7 @@ func TestUsageHelpAndVersionPrintBrandBanner(t *testing.T) {
 			if !strings.Contains(combined, akcaASCII[0]) {
 				t.Fatalf("ASCII wordmark missing for %s: %q", tc.name, combined)
 			}
-			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.1.9") {
+			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.0") {
 				t.Fatalf("brand/version line missing for %s: %q", tc.name, combined)
 			}
 		})
@@ -264,6 +264,19 @@ func TestRunningStatusPanelShowsScanHealth(t *testing.T) {
 		if visibleLen(line) > uiWidth+4 {
 			t.Fatalf("running panel line overflows (%d columns): %q", visibleLen(line), line)
 		}
+	}
+}
+
+func TestBudgetCoverageGapVisibleWithoutVerbose(t *testing.T) {
+	var output bytes.Buffer
+	cw := NewConsoleWriter()
+	cw.out = &output
+	cw.mode = "normal"
+	if err := cw.WriteEvent(events.Event{Type: "coverage_gap", Message: "XSS incomplete: request limit reached", Payload: map[string]interface{}{"targets_budget_exhausted": 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "XSS incomplete") {
+		t.Fatalf("budget gap hidden: %q", output.String())
 	}
 }
 

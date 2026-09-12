@@ -322,6 +322,34 @@ func TestHTTPEvidenceResponseHighlightsOnlyTypedProof(t *testing.T) {
 	}
 }
 
+func TestPassiveSecretResponseExcerptHighlightsExactFinding(t *testing.T) {
+	secret := "ghp_abcdefghijklmnopqrstuvwxyz123456"
+	rec := storage.FindingRecord{EvidenceJSON: `{
+		"secret_kind":"github_token",
+		"secret_value":"` + secret + `",
+		"source_url":"https://example.test/config.js",
+		"location":"response_body",
+		"resp_body":"window.config = {apiKey: '` + secret + `'};",
+		"response_markers":["` + secret + `"]
+	}`}
+	ev := httpEvidenceFromRecord(rec)
+	html := httpEvidenceHTML(ev)
+	if !strings.Contains(html, `<span class="vuln-hit">`+secret+`</span>`) {
+		t.Fatalf("passive response match was not highlighted: %s", html)
+	}
+}
+
+func TestModuleSpecificPayloadInResponseIsHighlighted(t *testing.T) {
+	html := httpEvidenceHTML(HTTPEvidence{
+		Signal: "module_specific_detection", Payload: "MATCH-7319",
+		RespBody:    `{"result":"MATCH-7319"}`,
+		RawResponse: "HTTP/1.1 200 OK\r\n\r\n" + `{"result":"MATCH-7319"}`,
+	})
+	if !strings.Contains(html, `<span class="vuln-hit">MATCH-7319</span>`) {
+		t.Fatalf("module-specific response match was not highlighted: %s", html)
+	}
+}
+
 func TestDashboardMetricsAndSearch(t *testing.T) {
 	db, scanID := setupReportDB(t, 3)
 	defer db.Close()

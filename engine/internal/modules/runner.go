@@ -161,6 +161,10 @@ type Runner struct {
 	moduleBudgetsMu   sync.RWMutex
 	moduleBudgets     map[string]int64
 	moduleUsage       map[string]*atomic.Int64
+
+	adaptiveBudgetMu       sync.Mutex
+	adaptiveBudget         *adaptiveScanBudget
+	remainingRequestBudget *int
 }
 
 // ProbeCount reports vulnerability-module probe attempts independently from
@@ -277,7 +281,7 @@ func ModuleDefaultProbesPerTarget(module string) int {
 }
 
 func (r *Runner) canModuleProbe(module string) bool {
-	if r == nil {
+	if r == nil || r.cfg.RequestBudget <= 0 {
 		return true
 	}
 	// 1. Check granular per-module budget if initialized

@@ -1,6 +1,7 @@
 package jsanalyzer
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/akha-security/akca/engine/internal/storage"
@@ -59,5 +60,37 @@ func TestEveryPassiveJavaScriptCategoryIsPublishedAndPersisted(t *testing.T) {
 		if liveClasses[class] != count {
 			t.Fatalf("category %q report=%d live=%d", class, count, liveClasses[class])
 		}
+	}
+}
+
+func TestPassiveJavaScriptSecretPreservesMatchingSourceExcerpt(t *testing.T) {
+	db, err := storage.Open(t.TempDir() + "/passive-js-evidence.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureScan("scan-js-evidence"); err != nil {
+		t.Fatal(err)
+	}
+	raw := testfixtures.GitHubToken()
+	a := &Analyzer{scanID: "scan-js-evidence", db: db, emit: func(string, string, map[string]interface{}) error { return nil }}
+	a.publishResult(a.AnalyzeContent("https://example.test/app.js", `window.config={apiKey:"`+raw+`"};`))
+	findings, err := db.ListFindings("scan-js-evidence", 20, 0)
+	if err != nil || len(findings) == 0 {
+		t.Fatalf("findings=%d err=%v", len(findings), err)
+	}
+	var technical storage.EvidenceBody
+	for _, finding := range findings {
+		candidate := storage.ParseEvidenceBody(finding.EvidenceJSON)
+		if candidate.Payload == raw {
+			technical = candidate
+			break
+		}
+	}
+	if !strings.Contains(technical.RespBody, raw) || len(technical.ResponseMarkers) != 1 {
+		t.Fatalf("JavaScript response evidence is incomplete: %+v", technical)
 	}
 }

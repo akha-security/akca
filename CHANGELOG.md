@@ -5,6 +5,31 @@ All notable changes to AKCA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [v0.2.0] - 2026-09-12
+
+### Added
+
+- Add adaptive vulnerability-module budgets derived from distinct discovered URL/method surfaces, with weighted module allocation, per-URL reservations and unused-budget rollover.
+- Add transport-level budget accounting for redirects, retries and external protocol reservations without double charging normal HTTP requests.
+- Add response evidence highlighting for active and passive findings in HTML reports.
+- Preserve bounded response excerpts around detected API keys, secrets, JavaScript disclosures, compromised CDN references and third-party scripts missing Subresource Integrity.
+- Expand SQL injection coverage with numeric arithmetic contrasts, direct numeric boolean pairs and LIKE-clause variants.
+
+### Fixed
+
+- Prevent early endpoints and parameters from consuming the request shares reserved for later discovered URLs.
+- Treat budget-interrupted targets as incomplete and expose coverage gaps in normal CLI output and persistent scan events.
+- Remove the normal-profile SQL scout fast-fail so later classic payloads are exercised; retain the optimization for the explicit fast profile.
+- Preserve POST body parameters when fallback targets are constructed from endpoint request templates.
+- Highlight exact module-specific response values without treating presentation markers as verification proof.
+
+### Validation
+
+- All Go package tests pass with `go test ./... -count=1 -timeout 5m`.
+- Static analysis passes with `go vet ./...`.
+- Adaptive allocation tests cover single and parallel workers, redirects, retries, cancellation, module rollover and explicit or URL-derived budgets.
+- Report tests cover active payloads and passive response excerpts while rejecting unrelated HTML and asset text as evidence markers.
+
 ## [v0.1.9] - 2026-09-11
 
 ### Fixed
@@ -163,7 +188,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - HTML, JSON, Markdown, CSV and SARIF reporting.
 - CWE and OWASP Top 10:2025 report classification.
 
-[Unreleased]: https://github.com/akha-security/akca/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.0...HEAD
+[v0.2.0]: https://github.com/akha-security/akca/releases/tag/v0.2.0
 [v0.1.9]: https://github.com/akha-security/akca/releases/tag/v0.1.9
 [v0.1.8]: https://github.com/akha-security/akca/releases/tag/v0.1.8
 [v0.1.7]: https://github.com/akha-security/akca/releases/tag/v0.1.7

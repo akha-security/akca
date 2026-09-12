@@ -502,6 +502,9 @@ func (c *ScanConfig) Validate() error {
 	if c.RequestBudget < 0 {
 		return fmt.Errorf("request_budget cannot be negative: %d", c.RequestBudget)
 	}
+	if c.RequestsPerTarget < 0 {
+		return fmt.Errorf("requests_per_target cannot be negative: %d", c.RequestsPerTarget)
+	}
 	if c.CrawlerRequestBudget < 0 {
 		return fmt.Errorf("crawler_request_budget cannot be negative: %d", c.CrawlerRequestBudget)
 	}
@@ -1035,13 +1038,18 @@ func redactStatefulSecurityPolicies(policies []StatefulSecurityProofPolicy) []St
 
 // EffectiveRequestBudget returns the calculated request budget. If an explicit
 // RequestBudget is set, it takes precedence. Otherwise, if RequestsPerTarget is set
-// and targetCount > 0, the budget is derived dynamically as RequestsPerTarget * targetCount.
+// and targetCount > 0, the post-discovery module budget is derived dynamically
+// as RequestsPerTarget * distinct URL/method count. Discovery has its own cap.
 // Returns 0 for unlimited.
 func (c ScanConfig) EffectiveRequestBudget(targetCount int) int {
 	if c.RequestBudget > 0 {
 		return c.RequestBudget
 	}
 	if c.RequestsPerTarget > 0 && targetCount > 0 {
+		maxInt := int(^uint(0) >> 1)
+		if c.RequestsPerTarget > maxInt/targetCount {
+			return maxInt
+		}
 		return c.RequestsPerTarget * targetCount
 	}
 	return 0

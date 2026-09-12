@@ -8,6 +8,7 @@ import (
 	"html"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
@@ -272,7 +273,6 @@ func (r *Runner) unionSQLiProbe(ctx context.Context, target ScanTarget, baseline
 	}
 	return nil
 }
-
 func buildUnionLexicalControl(colCount int, sentinels []string) string {
 	if colCount < len(sentinels) {
 		colCount = len(sentinels)
@@ -603,9 +603,24 @@ func sqliBooleanPairs(scanID string, target ScanTarget) []sqliBooleanPair {
 			"boolean_double_quote_hash",
 		},
 		{
+			fmt.Sprintf(`%s AND %d=%d`, baseVal, left, left), fmt.Sprintf(`%s AND %d=%d`, baseVal, left, right),
+			fmt.Sprintf(`%s AND %d=%d`, baseVal, left2, left2), fmt.Sprintf(`%s AND %d=%d`, baseVal, left2, right2),
+			"boolean_numeric_and_direct",
+		},
+		{
 			fmt.Sprintf(`%s AND %d=%d-- -`, baseVal, left, left), fmt.Sprintf(`%s AND %d=%d-- -`, baseVal, left, right),
 			fmt.Sprintf(`%s AND %d=%d-- -`, baseVal, left2, left2), fmt.Sprintf(`%s AND %d=%d-- -`, baseVal, left2, right2),
 			"boolean_numeric_and",
+		},
+		{
+			fmt.Sprintf(`%s%%' AND '%d'='%d'-- -`, baseVal, left, left), fmt.Sprintf(`%s%%' AND '%d'='%d'-- -`, baseVal, left, right),
+			fmt.Sprintf(`%s%%' AND '%d'='%d'-- -`, baseVal, left2, left2), fmt.Sprintf(`%s%%' AND '%d'='%d'-- -`, baseVal, left2, right2),
+			"boolean_like_percent_comment",
+		},
+		{
+			fmt.Sprintf(`%s%%' AND %d=%d AND '%%'='`, baseVal, left, left), fmt.Sprintf(`%s%%' AND %d=%d AND '%%'='`, baseVal, left, right),
+			fmt.Sprintf(`%s%%' AND %d=%d AND '%%'='`, baseVal, left2, left2), fmt.Sprintf(`%s%%' AND %d=%d AND '%%'='`, baseVal, left2, right2),
+			"boolean_like_percent_closed",
 		},
 		{
 			fmt.Sprintf(`%s' AND %d=%d/*`, baseVal, left, left), fmt.Sprintf(`%s' AND %d=%d/*`, baseVal, left, right),
@@ -716,14 +731,16 @@ func (r *Runner) booleanBlindSQLiProbe(ctx context.Context, target ScanTarget, b
 			continue
 		}
 
-		// Keep punctuation/quotes while breaking the SQL operators. A tokenizer
-		// or query-language parser that routes SQL-looking text differently
-		// should not be mistaken for database predicate execution.
 		syntaxControl := booleanSyntaxControl(pair.trueVal)
 		controlRR, err := r.probeForModule(ctx, "sqli", trueAttempt.Target, syntaxControl)
-		if err != nil || !usableBooleanSQLiResponse(controlRR.Response) ||
-			bodyDiffRatio(normalizeVolatileFields(baseline.Response.Body),
-				normalizeVolatileFields(controlRR.Response.Body)) > 0.08 {
+		if err != nil || !usableBooleanSQLiResponse(controlRR.Response) {
+			continue
+		}
+		matchesBase := bodyDiffRatio(normalizeVolatileFields(baseline.Response.Body),
+			normalizeVolatileFields(controlRR.Response.Body)) <= 0.08
+		differsFromTrue := bodyDiffRatio(normalizeVolatileFields(trueRR.Body),
+			normalizeVolatileFields(controlRR.Response.Body)) >= 0.03
+		if !matchesBase && !differsFromTrue {
 			continue
 		}
 
@@ -812,4 +829,135 @@ func isLikelySQLiParam(param string) bool {
 		return false
 	}
 	return true
+}
+
+func (r *Runner) numericArithmeticSQLiProbe(ctx context.Context, target ScanTarget, baseline httpclient.RequestResponse) []ModuleFinding {
+	if !isNumericTargetValue(target) {
+		return nil
+	}
+	baseVal := nativeTargetValue(target)
+	if baseVal == "" {
+		baseVal = "1"
+	}
+	num, err := strconv.Atoi(baseVal)
+	if err != nil {
+		return nil
+	}
+
+	type arithmeticTest struct {
+		identity1 string
+		contrast1 string
+		identity2 string
+		contrast2 string
+		variant   string
+	}
+
+	tests := []arithmeticTest{
+		{
+			identity1: fmt.Sprintf("%d/((6-4)*(2-1)-1)", num),
+			contrast1: fmt.Sprintf("%d/((6-4)*(2-1)-2)", num), // division by zero
+			identity2: fmt.Sprintf("(%d-0-0)", num),
+			contrast2: fmt.Sprintf("(%d-999999)", num),
+			variant:   "arithmetic_division_contrast",
+		},
+		{
+			identity1: fmt.Sprintf("%d-0", num),
+			contrast1: fmt.Sprintf("%d-1", num),
+			identity2: fmt.Sprintf("%d*1", num),
+			contrast2: fmt.Sprintf("%d*0", num),
+			variant:   "arithmetic_subtraction_contrast",
+		},
+	}
+
+	for _, tc := range tests {
+		if ctx.Err() != nil {
+			break
+		}
+		id1Attempt, ok := r.sqliBestAttempt(ctx, target, tc.identity1, baseline.Response.Body)
+		if !ok {
+			continue
+		}
+		id1RR := id1Attempt.RR.Response
+		if id1RR.StatusCode != baseline.Response.StatusCode {
+			continue
+		}
+		if !sqliBodiesEquivalent(baseline.Response.Body, id1RR.Body) {
+			continue
+		}
+
+		ct1Attempt, ok := r.sqliBestAttempt(ctx, target, tc.contrast1, baseline.Response.Body)
+		if !ok {
+			continue
+		}
+		ct1RR := ct1Attempt.RR.Response
+		statusDiff := ct1RR.StatusCode != id1RR.StatusCode
+		bodyDiff := bodyDiffRatio(normalizeVolatileFields(id1RR.Body), normalizeVolatileFields(ct1RR.Body)) >= 0.03
+		if !statusDiff && !bodyDiff {
+			continue
+		}
+
+		id2Attempt, ok := r.sqliBestAttempt(ctx, target, tc.identity2, baseline.Response.Body)
+		if !ok {
+			continue
+		}
+		id2RR := id2Attempt.RR.Response
+		if id2RR.StatusCode != baseline.Response.StatusCode || !sqliBodiesEquivalent(id1RR.Body, id2RR.Body) {
+			continue
+		}
+
+		ct2Attempt, ok := r.sqliBestAttempt(ctx, target, tc.contrast2, baseline.Response.Body)
+		if !ok {
+			continue
+		}
+		ct2RR := ct2Attempt.RR.Response
+		statusDiff2 := ct2RR.StatusCode != id2RR.StatusCode
+		bodyDiff2 := bodyDiffRatio(normalizeVolatileFields(id2RR.Body), normalizeVolatileFields(ct2RR.Body)) >= 0.03
+		if !statusDiff2 && !bodyDiff2 {
+			continue
+		}
+
+		signal := "boolean_pair_confirmed"
+		p := payloadgen.Payload{
+			Value: tc.identity1, VulnClass: "sqli", Variant: tc.variant, ExpectedSignal: signal,
+		}
+
+		baseHash := booleanResponseHash(baseline.Response.Body)
+		falseHash := booleanResponseHash(ct1RR.Body)
+		booleanProof := &verification.BooleanPairProof{
+			BaselineHash:      baseHash,
+			FirstTrueHash:     baseHash,
+			FirstFalseHash:    falseHash,
+			ReplayTrueHash:    baseHash,
+			ReplayFalseHash:   falseHash,
+			SecondTrueHash:    baseHash,
+			SecondFalseHash:   falseHash,
+			SyntaxControlHash: baseHash,
+			Orientation:       1,
+			SameSurface:       true,
+			SyntaxControlOK:   true,
+		}
+
+		f := r.verifyAndBuildWithCandidate(ctx, "sqli", id1Attempt.Target, p, baseline, id1Attempt.RR, signal,
+			false, false, "", "", func(candidate *verification.Candidate) {
+				candidate.ExpectedEquivalent = true
+				candidate.BooleanPairProof = booleanProof
+				candidate.RequestedProofType = verification.ProofBooleanPair
+				candidate.Observations = append(candidate.Observations,
+					r.observation("sqli", id1Attempt.Target, verification.RoleFalseBranch, 1, ct1Attempt.RR),
+					r.observation("sqli", id1Attempt.Target, verification.RoleTrueBranch, 1, id1Attempt.RR),
+					r.observation("sqli", id1Attempt.Target, verification.RoleFalseBranch, 2, ct1Attempt.RR),
+					r.observation("sqli", id1Attempt.Target, verification.RoleTrueBranch, 2, id2Attempt.RR),
+					r.observation("sqli", id1Attempt.Target, verification.RoleTrueBranch, 3, id2Attempt.RR),
+					r.observation("sqli", id1Attempt.Target, verification.RoleFalseBranch, 3, ct1Attempt.RR),
+					r.observation("sqli", id1Attempt.Target, verification.RoleSyntaxControl, 1, baseline),
+				)
+			})
+		if f != nil {
+			var out []ModuleFinding
+			if r.recordFinding(ctx, &out, f, "sqli", signal) {
+				return out
+			}
+		}
+	}
+	return nil
 }
