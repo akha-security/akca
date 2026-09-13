@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="AKCA logo" width="320">
+</p>
+
 <h1 align="center">AKCA</h1>
 <p align="center"><strong>Advanced Web Security Scanner</strong></p>
 <p align="center">Discover endpoints. Test web applications. Inspect the evidence.</p>
