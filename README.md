@@ -24,6 +24,12 @@
 
 AKCA is an open-source web security scanner written in Go. It combines HTTP crawling, browser-assisted discovery, JavaScript analysis, and API imports with active and passive security checks. Findings include recorded evidence to help you investigate and reproduce the result.
 
+<p align="center">
+  <img src="cli-enhanced.png" alt="AKCA CLI scanning a test lab and displaying passive secret findings" width="760">
+  <br>
+  <sub>Test lab scan with sample credentials. Screenshot enhanced for readability.</sub>
+</p>
+
 ## Installation
 
 ### Go install
