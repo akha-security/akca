@@ -51,7 +51,7 @@ var proofPolicies = map[string]ModuleProofPolicy{
 	"cache_deception":        replayPolicy("cache_deception", ProofDifferentialReplay),
 	"hpp":                    statePolicy("hpp", ProofStateMutation),
 	"broken_auth":            anonymousPolicy("broken_auth"),
-	"improper_auth":          anonymousPolicy("improper_auth"),
+	"improper_auth":          contentPolicy("improper_auth"),
 	"route_auth_bypass":      replayPolicy("route_auth_bypass", ProofDifferentialReplay),
 	"tenant_isolation":       identityPolicy("tenant_isolation"),
 	"account_recovery":       statePolicy("account_recovery", ProofStateMutation),
