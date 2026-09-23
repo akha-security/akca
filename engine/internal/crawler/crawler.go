@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/akha-security/akca/engine/internal/config"
@@ -43,13 +42,15 @@ type Crawler struct {
 	recorded        map[string]struct{}
 	runtimeSeen     map[string]struct{}
 	secretsSeen     map[string]struct{}
-	patternSeen     map[string]int
 	queryVariants   map[string]map[string]struct{}
 	linkedHostsSeen map[string]struct{}
 	seeds           []string
 	emit            EventSink
 	browser         BrowserFetcher
 	pagesVisited    int
+	contentPages    int
+	rejectedPages   int
+	networkErrors   int
 	requestsMade    int
 	discovered      int
 	runtimeFound    int
@@ -82,7 +83,6 @@ func New(scanID string, cfg config.ScanConfig, client HTTPDoer, scopeEngine *sco
 		recorded:        make(map[string]struct{}),
 		runtimeSeen:     make(map[string]struct{}),
 		secretsSeen:     make(map[string]struct{}),
-		patternSeen:     make(map[string]int),
 		queryVariants:   make(map[string]map[string]struct{}),
 		linkedHostsSeen: linked,
 		emit:            emit,
@@ -116,7 +116,7 @@ func (c *Crawler) IngestSeeds(urls []string) int {
 		}
 		c.seeds = append(c.seeds, raw)
 		c.seen[key] = struct{}{}
-		c.q.Enqueue(queue.Item{URL: raw, Method: "GET", Priority: 100, Depth: 0})
+		c.q.Enqueue(queue.Item{URL: raw, Method: "GET", Priority: 1000, Depth: 0, Source: string(SourceSeedIngest)})
 		added++
 	}
 	return added
@@ -126,6 +126,9 @@ func (c *Crawler) Crawl(ctx context.Context, seeds []string) error {
 	c.mu.Lock()
 	c.startedAt = time.Now()
 	c.pagesVisited = 0
+	c.contentPages = 0
+	c.rejectedPages = 0
+	c.networkErrors = 0
 	c.requestsMade = 0
 	c.discovered = 0
 	c.failures = 0
@@ -160,6 +163,9 @@ func (c *Crawler) Crawl(ctx context.Context, seeds []string) error {
 	})
 
 	c.runWorkers(ctx, budget)
+	c.mu.Lock()
+	contentPages, rejectedPages, networkErrors := c.contentPages, c.rejectedPages, c.networkErrors
+	c.mu.Unlock()
 
 	_ = c.flushEndpointEvents()
 	_ = c.emit("queue_updated", "crawl queue drained", map[string]interface{}{
@@ -167,10 +173,15 @@ func (c *Crawler) Crawl(ctx context.Context, seeds []string) error {
 	})
 	_ = c.emit("crawler_finished", "crawler finished", map[string]interface{}{
 		"scan_id": c.scanID, "pages": c.pagesVisited, "requests": c.requestsMade, "discovered": c.discovered,
-		"errors": c.failureCount(),
+		"errors":        c.failureCount(),
+		"content_pages": contentPages, "rejected_pages": rejectedPages, "network_errors": networkErrors,
+		"has_usable_content": contentPages > 0,
 	})
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	if contentPages == 0 {
+		return fmt.Errorf("crawl incomplete: no usable page content received (%d rejected responses, %d network errors); check target access, authentication and HTTP responses", rejectedPages, networkErrors)
 	}
 	if failed := c.failureCount(); failed > 0 {
 		return fmt.Errorf("crawler completed with %d persistence errors", failed)
@@ -214,7 +225,8 @@ func (c *Crawler) runWorkers(ctx context.Context, budget Budget) {
 		}
 	}()
 
-	var active int64
+	var workMu sync.Mutex
+	active := 0
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -242,27 +254,33 @@ func (c *Crawler) runWorkers(ctx context.Context, budget Budget) {
 					return
 				}
 
+				// Dequeue and in-flight accounting must be atomic with the drain
+				// check; an empty queue alone does not mean discovery is finished.
+				workMu.Lock()
 				item, ok := c.q.Dequeue()
+				if ok {
+					active++
+				} else if active == 0 {
+					finish()
+				}
+				workMu.Unlock()
 				if !ok {
 					select {
 					case <-done:
 						return
 					case <-time.After(25 * time.Millisecond):
 					}
-					if atomic.LoadInt64(&active) == 0 && c.q.Len() == 0 {
-						finish()
-						return
-					}
 					continue
 				}
 
-				atomic.AddInt64(&active, 1)
 				if err := c.visit(ctx, item, budget); err != nil {
 					_ = c.emit("log", "request failed: "+err.Error(), map[string]interface{}{
 						"scan_id": c.scanID, "url": item.URL, "method": item.Method,
 					})
 				}
-				atomic.AddInt64(&active, -1)
+				workMu.Lock()
+				active--
+				workMu.Unlock()
 			}
 		}()
 	}
@@ -341,12 +359,26 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 	}
 	rr, err := c.client.Do(ctx, method, visitURL, reqBody, reqHeaders)
 	if err != nil {
+		c.mu.Lock()
+		c.networkErrors++
+		c.mu.Unlock()
 		return err
 	}
 
 	c.mu.Lock()
 	c.pagesVisited++
+	if rr.Response.StatusCode >= 200 && rr.Response.StatusCode < 300 && strings.TrimSpace(rr.Response.Body) != "" {
+		c.contentPages++
+	}
+	if rr.Response.StatusCode >= 400 {
+		c.rejectedPages++
+	}
 	c.mu.Unlock()
+	if (source == SourceSeed || item.Why == "redirect landing page") && rr.Response.StatusCode >= 400 {
+		_ = c.emit("coverage_gap", fmt.Sprintf("Crawler could not access %s: HTTP %d (%d response bytes). Discovery is incomplete.", rawURL, rr.Response.StatusCode, len(rr.Response.Body)), map[string]interface{}{
+			"phase": "crawling", "url": rawURL, "status_code": rr.Response.StatusCode,
+		})
+	}
 	var endpointID *int64
 	if id, idErr := c.db.GetEndpointID(c.scanID, rawURL, method); idErr == nil {
 		endpointID = &id
@@ -410,7 +442,28 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 		}
 	}
 
-	for _, linkURL := range extractLinkHeaderURLs(rawURL, rr.Response.Headers) {
+	// Request.URL records the original request; FinalURL is the document base
+	// after redirects (including directory redirects such as /app -> /app/).
+	pageURL := rawURL
+	if finalURL := rr.Response.FinalURL; finalURL != "" && c.scope.IsInScope(finalURL) {
+		pageURL = finalURL
+	}
+	if c.cfg.FollowRedirects && rr.Response.StatusCode >= 300 && rr.Response.StatusCode < 400 {
+		for name, location := range rr.Response.Headers {
+			if !strings.EqualFold(name, "Location") {
+				continue
+			}
+			if landing, err := ResolveReference(pageURL, location); err == nil && landing != "" {
+				from, _ := url.Parse(pageURL)
+				to, _ := url.Parse(landing)
+				if from != nil && to != nil {
+					c.tryAdoptRedirectHost(to.Hostname(), from.Hostname(), "location_header")
+				}
+				c.enqueueCandidate(landing, http.MethodGet, depth, SourceLink, 1, "redirect landing page", budget, nil, rawURL)
+			}
+		}
+	}
+	for _, linkURL := range extractLinkHeaderURLs(pageURL, rr.Response.Headers) {
 		c.enqueueCandidate(linkURL, http.MethodGet, depth+1, SourceLinkHeader, 0.75, "Link response header", budget, nil, rawURL)
 	}
 
@@ -425,15 +478,15 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 
 	var discovered []DiscoveredEndpoint
 	if isHTML {
-		discovered = append(discovered, ExtractFromHTML(rawURL, body)...)
-		discovered = append(discovered, ExtractManifestAndServiceWorker(rawURL, body)...)
+		discovered = append(discovered, ExtractFromHTML(pageURL, body)...)
+		discovered = append(discovered, ExtractManifestAndServiceWorker(pageURL, body)...)
 		// Inline <script> blocks frequently contain fetch/axios/XHR calls.
-		discovered = append(discovered, ExtractASTFromJSBundle(rawURL, body)...)
+		discovered = append(discovered, ExtractASTFromJSBundle(pageURL, body)...)
 	}
 	if isJS {
-		discovered = append(discovered, ExtractFromJSBundle(rawURL, body)...)
+		discovered = append(discovered, ExtractFromJSBundle(pageURL, body)...)
 		// AST pass complements the regex pass for multiline/template-literal calls.
-		discovered = append(discovered, ExtractASTFromJSBundle(rawURL, body)...)
+		discovered = append(discovered, ExtractASTFromJSBundle(pageURL, body)...)
 	}
 	if strings.Contains(strings.ToLower(rawURL), "robots.txt") {
 		discovered = append(discovered, ExtractFromRobots(rawURL, body)...)
@@ -444,17 +497,45 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 
 	var browserState *BrowserSnapshot
 	hasScripts := strings.Contains(strings.ToLower(body), "<script")
-	if isHTML && hasScripts && c.cfg.EnableHeadlessCrawler && c.browser != nil {
+	// Retry denied document navigation once through the configured browser.
+	// Do not launch browsers for speculative API-doc probes or rate limits.
+	deniedDocument := rr.Response.StatusCode == http.StatusForbidden && method == http.MethodGet &&
+		(source == SourceSeed || source == SourceSeedIngest || source == SourceLink || source == SourceBrowserXHR)
+	if ((isHTML && hasScripts) || deniedDocument) && c.cfg.EnableHeadlessCrawler && c.browser != nil {
 		if instrumented, ok := c.browser.(InstrumentedBrowserFetcher); ok {
 			snapshot, browserErr := instrumented.FetchInstrumented(ctx, rawURL)
+			if deniedDocument && browserErr == nil {
+				if snapshot.DocumentStatus < 200 || snapshot.DocumentStatus >= 300 ||
+					strings.TrimSpace(snapshot.DOM) == "" || !c.scope.IsInScope(snapshot.URL) {
+					browserErr = fmt.Errorf("browser did not return a successful in-scope document (HTTP %d)", snapshot.DocumentStatus)
+				} else {
+					c.mu.Lock()
+					c.contentPages++
+					c.mu.Unlock()
+					c.recordEndpoint(rawURL, method, source, 1, depth, "browser document after HTTP rejection", &RequestTemplate{
+						Method: method, URL: snapshot.URL, ResponseStatus: snapshot.DocumentStatus,
+						ResponseBody: snapshot.DOM, ResponseHeaders: map[string]string{"Content-Type": "text/html"},
+					})
+					_ = c.emit("log", "Crawler recovered page content through browser navigation", map[string]interface{}{"url": rawURL, "phase": "crawling"})
+				}
+			}
+			if browserErr != nil {
+				_ = c.emit("coverage_gap", "Browser discovery unavailable: "+browserErr.Error(), map[string]interface{}{"url": rawURL, "phase": "crawling"})
+			}
 			if browserErr == nil {
 				browserState = &snapshot
 				discovered = append(discovered, snapshot.NetworkCalls...)
+				base := pageURL
+				if snapshot.URL != "" && c.scope.IsInScope(snapshot.URL) {
+					base = snapshot.URL
+				}
+				discovered = append(discovered, ExtractFromHTML(base, snapshot.DOM)...)
 			}
-		} else {
-			_, xhr, browserErr := c.browser.Fetch(ctx, rawURL)
+		} else if !deniedDocument {
+			dom, xhr, browserErr := c.browser.Fetch(ctx, rawURL)
 			if browserErr == nil {
 				discovered = append(discovered, xhr...)
+				discovered = append(discovered, ExtractFromHTML(pageURL, dom)...)
 			}
 		}
 	}
@@ -648,8 +729,6 @@ func (c *Crawler) enqueueCandidate(rawURL, method string, depth int, source Disc
 		return
 	}
 	key := dedupeKey(method, norm)
-	restPattern := strings.ToUpper(method) + " " + NormalizeRESTPath(norm)
-
 	c.mu.Lock()
 	if _, ok := c.seen[key]; ok {
 		c.mu.Unlock()
@@ -663,25 +742,14 @@ func (c *Crawler) enqueueCandidate(rawURL, method string, depth int, source Disc
 		c.mu.Unlock()
 		return
 	}
-	if !c.acceptQueryVariantLocked(norm, method) {
+	// Explicitly bounded crawls retain a per-route variant guard so a faceted
+	// route cannot consume the entire user-selected budget. Exhaustive Full Scan
+	// has no implicit variant cap.
+	if c.discoveryIsBounded(budget) && !c.acceptQueryVariantLocked(norm, method) {
 		c.mu.Unlock()
-		return
-	}
-	// Bound URLs per REST route template to prevent combinatorial explosion on large sites
-	const maxURLsPerRouteTemplate = 30
-	if c.patternSeen[restPattern] >= maxURLsPerRouteTemplate {
-		c.mu.Unlock()
-		if c.emit != nil {
-			_ = c.emit("url_skipped", fmt.Sprintf("bounded by route template saturation (%s)", restPattern), map[string]interface{}{
-				"url":     rawURL,
-				"reason":  "skipped_template_saturation",
-				"pattern": restPattern,
-			})
-		}
 		return
 	}
 	c.seen[key] = struct{}{}
-	c.patternSeen[restPattern]++
 	c.mu.Unlock()
 
 	ep := DiscoveredEndpoint{
@@ -689,6 +757,10 @@ func (c *Crawler) enqueueCandidate(rawURL, method string, depth int, source Disc
 		Confidence: confidence, Depth: depth, WhyDiscovered: why,
 	}
 	ep.Priority = ScoreEndpoint(ep)
+	// Fetch entry pages before speculative API-doc paths consume the budget.
+	if source == SourceSeed || source == SourceSeedIngest || why == "redirect landing page" {
+		ep.Priority = 1000
+	}
 	c.recordEndpoint(rawURL, method, source, confidence, depth, why, previewTemplate(rawURL, method, tmpl))
 	if method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions {
 		return
@@ -696,11 +768,6 @@ func (c *Crawler) enqueueCandidate(rawURL, method string, depth int, source Disc
 	// Skip enqueuing static binary assets (images, fonts, media, binary downloads, css) into the active crawl queue.
 	// They do not contain navigable links, HTML, or scripts to parse.
 	if isStaticMediaAsset(rawURL) {
-		return
-	}
-	// Limit redundant crawling of repetitive REST patterns (e.g. /item/1, /item/2, ..., /item/5000).
-	// Sample up to 8 items per pattern for active crawling to prevent crawler exhaustion.
-	if c.patternSeen[restPattern] > 8 && !strings.Contains(strings.ToLower(rawURL), "api") && !strings.Contains(strings.ToLower(rawURL), "swagger") {
 		return
 	}
 	// Endpoints discovered beyond the configured depth are still recorded for
@@ -728,6 +795,10 @@ func (c *Crawler) enqueueCandidate(rawURL, method string, depth int, source Disc
 		}
 	}
 	c.q.Enqueue(item)
+}
+
+func (c *Crawler) discoveryIsBounded(budget Budget) bool {
+	return budget.MaxPages > 0 || budget.RequestBudget > 0 || c.cfg.MaxEndpointsLimit() > 0
 }
 
 // acceptQueryVariantLocked must be called with c.mu held.

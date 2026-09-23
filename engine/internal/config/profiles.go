@@ -1,12 +1,12 @@
 package config
 
 const (
-	// A zero global request budget means vulnerability modules may run every
-	// payload against every discovered target. Discovery itself stays bounded.
+	// Zero means unlimited. Full Scan is exhaustive by default; operators that
+	// need a bounded crawl can still set the explicit CLI/API limits.
 	FullScanRequestBudget        = 0
-	FullScanCrawlerRequestBudget = 1_000
-	FullScanMaxPages             = 1_000
-	FullScanMaxEndpoints         = 1_000
+	FullScanCrawlerRequestBudget = 0
+	FullScanMaxPages             = 0
+	FullScanMaxEndpoints         = 0
 )
 
 // ApplyScanProfile normalizes every scan to AKCA's single exhaustive Full Scan

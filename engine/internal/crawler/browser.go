@@ -11,6 +11,7 @@ type BrowserFetcher interface {
 }
 
 type BrowserSnapshot struct {
+	DocumentStatus int                   `json:"document_status,omitempty"`
 	URL            string                `json:"url"`
 	DOM            string                `json:"dom"`
 	NetworkEvents  []BrowserNetworkEvent `json:"network_events,omitempty"`

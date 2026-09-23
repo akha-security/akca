@@ -502,6 +502,7 @@ func waitPageDebuggerURL(ctx context.Context, port int) (string, error) {
 }
 
 type cdpPageState struct {
+	URL            string            `json:"url"`
 	DOM            string            `json:"dom"`
 	LocalStorage   map[string]string `json:"localStorage"`
 	SessionStorage map[string]string `json:"sessionStorage"`
@@ -596,7 +597,16 @@ func (r *HeadlessRenderer) buildCDPSnapshot(ctx context.Context, client *cdpClie
 			WhyDiscovered: "observed through Chromium CDP service worker",
 		})
 	}
-	snapshot := crawler.BuildBrowserSnapshot(rawURL, page.DOM, calls)
+	pageURL := page.URL
+	if pageURL == "" {
+		pageURL = rawURL
+	}
+	snapshot := crawler.BuildBrowserSnapshot(pageURL, page.DOM, calls)
+	for _, event := range networkEvents {
+		if event.ResourceType == "Document" && event.URL == pageURL {
+			snapshot.DocumentStatus = event.StatusCode
+		}
+	}
 	snapshot.NetworkEvents = networkEvents
 	snapshot.ConsoleEntries = append([]crawler.BrowserConsoleEntry(nil), capture.console...)
 	snapshot.Cookies = cookies
@@ -729,6 +739,7 @@ const domInstrumentationScript = `(() => {
 })();`
 
 const pageStateExpression = `(() => ({
+	url: location.href,
   dom: document.documentElement ? document.documentElement.outerHTML : "",
   localStorage: Object.fromEntries(Object.keys(localStorage).map(k => [k, localStorage.getItem(k)])),
   sessionStorage: Object.fromEntries(Object.keys(sessionStorage).map(k => [k, sessionStorage.getItem(k)])),

@@ -170,3 +170,22 @@ func TestSQLiFindingRejectsMethodNotAllowedTiming(t *testing.T) {
 		t.Fatal("405 Method Not Allowed must never be accepted as timing SQLi evidence")
 	}
 }
+
+func TestSQLiFindingRejectsBadRequestBooleanPayload(t *testing.T) {
+	p := payloadgen.Payload{
+		Value:          `1 AND 20909=20909`,
+		VulnClass:      "sqli",
+		ExpectedSignal: "boolean_pair_confirmed",
+	}
+	baseline := httpclient.ResponseRecord{StatusCode: http.StatusOK, Body: "normal result"}
+	probe := httpclient.ResponseRecord{StatusCode: http.StatusBadRequest, Body: "Bad Request"}
+
+	if sqliFindingAllowed(p, "boolean_pair_confirmed", baseline, probe, "") {
+		t.Fatal("400 Bad Request must never be accepted as boolean SQLi evidence")
+	}
+	if booleanPairConfirmed(baseline, probe,
+		httpclient.ResponseRecord{StatusCode: http.StatusBadRequest, Body: "different validation error"},
+		p.Value, `1 AND 20909=20910`) {
+		t.Fatal("two rejected boolean branches must not confirm SQLi")
+	}
+}

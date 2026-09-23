@@ -245,6 +245,9 @@ func (r *Runner) verifyAndBuild(ctx context.Context, module string, target ScanT
 func (r *Runner) verifyAndBuildWithCandidate(ctx context.Context, module string, target ScanTarget, p payloadgen.Payload,
 	baseline, probe httpclient.RequestResponse, signal string, domPresent, domExecuted bool, oastURL, storedMarker string,
 	mutate func(*verification.Candidate)) *ModuleFinding {
+	if module == "sqli" && !sqliFindingAllowed(p, signal, baseline.Response, probe.Response, oastURL) {
+		return nil
+	}
 	if !moduleSignalConfirmed(module, p, signal, baseline.Response, probe.Response, domExecuted, oastURL) {
 		return nil
 	}

@@ -843,6 +843,14 @@ func scanSessionPanel(payload map[string]interface{}) string {
 		}
 		memory = fmt.Sprintf("%d MB (%s)", memoryLimit, mode)
 	}
+	endpointLimit := "unlimited"
+	if maxEndpoints > 0 {
+		endpointLimit = fmt.Sprint(maxEndpoints)
+	}
+	crawlerRequestLimit := "unlimited"
+	if crawlerBudget > 0 {
+		crawlerRequestLimit = fmt.Sprint(crawlerBudget)
+	}
 
 	var b strings.Builder
 	b.WriteString(panelTitle("SCAN SESSION", "RUNNING", w, cLavender) + "\n")
@@ -851,10 +859,10 @@ func scanSessionPanel(payload map[string]interface{}) string {
 	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sMode%s      %s%s%s  %s•%s  %s%.0f req/s%s  %s•%s  OAST %s%s%s",
 		cSlate, rst, cFrost, profile, rst, cGhost, rst, cSilver, rate, rst,
 		cGhost, rst, oastColor, oastStatus, rst), w, cLavender) + "\n")
-	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sCrawl%s     %s%s%s  %s•%s  %s%d endpoints%s%s",
-		cSlate, rst, cSilver, pagesStr, rst, cGhost, rst, cSilver, maxEndpoints, rst, scopeStr), w, cLavender) + "\n")
-	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sBudget%s    %s%d crawler requests%s  %s•%s  %stotal %s%s",
-		cSlate, rst, cSilver, crawlerBudget, rst, cGhost, rst, cSilver, totalBudget, rst), w, cLavender) + "\n")
+	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sCrawl%s     %s%s%s  %s•%s  %s%s endpoints%s%s",
+		cSlate, rst, cSilver, pagesStr, rst, cGhost, rst, cSilver, endpointLimit, rst, scopeStr), w, cLavender) + "\n")
+	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sBudget%s    %s%s crawler requests%s  %s•%s  %stotal %s%s",
+		cSlate, rst, cSilver, crawlerRequestLimit, rst, cGhost, rst, cSilver, totalBudget, rst), w, cLavender) + "\n")
 	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sPayloads%s  %s%s%s  %s•%s  %sMemory %s%s",
 		cSlate, rst, cSilver, payloadBudget, rst, cGhost, rst, cSilver, memory, rst), w, cLavender) + "\n")
 	b.WriteString(panelBottom(w, cLavender) + "\n\n")
@@ -874,10 +882,19 @@ func scanSessionLine(payload map[string]interface{}) string {
 	if limit := payloadInt(payload, "memory_limit_mb"); limit > 0 {
 		memory = fmt.Sprintf("%dMB", limit)
 	}
-	return fmt.Sprintf("SCAN START target=%s profile=%s urls=%d endpoints=%d crawler_requests=%d payloads=%s total_requests=%s memory=%s",
+	urls := limitValue(payloadInt(payload, "max_pages"))
+	endpoints := limitValue(payloadInt(payload, "max_endpoints"))
+	crawlerRequests := limitValue(payloadInt(payload, "crawler_request_budget"))
+	return fmt.Sprintf("SCAN START target=%s profile=%s urls=%s endpoints=%s crawler_requests=%s payloads=%s total_requests=%s memory=%s",
 		payloadTargets(payload), safeTerminalText(fmt.Sprint(payload["scan_profile"])),
-		payloadInt(payload, "max_pages"), payloadInt(payload, "max_endpoints"),
-		payloadInt(payload, "crawler_request_budget"), payloadBudget, total, memory)
+		urls, endpoints, crawlerRequests, payloadBudget, total, memory)
+}
+
+func limitValue(value int) string {
+	if value <= 0 {
+		return "unlimited"
+	}
+	return fmt.Sprint(value)
 }
 
 func trafficAdjustmentText(payload map[string]interface{}) string {
@@ -1357,7 +1374,7 @@ func (cw *ConsoleWriter) runningStatusPanel() string {
 	if eta == "" {
 		eta = "Calculating"
 	}
-	crawled := fmt.Sprintf("%s / %s URLs", compactCount(urlsCrawled), compactCount(urlLimit))
+	crawled := fmt.Sprintf("%s / %s URLs", compactCount(urlsCrawled), limitValue(urlLimit))
 	memory := fmt.Sprintf("%d MB", processMemoryMB)
 	if memoryLimitMB > 0 {
 		memory = fmt.Sprintf("%d / %d MB", processMemoryMB, memoryLimitMB)
@@ -1400,7 +1417,7 @@ func (cw *ConsoleWriter) runningStatusLine() string {
 		bLavender, rst, progressBar(percent, barWidth), bCloud, percent, rst,
 		cSilver, truncateText(phase, max(12, w/3)), rst, cGhost, rst, rate)
 	if w >= 68 {
-		line += fmt.Sprintf("  %s•%s  %s/%s URLs", cGhost, rst, compactCount(urls), compactCount(urlLimit))
+		line += fmt.Sprintf("  %s•%s  %s/%s URLs", cGhost, rst, compactCount(urls), limitValue(urlLimit))
 	}
 	if w >= 84 {
 		line += fmt.Sprintf("  %s•%s  ETA %s", cGhost, rst, eta)
@@ -1899,7 +1916,7 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		cw.mu.Lock()
 		cw.coverageGaps++
 		cw.mu.Unlock()
-		if cw.mode == "verbose" || payloadInt(e.Payload, "targets_budget_exhausted") > 0 || payloadInt(e.Payload, "targets_unprocessed") > 0 {
+		if cw.mode == "verbose" || e.Payload["phase"] == "crawling" || payloadInt(e.Payload, "targets_budget_exhausted") > 0 || payloadInt(e.Payload, "targets_unprocessed") > 0 {
 			fmt.Fprintf(cw.outputWriter(), "%s[COVERAGE]%s  %s%s%s\n", bAmber, rst, cAmber, safeTerminalText(e.Message), rst)
 		}
 

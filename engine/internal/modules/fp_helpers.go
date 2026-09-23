@@ -147,6 +147,12 @@ func raceConditionConfirmed(successBodies []string) bool {
 }
 
 func sqliFindingAllowed(p payloadgen.Payload, signal string, baseline, probe httpclient.ResponseRecord, oastURL string) bool {
+	// A 4xx response is evidence that the application rejected the request
+	// shape or value. It must never be promoted into response/timing SQLi proof.
+	// Runtime SQL sink traces and OAST callbacks use independent proof paths.
+	if isSQLiClientError(baseline.StatusCode) || isSQLiClientError(probe.StatusCode) {
+		return false
+	}
 	// CDN / reverse-proxy errors are never valid SQLi evidence.
 	if isInfrastructureError(probe.StatusCode) {
 		return false
@@ -166,4 +172,8 @@ func sqliFindingAllowed(p payloadgen.Payload, signal string, baseline, probe htt
 		return false
 	}
 	return true
+}
+
+func isSQLiClientError(status int) bool {
+	return status >= http.StatusBadRequest && status < http.StatusInternalServerError
 }

@@ -54,6 +54,27 @@ func TestSQLiBaselineAndTimingSharedAcrossQueryParams(t *testing.T) {
 	}
 }
 
+func TestSQLiBaselineRejectsBadRequest(t *testing.T) {
+	c := &groupBClient{
+		responses: map[string]string{"__default__": "Bad Request"},
+		statuses:  map[string]int{"1": 400},
+	}
+	r := groupBRunner(t, c)
+	target := ScanTarget{
+		EndpointURL: "http://example.com/items?id=1",
+		Method:      "GET",
+		Parameter:   "id",
+		Location:    "query",
+	}
+
+	if _, _, ok, reason := r.stableSQLiBaselineAndTiming(context.Background(), target); ok || !strings.Contains(reason, "HTTP 400") {
+		t.Fatalf("rejected baseline was accepted: ok=%v reason=%q", ok, reason)
+	}
+	if c.calls != 1 {
+		t.Fatalf("rejected baseline should stop immediately, calls=%d want 1", c.calls)
+	}
+}
+
 func TestBooleanSQLiConfirmedRequiresFalseDelta(t *testing.T) {
 	base := "items ok"
 	falseBody := "items ok"
@@ -799,11 +820,11 @@ func TestNativeTargetValueNestedJSON(t *testing.T) {
 func TestSQLiNumericArithmeticProbeDetectsMathEvaluation(t *testing.T) {
 	c := &groupBClient{
 		responses: map[string]string{
-			"__default__":        "user: admin profile",
+			"__default__":       "user: admin profile",
 			"1/((6-4)*(2-1)-2)": "user not found",
-			"(1-999999)":         "user not found",
-			"1-1":                "user not found",
-			"1*0":                "user not found",
+			"(1-999999)":        "user not found",
+			"1-1":               "user not found",
+			"1*0":               "user not found",
 		},
 	}
 	r := groupBRunner(t, c)

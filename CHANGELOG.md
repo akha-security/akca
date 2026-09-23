@@ -5,6 +5,25 @@ All notable changes to AKCA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [v0.2.1] - 2026-09-23
+
+### Fixed
+
+- Reject SQL injection evidence when baseline or payload responses return HTTP 4xx, preventing bad-request boolean probes such as `1 AND 20909=20909` from being reported as confirmed injection.
+- Continue crawler discovery through browser-assisted rendering when initial HTTP requests are blocked or empty, including 403 responses that still load in a normal browser.
+- Remove crawler route-saturation caps from unbounded full scans and fix queue-drain accounting so discovery does not end while requests are still being scheduled.
+- Initialize adaptive module budgets from the module catalog so every registered full-scan module receives a request plan and usage counter.
+
+### Added
+
+- Coverage-gap reporting for blocked or contentless crawl starts, making `0 crawler requests` style failures visible instead of silently completing.
+- Regression tests for blocked-browser crawling, redirect discovery, SQLi 4xx false-positive rejection and catalog-wide module budget initialization.
+
+### Validation
+
+- Full Go package tests pass with `go test ./... -count=1`.
+- Static analysis passes with `go vet ./...`.
+
 ## [v0.2.0] - 2026-09-12
 
 ### Added
@@ -188,7 +207,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - HTML, JSON, Markdown, CSV and SARIF reporting.
 - CWE and OWASP Top 10:2025 report classification.
 
-[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.1...HEAD
+[v0.2.1]: https://github.com/akha-security/akca/releases/tag/v0.2.1
 [v0.2.0]: https://github.com/akha-security/akca/releases/tag/v0.2.0
 [v0.1.9]: https://github.com/akha-security/akca/releases/tag/v0.1.9
 [v0.1.8]: https://github.com/akha-security/akca/releases/tag/v0.1.8

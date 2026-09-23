@@ -18,8 +18,8 @@ import (
 )
 
 func TestVersionIsStableReleaseString(t *testing.T) {
-	if version != "0.2.0" {
-		t.Fatalf("version=%q, want 0.2.0", version)
+	if version != "0.2.1" {
+		t.Fatalf("version=%q, want 0.2.1", version)
 	}
 }
 
@@ -48,7 +48,7 @@ func TestUsageHelpAndVersionPrintBrandBanner(t *testing.T) {
 			if !strings.Contains(combined, akcaASCII[0]) {
 				t.Fatalf("ASCII wordmark missing for %s: %q", tc.name, combined)
 			}
-			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.0") {
+			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.1") {
 				t.Fatalf("brand/version line missing for %s: %q", tc.name, combined)
 			}
 		})
@@ -235,6 +235,32 @@ func TestScanSessionLineIsStructuredAndShowsBudgets(t *testing.T) {
 		if !strings.Contains(line, want) {
 			t.Fatalf("structured session line omitted %q: %q", want, line)
 		}
+	}
+}
+
+func TestUnlimitedDiscoveryLimitsAreNotDisplayedAsZero(t *testing.T) {
+	payload := map[string]interface{}{
+		"targets": []string{"https://example.test"}, "scan_profile": "Full Scan",
+		"max_pages": 0, "max_endpoints": 0, "crawler_request_budget": 0,
+		"request_budget": 0, "payload_budget": "unlimited",
+	}
+	panel := scanSessionPanel(payload)
+	line := scanSessionLine(payload)
+	for _, want := range []string{"unlimited URLs", "unlimited endpoints", "unlimited crawler requests"} {
+		if !strings.Contains(panel, want) {
+			t.Fatalf("unlimited session panel omitted %q: %q", want, panel)
+		}
+	}
+	for _, want := range []string{"urls=unlimited", "endpoints=unlimited", "crawler_requests=unlimited"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("unlimited session line omitted %q: %q", want, line)
+		}
+	}
+	cw := NewConsoleWriter()
+	cw.urlsCrawled = 12
+	cw.urlLimit = 0
+	if got := cw.runningStatusPanel(); !strings.Contains(got, "12 / unlimited URLs") {
+		t.Fatalf("running panel displayed zero as a crawl limit: %q", got)
 	}
 }
 

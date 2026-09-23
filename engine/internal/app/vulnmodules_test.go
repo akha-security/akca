@@ -41,6 +41,20 @@ func TestFullScanModuleOrderCoversCatalog(t *testing.T) {
 	if len(missing) > 0 {
 		t.Fatalf("catalog modules missing from full scan order: %v", missing)
 	}
+
+	catalog := map[string]struct{}{}
+	for _, name := range modules.ModuleCatalog() {
+		catalog[name] = struct{}{}
+	}
+	var unregistered []string
+	for _, item := range fullScanModuleOrder {
+		if _, ok := catalog[item.name]; !ok {
+			unregistered = append(unregistered, item.name)
+		}
+	}
+	if len(unregistered) > 0 {
+		t.Fatalf("full scan modules missing from catalog: %v", unregistered)
+	}
 }
 
 func TestFullScanModuleOrderStartsWithPassiveAndExposureModules(t *testing.T) {

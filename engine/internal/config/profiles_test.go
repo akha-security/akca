@@ -7,10 +7,10 @@ func TestDefaultUsesSingleFullScanProfile(t *testing.T) {
 	if cfg.SmartScanProfile != "Full Scan" {
 		t.Fatalf("default profile = %q, want Full Scan", cfg.SmartScanProfile)
 	}
-	if cfg.RequestBudget != 0 || cfg.CrawlerRequestBudget != 1_000 {
+	if cfg.RequestBudget != 0 || cfg.CrawlerRequestBudget != 0 {
 		t.Fatalf("unexpected request budgets: total=%d crawler=%d", cfg.RequestBudget, cfg.CrawlerRequestBudget)
 	}
-	if cfg.MaxPages != 1_000 || cfg.MaxEndpoints != 1_000 || cfg.MaxDepth != 0 {
+	if cfg.MaxPages != 0 || cfg.MaxEndpoints != 0 || cfg.MaxDepth != 0 {
 		t.Fatalf("unexpected full scan coverage limits: pages=%d endpoints=%d depth=%d", cfg.MaxPages, cfg.MaxEndpoints, cfg.MaxDepth)
 	}
 	if cfg.PayloadBudget != PayloadBudgetUnlimited || cfg.TimeBudget != 0 || cfg.MaxMemoryMB != 0 {
@@ -21,7 +21,7 @@ func TestDefaultUsesSingleFullScanProfile(t *testing.T) {
 func TestLegacyProfilesNormalizeToFullScan(t *testing.T) {
 	for _, legacy := range []string{"Balanced", "QuickRecon", "FullBugBounty", "APIDeepScan", "JavaScriptHeavySPA"} {
 		cfg := ApplyScanProfile(ScanConfig{SmartScanProfile: legacy})
-		if cfg.SmartScanProfile != "Full Scan" || cfg.RequestBudget != 0 || cfg.CrawlerRequestBudget != 1_000 || cfg.MaxPages != 1_000 || cfg.MaxEndpoints != 1_000 {
+		if cfg.SmartScanProfile != "Full Scan" || cfg.RequestBudget != 0 || cfg.CrawlerRequestBudget != 0 || cfg.MaxPages != 0 || cfg.MaxEndpoints != 0 {
 			t.Fatalf("legacy profile %q was not normalized: %+v", legacy, cfg)
 		}
 	}

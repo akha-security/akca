@@ -177,6 +177,28 @@ func TestCrawlerRetainsOrdinaryAndAPIVariantCoverage(t *testing.T) {
 	}
 }
 
+func TestUnlimitedCrawlerDoesNotSilentlySaturateRoutes(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"example.com"}
+	c := New("scan-unlimited-routes", cfg, nil, scope.NewEngine(cfg), nil, nil)
+	budget := Budget{}
+
+	const routeCount = 75
+	for i := 0; i < routeCount; i++ {
+		c.enqueueCandidate(fmt.Sprintf("https://example.com/products/%d", i), "GET", 1, SourceLink, 0.9, "product", budget, nil, "")
+	}
+	for i := 0; i < routeCount; i++ {
+		c.enqueueCandidate(fmt.Sprintf("https://example.com/filter?category=item-%d", i), "GET", 1, SourceLink, 0.9, "facet", budget, nil, "")
+	}
+
+	if got := c.q.Len(); got != routeCount*2 {
+		t.Fatalf("unlimited crawl queued=%d want %d", got, routeCount*2)
+	}
+	if got := len(c.seen); got != routeCount*2 {
+		t.Fatalf("unlimited crawl discovered=%d want %d", got, routeCount*2)
+	}
+}
+
 func TestJSBundleAndSPARouteExtraction(t *testing.T) {
 	js := `
 fetch("/api/v1/users");

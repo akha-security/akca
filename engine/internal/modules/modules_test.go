@@ -712,3 +712,25 @@ func TestPerModuleSurfaceAdaptiveBudgetAllocation(t *testing.T) {
 		t.Fatal("cors must not be stopped when sqli exhausts its module quota")
 	}
 }
+
+func TestPerModuleBudgetInitializesEveryCatalogModule(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	runner := NewRunner("module-budget-catalog-test", nil, nil, nil, nil, nil, nil, cfg)
+
+	runner.InitModuleBudgetsFromTargets([]ScanTarget{{
+		EndpointURL: "http://example.com/api/v1/resource",
+		Method:      "GET",
+		Parameter:   "id",
+	}})
+
+	runner.moduleBudgetsMu.RLock()
+	defer runner.moduleBudgetsMu.RUnlock()
+	for _, module := range ModuleCatalog() {
+		if got := runner.moduleBudgets[module]; got <= 0 {
+			t.Fatalf("module %q budget = %d, want positive catalog-derived budget", module, got)
+		}
+		if runner.moduleUsage[module] == nil {
+			t.Fatalf("module %q usage counter was not initialized", module)
+		}
+	}
+}

@@ -359,15 +359,7 @@ func (r *Runner) InitModuleBudgetsFromTargets(targets []ScanTarget) {
 	defer r.moduleBudgetsMu.Unlock()
 
 	targetCount := int64(len(targets))
-	allModules := []string{
-		"sqli", "nosql", "xss", "blind_xss", "command_injection", "ssti",
-		"ssrf", "xxe", "insecure_deserialization", "lfi", "file_upload",
-		"idor", "auth_bypass", "broken_auth", "bfla", "cors", "csrf",
-		"open_redirect", "crlf", "hpp", "graphql", "jwt", "oauth",
-		"server_side_js_injection", "react_rsc_rce", "security_headers",
-	}
-
-	for _, mod := range allModules {
+	for _, mod := range ModuleCatalog() {
 		perTarget := int64(ModuleDefaultProbesPerTarget(mod))
 		calculatedBudget := targetCount * perTarget
 		if r.cfg.RequestBudget > 0 {

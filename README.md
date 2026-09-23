@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/akha-security/akca/actions/workflows/ci.yml"><img src="https://github.com/akha-security/akca/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/akha-security/akca/releases/tag/v0.2.0"><img src="https://img.shields.io/badge/version-v0.2.0-8b5cf6" alt="Version v0.2.0"></a>
+  <a href="https://github.com/akha-security/akca/releases/tag/v0.2.1"><img src="https://img.shields.io/badge/version-v0.2.1-8b5cf6" alt="Version v0.2.1"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25 or newer"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache License 2.0"></a>
 </p>
@@ -230,11 +230,11 @@ akca replay --finding 42
 
 Reports can contain raw credentials, cookies, tokens, and response data. Export does not automatically mask these values; review evidence before sharing it.
 
-## What's new in v0.2.0
+## What's new in v0.2.1
 
-- Adaptive URL-based module budgets with unused-budget rollover and incomplete-coverage notices.
-- Broader SQL probes and preservation of POST parameters in fallback targets.
-- Expanded response highlighting and evidence excerpts for supported passive findings.
+- Browser-assisted crawling now takes over when the initial HTTP fetch is blocked or empty, including 403 responses that still load in a real browser.
+- SQL injection verification rejects HTTP 4xx baseline/payload responses as proof, preventing bad-request boolean payloads from becoming findings.
+- Full scan module budgets are now derived from the module catalog, so newly registered modules are not silently left outside adaptive request planning.
 
 See [CHANGELOG.md](CHANGELOG.md) for release details.
 

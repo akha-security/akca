@@ -196,6 +196,9 @@ func booleanPairConfirmed(baseline, trueRR, falseRR httpclient.ResponseRecord, t
 	if baseline.StatusCode == 0 {
 		return false
 	}
+	if isSQLiClientError(baseline.StatusCode) || isSQLiClientError(trueRR.StatusCode) || isSQLiClientError(falseRR.StatusCode) {
+		return false
+	}
 	if isInfrastructureError(trueRR.StatusCode) || isInfrastructureError(falseRR.StatusCode) ||
 		trueRR.StatusCode == 405 || falseRR.StatusCode == 405 || trueRR.StatusCode == 429 || falseRR.StatusCode == 429 {
 		return false
@@ -207,7 +210,7 @@ func booleanPairConfirmed(baseline, trueRR, falseRR httpclient.ResponseRecord, t
 }
 
 func usableBooleanSQLiResponse(rr httpclient.ResponseRecord) bool {
-	if strings.TrimSpace(rr.Body) == "" || sqliErrorRe.MatchString(rr.Body) {
+	if isSQLiClientError(rr.StatusCode) || strings.TrimSpace(rr.Body) == "" || sqliErrorRe.MatchString(rr.Body) {
 		return false
 	}
 	if fp, matched := verification.MatchErrorFingerprint(rr.Body, rr.StatusCode, rr.Headers); matched {
@@ -320,6 +323,10 @@ func (r *Runner) collectSQLiBaselineAndTiming(ctx context.Context, target ScanTa
 		samples = append(samples, ms)
 
 		if !haveFirst {
+			if isSQLiClientError(rr.Response.StatusCode) {
+				return sqliBaselineSnapshot{ok: false, reason: fmt.Sprintf(
+					"baseline request was rejected with HTTP %d", rr.Response.StatusCode)}
+			}
 			first = rr
 			haveFirst = true
 			continue
@@ -552,8 +559,9 @@ func acceptableTimingStatusPair(a, b int) bool {
 
 func usableTimingSQLiResponse(rr httpclient.ResponseRecord) bool {
 	// For timing-based probes, the signal is response delay, not status code.
-	// Only reject connection-level failures and CDN infrastructure errors.
-	if rr.StatusCode == 0 {
+	// Reject request-validation responses as well as connection/CDN failures:
+	// latency on a rejected request does not demonstrate SQL execution.
+	if rr.StatusCode == 0 || isSQLiClientError(rr.StatusCode) {
 		return false
 	}
 	if isInfrastructureError(rr.StatusCode) {
