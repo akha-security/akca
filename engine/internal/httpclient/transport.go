@@ -2,13 +2,31 @@ package httpclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync/atomic"
 
 	"github.com/akha-security/akca/engine/internal/ratelimit"
 )
+
+var ErrOutsideScope = errors.New("target is outside scan scope")
+
+// ReserveBrowserResource admits explicit passive dependencies without expanding scan scope.
+func (c *Client) ReserveBrowserResource(ctx context.Context, rawURL, transport string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+		return ErrOutsideScope
+	}
+	for _, domain := range c.cfg.BrowserResourceDomains {
+		if strings.EqualFold(strings.TrimSpace(domain), u.Hostname()) {
+			return reserveNetwork(ctx, u, c.limiter, &c.networkAttempts, c.cfg.RequestBudget)
+		}
+	}
+	return ErrOutsideScope
+}
 
 // WireTransport intercepts every physical outbound HTTP transaction (including retries and redirects).
 type WireTransport struct {
@@ -83,7 +101,7 @@ func (c *Client) ReserveExternal(ctx context.Context, rawURL, transport string) 
 		return fmt.Errorf("invalid %s target", transport)
 	}
 	if c.scope != nil && !c.scope.IsInScope(u.String()) {
-		return fmt.Errorf("%s target is outside scan scope", transport)
+		return fmt.Errorf("%s: %w", transport, ErrOutsideScope)
 	}
 	return reserveNetwork(ctx, u, c.limiter, &c.networkAttempts, c.cfg.RequestBudget)
 }

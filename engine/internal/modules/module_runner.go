@@ -135,6 +135,10 @@ feed:
 		case result.panicked || state.failures.Load() > 0:
 			status = "error"
 			failed++
+		case state.blockedResponse.Load() && !state.usableResponse.Load() && len(result.findings) == 0 && reason == "":
+			status = "blocked"
+			reason = "only authentication, WAF, rate-limit or gateway rejection responses were observed"
+			failed++
 		case reason == "" && state.evidence.Load():
 			status = "completed"
 			tested++
@@ -163,11 +167,14 @@ feed:
 		data["requests_used"] = allocation.used
 	}
 	_ = r.emit("vuln_module_finished", module+" scanning finished", data)
-	if exhausted > 0 || unprocessed > 0 {
-		_ = r.emit("coverage_gap", fmt.Sprintf("Module %s incomplete: %d budget-limited and %d unfinished targets", module, exhausted, unprocessed), data)
+	if exhausted > 0 || unprocessed > 0 || failed > 0 {
+		_ = r.emit("coverage_gap", fmt.Sprintf("Module %s incomplete: %d failed, %d budget-limited and %d unfinished targets", module, failed, exhausted, unprocessed), data)
 	}
 	if ctx.Err() != nil {
 		return findings, ctx.Err()
+	}
+	if failed > 0 || exhausted > 0 || unprocessed > 0 {
+		return findings, fmt.Errorf("module %s incomplete: %d failed, %d budget-limited, %d unfinished targets", module, failed, exhausted, unprocessed)
 	}
 	if count := r.executionErrors.Load() - errorsBefore; count > 0 {
 		return findings, fmt.Errorf("module %s completed with %d execution or persistence errors", module, count)

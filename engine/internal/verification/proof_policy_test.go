@@ -128,11 +128,42 @@ func TestEveryProofPolicyRejectsMissingObservations(t *testing.T) {
 }
 
 func moduleProofObservation(module string, role ObservationRole, attempt int, body string) Observation {
+	identity := ""
+	switch role {
+	case RoleIdentityA:
+		identity = "role-a"
+	case RoleIdentityB:
+		identity = "role-b"
+	case RoleAnonymousControl:
+		identity = "anonymous"
+	}
 	return NewHTTPObservation(
-		"scan-matrix", module, "https://target.test/test", "q", "query", role, attempt, "",
+		"scan-matrix", module, "https://target.test/test", "q", "query", role, attempt, identity,
 		"GET", "https://target.test/test?q=x", "", nil,
 		ResponseSnapshot{StatusCode: 200, Body: body, ContentType: "application/json", DurationMs: 5},
 	)
+}
+
+func TestIdentityBoundaryRejectsReusedIdentity(t *testing.T) {
+	candidate := Candidate{
+		ScanID: "scan-identity", Module: "idor", VulnClass: "idor", EndpointURL: "https://target.test/accounts/7",
+		Signal: "foreign_object_access", DirectTypedSignal: true,
+		ProofPolicyVersion: CurrentProofPolicyVersion, RequestedProofType: ProofIdentityBoundary,
+		Baseline:           ResponseSnapshot{StatusCode: 401, Body: `{"error":"unauthorized"}`},
+		Probe:              ResponseSnapshot{StatusCode: 200, Body: `{"id":7,"secret":"x"}`},
+		NegativeControlSet: true, NegativeControlOK: true, ExpectedEquivalent: true,
+	}
+	response := ResponseSnapshot{StatusCode: 200, Body: `{"id":7,"secret":"x"}`}
+	candidate.Observations = []Observation{
+		NewHTTPObservation("scan-identity", "idor", candidate.EndpointURL, "id", "path", RoleNativeBaseline, 1, "", "GET", candidate.EndpointURL, "", nil, candidate.Baseline),
+		NewHTTPObservation("scan-identity", "idor", candidate.EndpointURL, "id", "path", RoleIdentityA, 1, "same-profile", "GET", candidate.EndpointURL, "", nil, response),
+		NewHTTPObservation("scan-identity", "idor", candidate.EndpointURL, "id", "path", RoleIdentityB, 1, "same-profile", "GET", candidate.EndpointURL, "", nil, response),
+		NewHTTPObservation("scan-identity", "idor", candidate.EndpointURL, "id", "path", RoleAnonymousControl, 1, "anonymous", "GET", candidate.EndpointURL, "", nil, candidate.Baseline),
+	}
+	result := NewEngine(nil, nil).Verify(candidate)
+	if !result.Suppressed || result.ProofSatisfied {
+		t.Fatalf("identity boundary accepted the same profile on both sides: %+v", result)
+	}
 }
 
 func TestPositiveProofFamilyMatrix(t *testing.T) {
@@ -156,7 +187,7 @@ func TestPositiveProofFamilyMatrix(t *testing.T) {
 			roles: []ObservationRole{RolePositiveProbe}},
 		{module: "security_headers", proofType: ProofConfiguration,
 			roles: []ObservationRole{RolePositiveProbe}},
-		{module: "graphql", proofType: ProofSchemaExposure,
+		{module: "graphql", proofType: ProofContentEvidence,
 			roles: []ObservationRole{RolePositiveProbe, RolePositiveReplay}},
 		{module: "smuggling", proofType: ProofProtocolDesync,
 			roles: []ObservationRole{RoleNativeBaseline, RolePositiveProbe, RolePositiveReplay, RoleNegativeControl}},

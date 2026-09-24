@@ -18,8 +18,8 @@ import (
 )
 
 func TestVersionIsStableReleaseString(t *testing.T) {
-	if version != "0.2.1" {
-		t.Fatalf("version=%q, want 0.2.1", version)
+	if version != "0.2.2" {
+		t.Fatalf("version=%q, want 0.2.2", version)
 	}
 }
 
@@ -48,7 +48,7 @@ func TestUsageHelpAndVersionPrintBrandBanner(t *testing.T) {
 			if !strings.Contains(combined, akcaASCII[0]) {
 				t.Fatalf("ASCII wordmark missing for %s: %q", tc.name, combined)
 			}
-			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.1") {
+			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.2") {
 				t.Fatalf("brand/version line missing for %s: %q", tc.name, combined)
 			}
 		})
@@ -590,8 +590,8 @@ func TestCLIEndToEndPassiveScanWritesReport(t *testing.T) {
 		"--format", "json",
 		"--quiet",
 	})
-	if code != 0 {
-		t.Fatalf("passive CLI scan exit code=%d", code)
+	if code != 1 {
+		t.Fatalf("budget-limited passive scan must report partial completion, exit code=%d", code)
 	}
 	raw, err := os.ReadFile(reportPath)
 	if err != nil {

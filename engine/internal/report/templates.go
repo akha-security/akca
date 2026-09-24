@@ -1470,6 +1470,22 @@ func pathDiscoveryHTML(entries []PathDiscoveryEntry) string {
 	return b.String()
 }
 
+func coverageHTML(entries []CoverageEntry) string {
+	if len(entries) == 0 {
+		return `<p class="meta-line">No coverage diagnostics recorded.</p>`
+	}
+	var b strings.Builder
+	b.WriteString(`<table class="data"><thead><tr><th>Type</th><th>Module</th><th>Phase</th><th>Summary</th><th>Reason</th></tr></thead><tbody>`)
+	for _, entry := range entries {
+		b.WriteString(`<tr><td>` + template.HTMLEscapeString(entry.EventType) + `</td><td>` +
+			template.HTMLEscapeString(entry.Module) + `</td><td>` + template.HTMLEscapeString(entry.Phase) +
+			`</td><td>` + template.HTMLEscapeString(entry.Summary) + `</td><td>` +
+			template.HTMLEscapeString(entry.Reason) + `</td></tr>`)
+	}
+	b.WriteString(`</tbody></table>`)
+	return b.String()
+}
+
 func manualLeadsHTML(entries []ManualLeadEntry, kind TemplateKind) string {
 	if len(entries) == 0 {
 		return ""

@@ -341,7 +341,7 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data, err := s.engine.GenerateReport(report.Options{
-		ScanID: scanID, Template: report.TemplateInternal, Format: format, Redact: false,
+		ScanID: scanID, Template: report.TemplateInternal, Format: format, Redact: r.URL.Query().Get("redact") != "false",
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

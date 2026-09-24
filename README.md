@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/akha-security/akca/actions/workflows/ci.yml"><img src="https://github.com/akha-security/akca/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/akha-security/akca/releases/tag/v0.2.1"><img src="https://img.shields.io/badge/version-v0.2.1-8b5cf6" alt="Version v0.2.1"></a>
+  <a href="https://github.com/akha-security/akca/releases/tag/v0.2.2"><img src="https://img.shields.io/badge/version-v0.2.2-8b5cf6" alt="Version v0.2.2"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25 or newer"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache License 2.0"></a>
 </p>
@@ -228,12 +228,32 @@ Replay a stored finding:
 akca replay --finding 42
 ```
 
-Reports can contain raw credentials, cookies, tokens, and response data. Export does not automatically mask these values; review evidence before sharing it.
+Reports mask recognized credentials by default. Raw stored evidence is preserved for replay. Set `redact_reports` to `false` in scan configuration, or use `redact=false` on the report API, only when raw exports are needed. Review reports before sharing: automatic masking cannot recognize every application-specific secret.
 
-## What's new in v0.2.1
+### Crawl and proof configuration
+
+The crawler retains one browser session throughout each crawl phase, including cookies and browser storage. It explores explicit non-form tabs and expandable panels; it does not auto-fill or submit forms. Browser requests still obey scope and request budgets. For required third-party static dependencies, configure exact hostnames separately:
+
+```json
+{
+  "browser_resource_domains": ["cdn.example.com"],
+  "redact_reports": true
+}
+```
+
+This permits only GET/HEAD script, stylesheet, image, font and media requests to those hosts, stripping credential and custom headers. It does not add those hosts to the active scan scope or permit cross-origin API calls. Blocked browser dependencies produce coverage-gap events.
+
+Discovered URLs are retained even when they cannot be visited. A crawl that exhausts its budget with queued work produces a partial scan and a nonzero CLI exit code. Module preflight messages distinguish missing identity/state policies from configured verification capabilities.
+
+Unconfigured rate-limit checks produce observations, not vulnerability findings. A configured threshold proof also requires `window_seconds`; if the requests do not fit inside that window, the check is inconclusive. SQLi does not treat a 400 response or arithmetic evaluation alone as proof. New vendor-specific SQL errors in 400/422 responses must pass the replay and control verification path.
+
+## What's new in v0.2.2
 
 - Browser-assisted crawling now takes over when the initial HTTP fetch is blocked or empty, including 403 responses that still load in a real browser.
+- Lazy-loaded SPA chunks are recursively analyzed so APIs referenced outside the initial bundle remain discoverable.
+- Automated login supports extra form fields, multi-step flows and bearer-token sessions, and carries refreshed credentials into active scan profiles.
 - SQL injection verification rejects HTTP 4xx baseline/payload responses as proof, preventing bad-request boolean payloads from becoming findings.
+- GraphQL, WebSocket, JWT, authorization and API exposure checks require typed control-backed evidence; coverage gaps and module readiness are included in reports.
 - Full scan module budgets are now derived from the module catalog, so newly registered modules are not silently left outside adaptive request planning.
 
 See [CHANGELOG.md](CHANGELOG.md) for release details.

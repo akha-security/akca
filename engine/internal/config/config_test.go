@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -86,6 +87,23 @@ func TestObjectAuthorizationPolicyRequiresDistinctRolesAndAnonymousControl(t *te
 	}
 }
 
+func TestObjectAuthorizationPolicyRejectsRolesSharingAuthProfile(t *testing.T) {
+	cfg := DefaultScanConfig()
+	cfg.AuthProfiles = []AuthProfile{{ID: "shared-auth"}}
+	cfg.RoleProfiles = []RoleProfile{
+		{ID: "alice", AuthProfileID: "shared-auth"},
+		{ID: "bob", AuthProfileID: "shared-auth"},
+	}
+	cfg.ObjectAuthorizationPolicies = []ObjectAuthorizationPolicy{{
+		ID: "ownership", URLContains: "/accounts/", Method: http.MethodGet,
+		Parameter: "id", OwnerRoleProfileID: "alice", ForeignRoleProfileID: "bob",
+		ResourceValues: []string{"7"}, ExpectedPolicy: "owner only", RequireAnonymousDeny: true,
+	}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "distinct auth profiles") {
+		t.Fatalf("shared auth profile was accepted for an identity proof: %v", err)
+	}
+}
+
 func TestRuntimeSensorRequiresLoopbackAndEnvironmentSecret(t *testing.T) {
 	cfg := DefaultScanConfig()
 	cfg.EnableRuntimeSensor = true
@@ -150,7 +168,14 @@ func TestRedactedForStorageAllowsMissingLoginCredentials(t *testing.T) {
 
 func TestRedactedForStorageDeepCopiesAndMasksProofCredentials(t *testing.T) {
 	cfg := DefaultScanConfig()
-	cfg.LoginCredentials = &LoginCredentials{Username: "scanner", Password: "login-secret"}
+	cfg.LoginCredentials = &LoginCredentials{
+		Username: "scanner", Password: "login-secret",
+		ExtraFields: map[string]string{"otp": "123456"},
+		Steps: []LoginStep{{
+			URL: "/tenant", Fields: map[string]string{"tenant": "secret-tenant"},
+			Headers: map[string]string{"X-Login-Token": "step-secret"},
+		}},
+	}
 	cfg.CustomHeaders = map[string]string{"Authorization": "Bearer ambient-secret"}
 	cfg.AuthProfiles = []AuthProfile{{
 		ID: "operator", Headers: map[string]string{"Authorization": "Bearer profile-secret"},
@@ -164,10 +189,13 @@ func TestRedactedForStorageDeepCopiesAndMasksProofCredentials(t *testing.T) {
 
 	redacted := cfg.RedactedForStorage()
 	if redacted.LoginCredentials.Password != "[REDACTED]" ||
+		redacted.LoginCredentials.ExtraFields["otp"] != "[REDACTED]" ||
+		redacted.LoginCredentials.Steps[0].Fields["tenant"] != "[REDACTED]" ||
+		redacted.LoginCredentials.Steps[0].Headers["X-Login-Token"] != "[REDACTED]" ||
 		redacted.CustomHeaders["Authorization"] != "[REDACTED]" ||
 		redacted.AuthProfiles[0].Headers["Authorization"] != "[REDACTED]" ||
 		redacted.AuthProfiles[0].Cookies["session"] != "[REDACTED]" {
-		t.Fatalf("stored configuration still contains credentials: %#v", redacted)
+		t.Fatalf("stored configuration still contains credentials: login=%#v custom=%#v profile=%#v", redacted.LoginCredentials, redacted.CustomHeaders, redacted.AuthProfiles[0])
 	}
 	policy := redacted.AccountRecoveryProofPolicies[0]
 	if policy.Action.Body != "[REDACTED]" || policy.NegativeControl.Body != "[REDACTED]" ||
@@ -176,6 +204,8 @@ func TestRedactedForStorageDeepCopiesAndMasksProofCredentials(t *testing.T) {
 		t.Fatalf("recorded request bodies were not redacted: %#v", policy)
 	}
 	if cfg.LoginCredentials.Password != "login-secret" ||
+		cfg.LoginCredentials.ExtraFields["otp"] != "123456" ||
+		cfg.LoginCredentials.Steps[0].Fields["tenant"] != "secret-tenant" ||
 		cfg.AuthProfiles[0].Headers["Authorization"] != "Bearer profile-secret" ||
 		cfg.AccountRecoveryProofPolicies[0].Action.Body != "new-password" {
 		t.Fatal("redaction mutated the live scan configuration")

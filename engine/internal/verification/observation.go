@@ -33,8 +33,8 @@ const (
 )
 
 // Observation is an immutable, typed record of one real request/response or
-// externally received callback. IDs include the role and attempt so copied
-// response values cannot masquerade as independent executions.
+// externally received callback. RequestID identifies the actual exchange;
+// role/attempt IDs alone do not establish independent execution.
 type Observation struct {
 	BrowserRead     bool            `json:"browser_read,omitempty"`
 	BrowserData     string          `json:"browser_data,omitempty"`
@@ -151,6 +151,8 @@ func (o Observation) Valid() bool {
 
 func ValidateObservations(items []Observation) bool {
 	seen := make(map[string]struct{}, len(items))
+	positive := make(map[string]bool)
+	negative := make(map[string]bool)
 	for _, item := range items {
 		if !item.Valid() {
 			return false
@@ -159,6 +161,19 @@ func ValidateObservations(items []Observation) bool {
 			return false
 		}
 		seen[item.ID] = struct{}{}
+		if item.RequestID != "" {
+			switch item.Role {
+			case RolePositiveProbe, RolePositiveReplay:
+				positive[item.RequestID] = true
+			case RoleNegativeControl:
+				negative[item.RequestID] = true
+			}
+		}
+	}
+	for id := range positive {
+		if negative[id] {
+			return false
+		}
 	}
 	return true
 }

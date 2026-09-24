@@ -66,11 +66,9 @@ func TestEndpointLimitCapsQueuedCandidatesBeforeVisit(t *testing.T) {
 func TestCrawlerTrapAvoidance(t *testing.T) {
 	traps := []string{
 		"https://example.com/calendar/2024/05/day",
-		"https://example.com/search?filter=color&facet=size&sort=price&page=999",
 		"https://example.com/list?page=1&page=2",
 		"https://example.com/list?PAGE=1&page=2",
 		"https://example.com/list?page%5B%5D=1&page%5B%5D=2",
-		"https://example.com/list?tag=one&tag=two&tag=three&tag=four",
 	}
 	for _, u := range traps {
 		if !IsCrawlerTrap(u) {
@@ -87,6 +85,9 @@ func TestCrawlerTrapAvoidance(t *testing.T) {
 		t.Fatal("a small multi-valued non-pagination parameter should not be a trap")
 	}
 	for _, rawURL := range []string{
+		"https://example.com/search?filter=color&facet=size&sort=price&page=999",
+		"https://example.com/list?tag=one&tag=two&tag=three&tag=four",
+		"https://example.com/list?sid=business-id&offset=100",
 		"https://example.com/filter?category=Gifts",
 		"https://example.com/products?filter=sale",
 		"https://example.com/products?brand=acme&sort=price",

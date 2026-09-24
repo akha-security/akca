@@ -2763,7 +2763,7 @@ func runScanCommand(args []string) int {
 		Template: report.TemplateInternal,
 		Format:   repFmt,
 		Partial:  scanErr != nil,
-		Redact:   false,
+		Redact:   cfg.RedactReports,
 	}
 
 	reportData, err := engine.GenerateReport(reportOpts)

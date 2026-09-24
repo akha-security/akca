@@ -9,17 +9,15 @@ import (
 
 const (
 	maxQueryLength        = 2048
-	maxQueryParameters    = 16
-	maxValuesPerQueryKey  = 3
-	maxQueryValueLength   = 128
+	maxQueryParameters    = 64
+	maxValuesPerQueryKey  = 16
+	maxQueryValueLength   = 2048
 	maxRouteQueryVariants = 32
 )
 
 var trapPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)/calendar/\d{4}/\d{2}`),
-	regexp.MustCompile(`(?i)(page|p|offset|start)=\d{3,}`),
 	regexp.MustCompile(`(?i)/users?/:\w+/\d{5,}`),
-	regexp.MustCompile(`(?i)(sessionid|sid|phpsessid)=`),
 }
 
 // routeQueryVariant separates route identity from query values so the crawler
@@ -75,7 +73,7 @@ func IsCrawlerTrap(rawURL string) bool {
 	if err != nil {
 		return true
 	}
-	if len(params) > 8 {
+	if len(params) > maxQueryParameters {
 		return true
 	}
 	totalValues := 0

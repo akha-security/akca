@@ -916,48 +916,8 @@ func (r *Runner) numericArithmeticSQLiProbe(ctx context.Context, target ScanTarg
 			continue
 		}
 
-		signal := "boolean_pair_confirmed"
-		p := payloadgen.Payload{
-			Value: tc.identity1, VulnClass: "sqli", Variant: tc.variant, ExpectedSignal: signal,
-		}
-
-		baseHash := booleanResponseHash(baseline.Response.Body)
-		falseHash := booleanResponseHash(ct1RR.Body)
-		booleanProof := &verification.BooleanPairProof{
-			BaselineHash:      baseHash,
-			FirstTrueHash:     baseHash,
-			FirstFalseHash:    falseHash,
-			ReplayTrueHash:    baseHash,
-			ReplayFalseHash:   falseHash,
-			SecondTrueHash:    baseHash,
-			SecondFalseHash:   falseHash,
-			SyntaxControlHash: baseHash,
-			Orientation:       1,
-			SameSurface:       true,
-			SyntaxControlOK:   true,
-		}
-
-		f := r.verifyAndBuildWithCandidate(ctx, "sqli", id1Attempt.Target, p, baseline, id1Attempt.RR, signal,
-			false, false, "", "", func(candidate *verification.Candidate) {
-				candidate.ExpectedEquivalent = true
-				candidate.BooleanPairProof = booleanProof
-				candidate.RequestedProofType = verification.ProofBooleanPair
-				candidate.Observations = append(candidate.Observations,
-					r.observation("sqli", id1Attempt.Target, verification.RoleFalseBranch, 1, ct1Attempt.RR),
-					r.observation("sqli", id1Attempt.Target, verification.RoleTrueBranch, 1, id1Attempt.RR),
-					r.observation("sqli", id1Attempt.Target, verification.RoleFalseBranch, 2, ct1Attempt.RR),
-					r.observation("sqli", id1Attempt.Target, verification.RoleTrueBranch, 2, id2Attempt.RR),
-					r.observation("sqli", id1Attempt.Target, verification.RoleTrueBranch, 3, id2Attempt.RR),
-					r.observation("sqli", id1Attempt.Target, verification.RoleFalseBranch, 3, ct1Attempt.RR),
-					r.observation("sqli", id1Attempt.Target, verification.RoleSyntaxControl, 1, baseline),
-				)
-			})
-		if f != nil {
-			var out []ModuleFinding
-			if r.recordFinding(ctx, &out, f, "sqli", signal) {
-				return out
-			}
-		}
+		r.emitDiscovery("sqli", target, "arithmetic_evaluation_observed", "Arithmetic evaluation alone does not prove SQL execution; independent SQL predicate probes are required")
+		return nil
 	}
 	return nil
 }

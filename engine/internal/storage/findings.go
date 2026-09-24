@@ -80,6 +80,7 @@ SELECT url, method, COALESCE(discovery_trail_json,'') FROM endpoints
 WHERE scan_id = ? AND discovery_source IN ('js_analyzer', 'js_bundle', 'inline_js', 'js_ast')
 AND url NOT LIKE '%.js' AND url NOT LIKE '%.mjs' AND url NOT LIKE '%.cjs'
 AND url NOT LIKE '%.js?%'
+ORDER BY COALESCE(discovery_confidence, 0) DESC, id ASC
 `
 	var rows *sql.Rows
 	var err error

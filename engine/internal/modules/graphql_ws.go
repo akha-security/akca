@@ -2,70 +2,49 @@ package modules
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"strings"
 
 	"github.com/akha-security/akca/engine/internal/graphqlattack"
 	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/secretscan"
+	"github.com/akha-security/akca/engine/internal/sensitivedata"
 	"github.com/akha-security/akca/engine/internal/verification"
 )
 
-const graphQLIntrospectionQuery = `{"query":"{ __schema { types { name fields { name } } } }"}`
+const graphQLIntrospectionQuery = graphqlattack.IntrospectionQuery
 
 func (r *Runner) runGraphQL(ctx context.Context, target ScanTarget) []ModuleFinding {
 	if ok, reason := r.shouldRunModule("graphql", target); !ok {
 		r.emitSkip("graphql", target, reason)
 		return nil
 	}
-	field := strings.TrimSpace(target.Parameter)
-	if field == "" || strings.EqualFold(field, "body") {
-		field = "user"
+	// Crawlers may discover this URL as GET; JSON GraphQL operations use POST.
+	target.Method = "POST"
+	target.Parameter = "body"
+	target.Location = "body"
+	if !r.endpointModuleOnce("graphql", target) {
+		return nil
 	}
-	var out []ModuleFinding
-
-	// Probe GraphQL Introspection
+	baseline, err := r.probeWithBody(ctx, target, graphqlattack.BaselineQuery, "application/json", nil)
+	if err != nil {
+		return nil
+	}
 	introspection, err := r.probeWithBody(ctx, target, graphQLIntrospectionQuery, "application/json", nil)
-	if err == nil && graphqlIntrospectionSignal(introspection.Response.Body) {
-		p := defaultPayload("graphql", "graphql_introspection", graphQLIntrospectionQuery, "graphql_schema_exposure")
-		f := r.verifyAndBuildWithCandidate(ctx, "graphql", target, p, introspection, introspection, "graphql_schema_exposure", false, false, "", "", func(candidate *verification.Candidate) {
-			candidate.RequestedProofType = verification.ProofSchemaExposure
-		})
-		if f != nil {
-			f.Title = "GraphQL Introspection Enabled"
-			f.Severity = "medium"
-			f.Description = "GraphQL Introspection is enabled on this endpoint, exposing full schema types and field structures."
-			r.recordFinding(ctx, &out, f, "graphql", "graphql_schema_exposure")
+	probes := graphqlattack.DiscoveryProbes()
+	if err == nil && graphqlattack.HasSchema(introspection.Response.Body) {
+		probes = append(probes, graphqlattack.SchemaProbes(introspection.Response.Body)...)
+		if r.emit != nil {
+			_ = r.emit("graphql_inventory", "GraphQL schema discovered; introspection alone is not a vulnerability", map[string]interface{}{
+				"endpoint": target.EndpointURL, "schema_queries": len(probes) - len(graphqlattack.DiscoveryProbes()),
+			})
 		}
 	}
-
-	fields := uniqueGraphQLFields(append([]string{field}, graphqlCandidateFieldsFromIntrospection(introspection.Response.Body)...))
-	if len(fields) > 3 {
-		fields = fields[:3]
-	}
-	for _, candidateField := range fields {
-		typenameQuery := fmt.Sprintf(`{"query":"{%s { __typename } }"}`, graphqlFieldName(candidateField))
-		baseline, err := r.probeWithBody(ctx, target, typenameQuery, "application/json", nil)
-		if err != nil {
-			continue
-		}
-		out = append(out, r.runGraphQLAbuse(ctx, target, baseline, candidateField)...)
-		if len(out) >= 3 {
-			break
-		}
-	}
-	return out
-}
-
-func (r *Runner) runGraphQLAbuse(ctx context.Context, target ScanTarget, baseline httpclient.RequestResponse, field string) []ModuleFinding {
 	var out []ModuleFinding
-	probes := append([]graphqlattack.Probe{
-		graphqlattack.BuildBatchProbe(100),
-		graphqlattack.BuildSuggestionsProbe(field),
-		graphqlattack.BuildCircularDepthProbe(field),
-		graphqlattack.BuildAliasOverloadProbe(field),
-		graphqlattack.BuildMutationPrivilegeProbe(field),
-	}, append(append(graphqlattack.BuildTypeInversionProbes(field), graphqlattack.BuildAuthorizationBypassProbes(field)...), graphqlattack.BuildFilterWhereEvalProbes(field)...)...)
+	seen := map[string]bool{}
+	// Inspect baseline and schema responses too: disclosures can be persistent.
+	r.graphqlFindings(ctx, target, baseline, baseline, graphqlattack.Probe{Body: graphqlattack.BaselineQuery, Name: "baseline"}, seen, &out)
+	if err == nil {
+		r.graphqlFindings(ctx, target, baseline, introspection, graphqlattack.Probe{Body: graphQLIntrospectionQuery, Name: "introspection"}, seen, &out)
+	}
 	for _, probe := range probes {
 		if ctx.Err() != nil {
 			break
@@ -74,117 +53,43 @@ func (r *Runner) runGraphQLAbuse(ctx context.Context, target ScanTarget, baselin
 		if err != nil {
 			continue
 		}
-		ok, signal := graphqlattack.Analyze(baseline.Response.Body, rr.Response.Body, probe)
-		if !ok {
+		r.graphqlFindings(ctx, target, baseline, rr, probe, seen, &out)
+	}
+	return out
+}
+
+func (r *Runner) graphqlFindings(ctx context.Context, target ScanTarget, baseline, rr httpclient.RequestResponse,
+	probe graphqlattack.Probe, seen map[string]bool, out *[]ModuleFinding) {
+	for _, signal := range graphqlattack.Signals(rr.Response.Body) {
+		if seen[signal] {
 			continue
 		}
-		p := defaultPayload("graphql", probe.Name, probe.Body[:min(80, len(probe.Body))], signal)
-		f := r.verifyAndBuildWithCandidate(ctx, "graphql", target, p, baseline, rr, signal, false, false, "", "", func(candidate *verification.Candidate) {
-			candidate.RequestedProofType = verification.ProofSchemaExposure
+		p := defaultPayload("graphql", probe.Name, probe.Body, signal)
+		f := r.verifyAndBuildWithCandidate(ctx, "graphql", target, p, baseline, rr, signal, false, false, "", "", func(c *verification.Candidate) {
+			c.RequestedProofType = verification.ProofContentEvidence
+			c.ExpectedEquivalent = true
 		})
-		if f != nil {
-			switch signal {
-			case "graphql_filter_where_rce":
-				f.Title = "GraphQL In-Memory Filter Code Execution ($where RCE)"
-				f.Severity = "critical"
-				f.Description = "Unauthenticated arbitrary JavaScript code execution confirmed in server-side memory query engine (sift/MongoDB $where evaluation)."
-			case "graphql_sift_where_detected":
-				f.Title = "GraphQL In-Memory Filter ($where) Surface Detected"
-				f.Severity = "high"
-				f.Description = "GraphQL query accepts in-memory $where filtering functions, exposing dynamic evaluation."
-			case "graphql_auth_bypass_admin", "graphql_auth_bypass_users", "graphql_auth_bypass_system", "graphql_auth_bypass_mutation":
-				f.Title = "GraphQL Broken Function Level Authorization (BFLA)"
-				f.Severity = "high"
-				f.Description = "An unauthorized query or mutation accessed privileged administrative functions or user records without authorization."
-			case "graphql_field_auth_leak":
-				f.Title = "GraphQL Field-Level Authorization Bypass / Data Leak"
-				f.Severity = "high"
-				f.Description = "Sensitive internal fields (e.g. API keys, secrets, credentials, or tokens) were returned without proper field-level authorization controls."
-			default:
-				f.Title = "GraphQL abuse (" + signal + ")"
-			}
-			r.recordFinding(ctx, &out, f, "graphql", signal)
-		}
-		if len(out) >= 5 {
-			break
-		}
-	}
-	return out
-}
-
-func graphqlIntrospectionSignal(body string) bool {
-	lower := strings.ToLower(body)
-	return strings.Contains(lower, "__schema") && strings.Contains(lower, "types")
-}
-
-func graphqlSensitiveField(body string) bool {
-	lower := strings.ToLower(body)
-	return strings.Contains(lower, "password") || strings.Contains(lower, "secret") || strings.Contains(lower, "token")
-}
-
-func graphqlCandidateFieldsFromIntrospection(body string) []string {
-	var doc struct {
-		Data struct {
-			Schema struct {
-				Types []struct {
-					Name   string `json:"name"`
-					Fields []struct {
-						Name string `json:"name"`
-					} `json:"fields"`
-				} `json:"types"`
-			} `json:"__schema"`
-		} `json:"data"`
-	}
-	if json.Unmarshal([]byte(body), &doc) != nil {
-		return nil
-	}
-	preferredTypes := map[string]bool{"Query": true, "Mutation": true}
-	var out []string
-	for _, typ := range doc.Data.Schema.Types {
-		if !preferredTypes[typ.Name] && strings.HasPrefix(typ.Name, "__") {
+		if f == nil {
 			continue
 		}
-		if !preferredTypes[typ.Name] && len(out) > 0 {
-			continue
+		switch signal {
+		case "graphql_stack_trace_disclosure":
+			f.Title = "GraphQL Server Stack Trace Disclosure"
+			f.Severity = "medium"
+			f.Description = "A structured GraphQL error exposes server stack frames and implementation paths. This does not prove code execution."
+		case "graphql_database_error_disclosure":
+			f.Title = "GraphQL Database Error Disclosure"
+			f.Severity = "medium"
+			f.Description = "A GraphQL error exposes a database-specific exception or SQLSTATE. This does not by itself prove SQL injection."
+		case "graphql_server_secret_exposure":
+			f.Title = "GraphQL Server Credential Material Exposure"
+			f.Severity = "high"
+			f.Description = "GraphQL response data contains recognizable server credential material. Credential validity and unauthorized access have not been established."
 		}
-		for _, field := range typ.Fields {
-			name := graphqlFieldName(field.Name)
-			if name != "" && name != "user" || strings.EqualFold(field.Name, "user") {
-				out = append(out, name)
-			}
-		}
-	}
-	return out
-}
-
-func uniqueGraphQLFields(fields []string) []string {
-	seen := map[string]struct{}{}
-	var out []string
-	for _, field := range fields {
-		field = graphqlFieldName(field)
-		if field == "" {
-			continue
-		}
-		key := strings.ToLower(field)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, field)
-	}
-	return out
-}
-
-func graphqlFieldName(field string) string {
-	if field == "" {
-		return "user"
-	}
-	for _, ch := range field {
-		if (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9') && ch != '_' {
-			return "user"
+		if r.recordFinding(ctx, out, f, "graphql", signal) {
+			seen[signal] = true
 		}
 	}
-	return field
 }
 
 func (r *Runner) runWebSocket(ctx context.Context, target ScanTarget) []ModuleFinding {
@@ -200,14 +105,10 @@ func (r *Runner) runWebSocket(ctx context.Context, target ScanTarget) []ModuleFi
 		return nil
 	}
 	probes := []struct{ payload, signal string }{
-		{`' OR 1=1--`, "ws_sqli"},
-		{`{"action":"login","user":"admin' OR '1'='1"}`, "ws_sqli"},
-		{`<script>alert(1)</script>`, "ws_xss"},
-		{`{"action":"message","text":"<svg/onload=alert(1)>"}`, "ws_xss"},
-		{`{"id":2}`, "ws_idor"},
-		{`{"action":"get_user","user_id":1}`, "ws_idor"},
-		{`{"action":"subscribe","channel":"internal_admin_feed"}`, "ws_idor"},
-		{`{"action":"handshake_test","origin":"https://evil-attacker.com"}`, "ws_cswsh"},
+		{`'`, "ws_database_error_disclosure"},
+		{`{"action":"akca_probe","value":"'"}`, "ws_database_error_disclosure"},
+		{`{"action":`, "ws_stack_trace_disclosure"},
+		{`{"action":"akca_probe"}`, "ws_server_secret_exposure"},
 	}
 	var out []ModuleFinding
 	for _, pr := range probes {
@@ -249,10 +150,19 @@ func (r *Runner) runWebSocket(ctx context.Context, target ScanTarget) []ModuleFi
 					r.observation("websocket", target, verification.RolePositiveReplay, 3, replays[1]),
 				)
 			})
-		if f != nil && pr.signal == "ws_cswsh" {
-			f.Title = "Cross-Site WebSocket Hijacking (CSWSH)"
-			f.Severity = "high"
-			f.Description = "WebSocket endpoint accepted connections originating from arbitrary cross-domain origins without origin validation."
+		if f != nil {
+			switch pr.signal {
+			case "ws_database_error_disclosure":
+				f.Title = "WebSocket Database Error Disclosure"
+				f.Severity = "medium"
+				f.Description = "A WebSocket message produced a reproducible database-specific exception. This does not by itself prove SQL injection."
+			case "ws_stack_trace_disclosure":
+				f.Title = "WebSocket Stack Trace Disclosure"
+				f.Severity = "medium"
+			case "ws_server_secret_exposure":
+				f.Title = "WebSocket Server Credential Material Exposure"
+				f.Severity = "high"
+			}
 		}
 		r.recordFinding(ctx, &out, f, "websocket", pr.signal)
 	}
@@ -260,17 +170,27 @@ func (r *Runner) runWebSocket(ctx context.Context, target ScanTarget) []ModuleFi
 }
 
 func websocketSignal(body, signal string) bool {
-	lower := strings.ToLower(body)
 	switch signal {
-	case "ws_sqli":
-		return strings.Contains(lower, "sql") || strings.Contains(lower, "syntax error")
-	case "ws_xss":
-		return strings.Contains(body, "<script>") || strings.Contains(lower, "alert")
-	case "ws_idor":
-		return strings.Contains(lower, "email") || strings.Contains(lower, "unauthorized data")
-	case "ws_cswsh":
-		return strings.Contains(lower, "pong") || strings.Contains(lower, "authorized") || strings.Contains(lower, "welcome")
+	case "ws_database_error_disclosure":
+		for _, finding := range sensitivedata.Analyze(body) {
+			if finding.Kind == "database_error" {
+				return true
+			}
+		}
+	case "ws_stack_trace_disclosure":
+		for _, finding := range sensitivedata.Analyze(body) {
+			if finding.Kind == "stack_trace" {
+				return true
+			}
+		}
+	case "ws_server_secret_exposure":
+		for _, match := range secretscan.Detect(body) {
+			if secretscan.IsReportable(match) {
+				return true
+			}
+		}
 	default:
 		return false
 	}
+	return false
 }

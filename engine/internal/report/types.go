@@ -155,6 +155,16 @@ type PathDiscoveryEntry struct {
 	IsArchive  bool   `json:"is_archive,omitempty"`
 }
 
+type CoverageEntry struct {
+	EventType  string `json:"event_type"`
+	Summary    string `json:"summary"`
+	Module     string `json:"module,omitempty"`
+	Phase      string `json:"phase,omitempty"`
+	Endpoint   string `json:"endpoint,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	Configured *bool  `json:"configured,omitempty"`
+}
+
 type Document struct {
 	SchemaVersion     string                       `json:"schema_version"`
 	GeneratedAt       time.Time                    `json:"generated_at"`
@@ -171,6 +181,7 @@ type Document struct {
 	APIKeyValidations []APIKeySection              `json:"api_key_validations,omitempty"`
 	TrafficEvidence   []TrafficEntry               `json:"traffic_evidence,omitempty"`
 	PathDiscoveries   []PathDiscoveryEntry         `json:"path_discoveries,omitempty"`
+	Coverage          []CoverageEntry              `json:"coverage,omitempty"`
 	Warnings          []string                     `json:"warnings,omitempty"`
 	AppendixNotes     string                       `json:"appendix_notes,omitempty"`
 }

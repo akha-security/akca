@@ -37,7 +37,29 @@ func NewCrawlerBrowserWithSessionAndPoolSize(pool *Pool, do PageFetcher, proxyUR
 	}
 	renderer := NewHeadlessRendererWithPoolSize(proxyURL, insecureTLS, poolSize)
 	renderer.SetSession(headers, cookies)
+	renderer.persistent = true
+	renderer.interactive = true
 	return &CrawlerBrowser{pool: pool, do: do, renderer: renderer}
+}
+
+// Close releases the scan-owned browser and its temporary profile.
+func (b *CrawlerBrowser) Close() {
+	if b != nil && b.renderer != nil {
+		b.renderer.Close()
+	}
+}
+
+// Available reports whether this bridge can perform a real Chromium
+// navigation. Its authenticated HTTP fallback cannot solve browser-only WAF
+// challenges, so callers should expose this distinction as a coverage signal.
+func (b *CrawlerBrowser) Available() bool {
+	return b != nil && b.renderer != nil && b.renderer.Available()
+}
+
+func (b *CrawlerBrowser) SetResourceGuard(guard func(context.Context, string, string) error) {
+	if b != nil && b.renderer != nil {
+		b.renderer.resourceGuard = guard
+	}
 }
 
 func (b *CrawlerBrowser) SetConcurrency(n int) {

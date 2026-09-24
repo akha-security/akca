@@ -81,6 +81,14 @@ func (r *Runner) runJWT(ctx context.Context, target ScanTarget) []ModuleFinding 
 		r.emitSkip("jwt", target, "protected endpoint did not return a stable identity")
 		return nil
 	}
+	// Establish a rejected invalid-signature control before evaluating any
+	// signature-bypass candidate. Without this control, a generic 2xx endpoint
+	// or a response that ignores Authorization could be misread as JWT bypass.
+	invalidToken := invalidateJWTSignature(validToken)
+	invalid, err := r.probeWithHeaders(ctx, target, "", map[string]string{"Authorization": "Bearer " + invalidToken})
+	if err != nil || jwtIdentityFromResponse(invalid.Response) == validIdentity {
+		return nil
+	}
 
 	// 1. Check for Unverified JWT Signature (Server does not verify signatures at all)
 	if unverifiedToken, ok := tamperJWTUnverifiedSignature(validToken, "akca-admin"); ok {
@@ -92,9 +100,12 @@ func (r *Runner) runJWT(ctx context.Context, target ScanTarget) []ModuleFinding 
 				finding := r.verifyAndBuildWithCandidate(ctx, "jwt", target, payload, valid, unverifiedResp,
 					"identity_change_confirmed", false, false, "", "", func(candidate *verification.Candidate) {
 						candidate.RequestedProofType = verification.ProofIdentityBoundary
+						candidate.NegativeControlSet = true
+						candidate.NegativeControlOK = true
 						candidate.Observations = append(candidate.Observations,
 							r.identityObservation("jwt", target, verification.RoleIdentityA, 1, validIdentity, valid),
 							r.identityObservation("jwt", target, verification.RoleIdentityB, 1, probeIdentity, unverifiedResp),
+							r.identityObservation("jwt", target, verification.RoleAnonymousControl, 1, "invalid_signature", invalid),
 						)
 					})
 				if finding != nil {
@@ -109,11 +120,6 @@ func (r *Runner) runJWT(ctx context.Context, target ScanTarget) []ModuleFinding 
 		}
 	}
 
-	invalidToken := invalidateJWTSignature(validToken)
-	invalid, err := r.probeWithHeaders(ctx, target, "", map[string]string{"Authorization": "Bearer " + invalidToken})
-	if err != nil || jwtIdentityFromResponse(invalid.Response) == validIdentity {
-		return nil
-	}
 	expiredToken := capturedExpiredJWT(r.cfg)
 	var expired httpclient.RequestResponse
 	if expiredToken != "" {
@@ -569,8 +575,8 @@ func collectIdentityFields(value interface{}, out *[]string) {
 		for key, child := range typed {
 			switch strings.ToLower(key) {
 			case "sub", "user_id", "username", "email", "role":
-				if text, ok := child.(string); ok && text != "" {
-					*out = append(*out, key+"="+text)
+				if text := jwtIdentityScalar(child); text != "" {
+					*out = append(*out, strings.ToLower(key)+"="+text)
 				}
 			}
 			collectIdentityFields(child, out)
@@ -579,6 +585,22 @@ func collectIdentityFields(value interface{}, out *[]string) {
 		for _, child := range typed {
 			collectIdentityFields(child, out)
 		}
+	}
+}
+
+func jwtIdentityScalar(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case float64:
+		if typed == float64(int64(typed)) {
+			return fmt.Sprintf("%d", int64(typed))
+		}
+		return fmt.Sprintf("%g", typed)
+	case json.Number:
+		return typed.String()
+	default:
+		return ""
 	}
 }
 

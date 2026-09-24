@@ -12,6 +12,12 @@ import (
 // runPreflightValidation prevents a scan from spending its budget on an
 // unusable gateway or silently scanning the logged-out surface.
 func (e *Engine) runPreflightValidation(ctx context.Context, cfg config.ScanConfig) error {
+	for _, readiness := range moduleReadiness(cfg) {
+		_ = e.Emit("module_readiness", readiness.Reason, map[string]interface{}{"module": readiness.Module, "configured": readiness.Configured, "reason": readiness.Reason})
+		if !readiness.Configured {
+			_ = e.Emit("log", readiness.Module+": "+readiness.Reason, map[string]interface{}{"phase": "preflight", "module": readiness.Module})
+		}
+	}
 	if len(cfg.Targets) == 0 {
 		return fmt.Errorf("preflight requires at least one target")
 	}
@@ -29,6 +35,43 @@ func (e *Engine) runPreflightValidation(ctx context.Context, cfg config.ScanConf
 	}
 	_ = e.Emit("preflight_ok", "target and authentication preflight passed", map[string]interface{}{"target": cfg.Targets[0], "status": rr.Response.StatusCode, "authenticated": scanHasConfiguredAuth(cfg)})
 	return nil
+}
+
+type readinessEntry struct {
+	Module     string
+	Configured bool
+	Reason     string
+}
+
+// Configuration readiness is not a claim that every endpoint has a matching policy.
+func moduleReadiness(cfg config.ScanConfig) []readinessEntry {
+	rateConfigured := false
+	for _, p := range cfg.RateLimitPolicies {
+		if p.WindowSeconds > 0 {
+			rateConfigured = true
+		}
+	}
+	checks := []readinessEntry{
+		{"idor", len(cfg.RoleProfiles) >= 2 && len(cfg.ObjectAuthorizationPolicies) > 0, "two role profiles and object ownership policies required"},
+		{"tenant_isolation", len(cfg.RoleProfiles) >= 2 && len(cfg.ObjectAuthorizationPolicies) > 0, "two role profiles and object ownership policies required"},
+		{"bfla", len(cfg.AuthorizationPolicies) > 0, "authorization, state and cleanup policies required"},
+		{"race_condition", len(cfg.RaceProofPolicies) > 0, "recorded transaction, state and cleanup policy required"},
+		{"business_logic", len(cfg.BusinessLogicProofPolicies) > 0, "recorded invariant, state and cleanup policy required"},
+		{"account_recovery", len(cfg.AccountRecoveryProofPolicies) > 0, "recorded recovery and state policy required"},
+		{"webhook_security", len(cfg.WebhookProofPolicies) > 0, "recorded unsigned-event and state policy required"},
+		{"rate_limit", rateConfigured, "an account, threshold and window_seconds policy is required for vulnerability proof"},
+	}
+	out := []readinessEntry{}
+	for _, check := range checks {
+		if !cfg.AllowsModule(check.Module) {
+			continue
+		}
+		if check.Configured {
+			check.Reason = "configuration present; endpoint policy matching and proof still required"
+		}
+		out = append(out, check)
+	}
+	return out
 }
 
 func scanHasConfiguredAuth(cfg config.ScanConfig) bool {

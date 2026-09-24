@@ -5,6 +5,26 @@ All notable changes to AKCA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [v0.2.2] - 2026-09-25
+
+### Fixed
+
+- Recursively analyze lazy-loaded JavaScript chunks and retain script dependencies independently from the API-finding confidence threshold.
+- Preserve extra login fields, multi-stage authentication requests, cookies and response bearer tokens during automatic login and reauthentication.
+- Require typed, replayable evidence for GraphQL, WebSocket, API exposure, JWT and authorization findings instead of promoting generic response differences.
+- Redact JavaScript secret values and nested login credentials from diagnostic events and stored scan configuration.
+
+### Added
+
+- Coverage and module-readiness diagnostics in JSON, HTML and Markdown reports, including explicit partial-scan warnings.
+- Regression tests for recursive SPA chunk discovery, token-only and multi-step login sessions, report coverage rendering and routine non-applicable module skips.
+
+### Validation
+
+- Full Go package tests, including the controlled local testlab scan, pass with `go test ./... -count=1 -timeout=180s`.
+- Static analysis passes with `go vet ./...`.
+- The strict observed benchmark passes with precision, recall and specificity of `1.0` and a false-positive rate of `0` on its available corpus.
+
 ## [v0.2.1] - 2026-09-23
 
 ### Fixed

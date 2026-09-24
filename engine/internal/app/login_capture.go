@@ -139,6 +139,18 @@ func (e *Engine) automatedLogin(params map[string]interface{}, emit func(interfa
 	if raw, ok := params["extra_fields"].(map[string]interface{}); ok {
 		req.ExtraFields = parseStringMap(raw)
 	}
+	if rawSteps, ok := params["steps"].([]interface{}); ok {
+		for _, rawStep := range rawSteps {
+			stepMap, ok := rawStep.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			req.Steps = append(req.Steps, logincapture.LoginStep{
+				URL: strParam(stepMap, "url"), Method: strParam(stepMap, "method"),
+				Fields: parseStringMap(stepMap["fields"]), Headers: parseStringMap(stepMap["headers"]),
+			})
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -276,12 +288,20 @@ func (e *Engine) resolveLoginSessionContext(parent context.Context, cfg *config.
 	}
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
+	steps := make([]logincapture.LoginStep, 0, len(lc.Steps))
+	for _, step := range lc.Steps {
+		steps = append(steps, logincapture.LoginStep{
+			URL: step.URL, Method: step.Method, Fields: cloneMap(step.Fields), Headers: cloneMap(step.Headers),
+		})
+	}
 	sess, err := logincapture.AutomatedLogin(ctx, logincapture.LoginRequest{
 		LoginURL:      lc.LoginURL,
 		Username:      user,
 		Password:      lc.Password,
 		UsernameField: lc.UsernameField,
 		PasswordField: lc.PasswordField,
+		ExtraFields:   cloneMap(lc.ExtraFields),
+		Steps:         steps,
 		ForceHTTP1:    cfg.ForceHTTP1,
 	})
 	if err != nil {
@@ -305,6 +325,12 @@ func (e *Engine) resolveLoginSessionContext(parent context.Context, cfg *config.
 		}
 		for k, v := range sess.Cookies {
 			cfg.AuthProfiles[0].Cookies[k] = v
+		}
+		if cfg.AuthProfiles[0].Headers == nil {
+			cfg.AuthProfiles[0].Headers = map[string]string{}
+		}
+		for k, v := range sess.Headers {
+			cfg.AuthProfiles[0].Headers[k] = v
 		}
 	}
 	_ = e.Emit("log", "automated login captured session cookies", map[string]interface{}{

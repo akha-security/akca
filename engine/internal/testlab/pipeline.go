@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -82,7 +83,7 @@ func runPipeline(ctx context.Context, db *storage.DB, opts Options, collector *E
 		cfg.KnownAccounts = []string{"known@example.com"}
 		cfg.RateLimitPolicies = []config.RateLimitPolicy{{
 			URLContains: "/parity/auth/login", Account: "known@example.com",
-			Threshold: 3, CooldownSeconds: 1, PerAccount: true,
+			Threshold: 3, CooldownSeconds: 1, WindowSeconds: 60, PerAccount: true,
 		}}
 	}
 	if opts.RequestBudget > 0 {
@@ -214,7 +215,12 @@ func (p *pipeline) run(ctx context.Context) error {
 	c := crawler.New(p.scanID, p.cfg, p.client, p.scope, p.db, p.emit)
 	_ = p.emit("phase_started", "crawling", map[string]interface{}{"phase": "crawling"})
 	if err := c.Crawl(ctx, targets); err != nil {
-		return err
+		// The lab intentionally samples a bounded crawl, then exercises its
+		// explicit fixture corpus. Keep the gap observable, not a complete claim.
+		if !errors.Is(err, crawler.ErrIncomplete) {
+			return err
+		}
+		_ = p.emit("coverage_gap", err.Error(), map[string]interface{}{"phase": "crawling", "bounded_fixture_sample": true})
 	}
 	_ = p.emit("phase_finished", "crawling", map[string]interface{}{"phase": "crawling"})
 

@@ -42,7 +42,7 @@ func (r *Runner) cachedEmptyProbe(ctx context.Context, target ScanTarget) (httpc
 	r.baselineMu.Lock()
 	if rr, ok := r.baselineCache["probe|"+key]; ok {
 		r.baselineMu.Unlock()
-		noteCachedEvidence(ctx)
+		noteCachedEvidence(ctx, rr)
 		return rr, nil
 	}
 	r.baselineMu.Unlock()
@@ -62,7 +62,7 @@ func (r *Runner) cachedEmptyHeaderProbe(ctx context.Context, target ScanTarget) 
 	r.baselineMu.Lock()
 	if rr, ok := r.baselineCache["headers|"+key]; ok {
 		r.baselineMu.Unlock()
-		noteCachedEvidence(ctx)
+		noteCachedEvidence(ctx, rr)
 		return rr, nil
 	}
 	r.baselineMu.Unlock()

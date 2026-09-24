@@ -83,7 +83,8 @@ func IsDiagnosticEvent(eventType string) bool {
 	switch strings.ToLower(eventType) {
 	case "plugin_skipped", "oast_probe_failed", "oast_probe_sent", "oast_verification_pending",
 		"scan_error", "coverage_gap", "waf_detected", "resource_limit_reached",
-		"module_budget_planned", "module_target_finished", "vuln_module_finished":
+		"module_budget_planned", "module_target_finished", "vuln_module_finished", "module_readiness",
+		"session_expired", "session_reauthenticated", "crawler_finished", "js_analysis_finished":
 		return true
 	}
 	return false

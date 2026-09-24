@@ -11,20 +11,21 @@ type BrowserFetcher interface {
 }
 
 type BrowserSnapshot struct {
-	DocumentStatus int                   `json:"document_status,omitempty"`
-	URL            string                `json:"url"`
-	DOM            string                `json:"dom"`
-	NetworkEvents  []BrowserNetworkEvent `json:"network_events,omitempty"`
-	ConsoleEntries []BrowserConsoleEntry `json:"console_entries,omitempty"`
-	NetworkCalls   []DiscoveredEndpoint  `json:"network_calls,omitempty"`
-	WebSockets     []string              `json:"websockets,omitempty"`
-	ServiceWorkers []string              `json:"service_workers,omitempty"`
-	Cookies        map[string]string     `json:"cookies,omitempty"`
-	SessionStorage map[string]string     `json:"session_storage,omitempty"`
-	LocalStorage   map[string]string     `json:"local_storage,omitempty"`
-	VisibleActions []string              `json:"visible_actions,omitempty"`
-	Forms          []string              `json:"forms,omitempty"`
-	DOMSinkEvents  []string              `json:"dom_sink_events,omitempty"`
+	BlockedResources []string              `json:"blocked_resources,omitempty"`
+	DocumentStatus   int                   `json:"document_status,omitempty"`
+	URL              string                `json:"url"`
+	DOM              string                `json:"dom"`
+	NetworkEvents    []BrowserNetworkEvent `json:"network_events,omitempty"`
+	ConsoleEntries   []BrowserConsoleEntry `json:"console_entries,omitempty"`
+	NetworkCalls     []DiscoveredEndpoint  `json:"network_calls,omitempty"`
+	WebSockets       []string              `json:"websockets,omitempty"`
+	ServiceWorkers   []string              `json:"service_workers,omitempty"`
+	Cookies          map[string]string     `json:"cookies,omitempty"`
+	SessionStorage   map[string]string     `json:"session_storage,omitempty"`
+	LocalStorage     map[string]string     `json:"local_storage,omitempty"`
+	VisibleActions   []string              `json:"visible_actions,omitempty"`
+	Forms            []string              `json:"forms,omitempty"`
+	DOMSinkEvents    []string              `json:"dom_sink_events,omitempty"`
 }
 
 type BrowserConsoleEntry struct {

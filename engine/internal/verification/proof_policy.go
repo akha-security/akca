@@ -60,7 +60,7 @@ var proofPolicies = map[string]ModuleProofPolicy{
 	"parser_differential":    contentPolicy("parser_differential"),
 	"csrf":                   statePolicy("csrf", ProofStateMutation),
 	"smuggling":              protocolPolicy("smuggling"),
-	"graphql":                schemaPolicy("graphql"),
+	"graphql":                contentPolicy("graphql"),
 	"websocket":              replayPolicy("websocket", ProofDifferentialReplay),
 	"api_exposure":           contentPolicy("api_exposure"),
 	"api_versioning":         contentPolicy("api_versioning"),
@@ -332,7 +332,8 @@ func evaluateProofPolicy(candidate Candidate, result Result) (ProofType, bool) {
 		return proofType, result.TimingConfirmed && len(candidate.TimingSamples) >= 3 &&
 			len(candidate.TimingControl) >= 3
 	case ProofStateMutation:
-		return proofType, negativeControlSatisfied(candidate, result, roles, policy.RequiresIdentityProof) &&
+		identityOK := !policy.RequiresIdentityProof || identityBoundaryEvidence(candidate.Observations)
+		return proofType, identityOK && negativeControlSatisfied(candidate, result, roles, policy.RequiresIdentityProof) &&
 			roles[RoleStateBefore] > 0 && roles[RoleStateAfter] > 0
 	case ProofFileRetrieval:
 		return proofType, negativeControlSatisfied(candidate, result, roles, false) &&
@@ -340,7 +341,7 @@ func evaluateProofPolicy(candidate Candidate, result Result) (ProofType, bool) {
 	case ProofIdentityBoundary:
 		return proofType, negativeControlSatisfied(candidate, result, roles, true) &&
 			roles[RoleIdentityA] > 0 && roles[RoleIdentityB] > 0 &&
-			roles[RoleAnonymousControl] > 0
+			roles[RoleAnonymousControl] > 0 && identityBoundaryEvidence(candidate.Observations)
 	case ProofPolicyViolation:
 		return proofType, negativeControlSatisfied(candidate, result, roles, false) &&
 			roles[RolePositiveProbe]+roles[RolePositiveReplay] >= policy.MinimumIndependentRuns &&
@@ -370,6 +371,43 @@ func evaluateProofPolicy(candidate Candidate, result Result) (ProofType, bool) {
 	}
 }
 
+func identityBoundaryEvidence(observations []Observation) bool {
+	identitiesA := map[string]struct{}{}
+	identitiesB := map[string]struct{}{}
+	anonymous := map[string]struct{}{}
+	for _, observation := range observations {
+		identity := strings.TrimSpace(observation.IdentityID)
+		if identity == "" {
+			continue
+		}
+		switch observation.Role {
+		case RoleIdentityA:
+			identitiesA[identity] = struct{}{}
+		case RoleIdentityB:
+			identitiesB[identity] = struct{}{}
+		case RoleAnonymousControl:
+			anonymous[identity] = struct{}{}
+		}
+	}
+	if len(identitiesA) == 0 || len(identitiesB) == 0 || len(anonymous) == 0 {
+		return false
+	}
+	for identity := range identitiesA {
+		if _, duplicate := identitiesB[identity]; duplicate {
+			return false
+		}
+		if _, duplicate := anonymous[identity]; duplicate {
+			return false
+		}
+	}
+	for identity := range identitiesB {
+		if _, duplicate := anonymous[identity]; duplicate {
+			return false
+		}
+	}
+	return true
+}
+
 func negativeControlSatisfied(candidate Candidate, result Result, roles map[ObservationRole]int, allowAnonymous bool) bool {
 	observations := roles[RoleNegativeControl]
 	if allowAnonymous {
@@ -389,7 +427,19 @@ func proofAllowed(allowed []ProofType, value ProofType) bool {
 
 func observationRoles(items []Observation) map[ObservationRole]int {
 	out := make(map[ObservationRole]int)
+	seen := make(map[string]bool)
 	for _, item := range items {
+		role := item.Role
+		if role == RolePositiveReplay {
+			role = RolePositiveProbe
+		}
+		if item.RequestID != "" {
+			key := string(role) + "|" + item.RequestID
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+		}
 		out[item.Role]++
 	}
 	return out

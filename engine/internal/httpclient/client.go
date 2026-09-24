@@ -40,8 +40,17 @@ type ResponseRecord struct {
 }
 
 type RequestResponse struct {
-	Request  RequestRecord  `json:"request"`
-	Response ResponseRecord `json:"response"`
+	ExchangeID string         `json:"exchange_id,omitempty"`
+	Request    RequestRecord  `json:"request"`
+	Response   ResponseRecord `json:"response"`
+}
+
+var exchangeSequence atomic.Uint64
+
+func StampExchange(rr *RequestResponse) {
+	if rr.ExchangeID == "" {
+		rr.ExchangeID = fmt.Sprintf("exchange-%d", exchangeSequence.Add(1))
+	}
 }
 
 type Client struct {
@@ -384,6 +393,7 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 			InitialStatus: initialStatus,
 		},
 	}
+	StampExchange(&rr)
 	return rr, nil
 }
 

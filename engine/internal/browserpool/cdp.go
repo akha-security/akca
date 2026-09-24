@@ -326,9 +326,76 @@ func (c *cdpCapture) addConsole(entry crawler.BrowserConsoleEntry) {
 	c.console = append(c.console, entry)
 }
 
+type browserSession struct {
+	client      *cdpClient
+	cmd         *exec.Cmd
+	profile     string
+	initialized bool
+}
+
+func (s *browserSession) close() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_ = s.client.call(ctx, "Browser.close", map[string]interface{}{}, nil)
+	cancel()
+	s.client.close()
+	if s.cmd.Process != nil {
+		_ = s.cmd.Process.Kill()
+	}
+	_ = s.cmd.Wait()
+	_ = os.RemoveAll(s.profile)
+}
+
+func (r *HeadlessRenderer) Close() {
+	r.crawlMu.Lock()
+	defer r.crawlMu.Unlock()
+	if r.session != nil {
+		r.session.close()
+		r.session = nil
+	}
+}
+
+func (r *HeadlessRenderer) startBrowser(ctx context.Context) (*browserSession, error) {
+	profile, err := os.MkdirTemp("", "akca-cdp-")
+	if err != nil {
+		return nil, err
+	}
+	// Lifetime belongs to Close, not the per-navigation timeout.
+	cmd := exec.Command(r.binary, r.cdpArgs(profile)...)
+	// Chromium children can inherit stderr. Bound pipe cleanup even if the
+	// browser exits before its descendants close those handles on Windows.
+	cmd.WaitDelay = 2 * time.Second
+	var stderr synchronizedBuffer
+	cmd.Stderr = &stderr
+	if err = cmd.Start(); err != nil {
+		_ = os.RemoveAll(profile)
+		return nil, err
+	}
+	cleanup := func() { _ = cmd.Process.Kill(); _ = cmd.Wait(); _ = os.RemoveAll(profile) }
+	port, err := waitDebugPort(ctx, profile)
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	debugURL, err := waitPageDebuggerURL(ctx, port)
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	client, err := dialCDP(debugURL)
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	return &browserSession{client: client, cmd: cmd, profile: profile}, nil
+}
+
 func (r *HeadlessRenderer) Capture(ctx context.Context, rawURL string) (crawler.BrowserSnapshot, error) {
 	if !r.Available() {
 		return crawler.BrowserSnapshot{}, fmt.Errorf("no Chromium-compatible browser found")
+	}
+	if r.persistent {
+		r.crawlMu.Lock()
+		defer r.crawlMu.Unlock()
 	}
 	if r.sem != nil {
 		select {
@@ -340,42 +407,24 @@ func (r *HeadlessRenderer) Capture(ctx context.Context, rawURL string) (crawler.
 	}
 	captureCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	profile, err := os.MkdirTemp("", "akca-cdp-")
-	if err != nil {
-		return crawler.BrowserSnapshot{}, err
-	}
-	defer os.RemoveAll(profile)
-
-	cmd := exec.CommandContext(captureCtx, r.binary, r.cdpArgs(profile)...)
-	var browserErrors synchronizedBuffer
-	cmd.Stderr = &browserErrors
-	if err := cmd.Start(); err != nil {
-		return crawler.BrowserSnapshot{}, err
-	}
-	defer func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+	session := r.session
+	if session == nil {
+		var err error
+		session, err = r.startBrowser(captureCtx)
+		if err != nil {
+			return crawler.BrowserSnapshot{}, err
 		}
-		_ = cmd.Wait()
-	}()
-	debugPort, err := waitDebugPort(captureCtx, profile)
-	if err != nil {
-		return crawler.BrowserSnapshot{}, err
+		if r.persistent {
+			r.session = session
+		} else {
+			defer session.close()
+		}
 	}
-	debugURL, err := waitPageDebuggerURL(captureCtx, debugPort)
-	if err != nil {
-		return crawler.BrowserSnapshot{}, err
-	}
-	client, err := dialCDP(debugURL)
-	if err != nil {
-		return crawler.BrowserSnapshot{}, err
-	}
-	defer client.close()
+	client := session.client
 
 	for _, domain := range []string{"Page.enable", "Network.enable", "Runtime.enable"} {
 		if err := client.call(captureCtx, domain, map[string]interface{}{}, nil); err != nil {
-			return crawler.BrowserSnapshot{}, fmt.Errorf("%w; browser stderr: %s", err,
-				truncateString(browserErrors.String(), 2048))
+			return crawler.BrowserSnapshot{}, err
 		}
 	}
 	for _, optionalDomain := range []string{"DOMStorage.enable", "ServiceWorker.enable", "Log.enable"} {
@@ -385,21 +434,30 @@ func (r *HeadlessRenderer) Capture(ctx context.Context, rawURL string) (crawler.
 		_ = client.call(captureCtx, "Network.setExtraHTTPHeaders",
 			map[string]interface{}{"headers": redactOutboundHeaders(r.headers)}, nil)
 	}
-	for name, value := range r.cookies {
-		_ = client.call(captureCtx, "Network.setCookie",
-			map[string]interface{}{"name": name, "value": value, "url": rawURL}, nil)
+	if !session.initialized {
+		for name, value := range r.cookies {
+			_ = client.call(captureCtx, "Network.setCookie",
+				map[string]interface{}{"name": name, "value": value, "url": rawURL}, nil)
+		}
+		_ = client.call(captureCtx, "Page.addScriptToEvaluateOnNewDocument",
+			map[string]interface{}{"source": domInstrumentationScript}, nil)
 	}
-	_ = client.call(captureCtx, "Page.addScriptToEvaluateOnNewDocument",
-		map[string]interface{}{"source": domInstrumentationScript}, nil)
+	session.initialized = true
 
 	state := newCDPCapture()
+	r.blockedMu.Lock()
+	r.blockedResources = nil
+	r.blockedMu.Unlock()
 	if err := r.guardBrowserRequests(captureCtx, client); err != nil {
 		return crawler.BrowserSnapshot{}, err
 	}
 	if err := client.call(captureCtx, "Page.navigate", map[string]interface{}{"url": rawURL}, nil); err != nil {
 		return crawler.BrowserSnapshot{}, err
 	}
-	settle := (<-chan time.Time)(nil)
+	idle := time.NewTimer(1500 * time.Millisecond)
+	defer idle.Stop()
+	settle := idle.C
+	actionsRun := !r.interactive
 	maxWait := time.NewTimer(12 * time.Second)
 	defer maxWait.Stop()
 collect:
@@ -410,20 +468,38 @@ collect:
 		case <-maxWait.C:
 			break collect
 		case <-settle:
+			if !state.loaded {
+				idle.Reset(1500 * time.Millisecond)
+				continue
+			}
+			if !actionsRun {
+				actionsRun = true
+				_ = client.call(captureCtx, "Runtime.evaluate", map[string]interface{}{"expression": crawler.GenerateSmartActionScript(crawler.DefaultSmartActionConfig()), "returnByValue": true, "awaitPromise": true}, nil)
+				idle.Reset(1500 * time.Millisecond)
+				continue
+			}
 			break collect
 		case event, ok := <-client.events:
 			if !ok {
 				break collect
 			}
 			state.handle(event)
-			if state.loaded && settle == nil {
-				timer := time.NewTimer(500 * time.Millisecond)
-				defer timer.Stop()
-				settle = timer.C
+			if event.Method == "Network.requestWillBeSent" || event.Method == "Network.loadingFinished" || event.Method == "Network.loadingFailed" || event.Method == "Page.loadEventFired" {
+				if !idle.Stop() {
+					select {
+					case <-idle.C:
+					default:
+					}
+				}
+				idle.Reset(1500 * time.Millisecond)
 			}
 		}
 	}
-	return r.buildCDPSnapshot(captureCtx, client, rawURL, state)
+	snapshot, err := r.buildCDPSnapshot(captureCtx, client, rawURL, state)
+	r.blockedMu.Lock()
+	snapshot.BlockedResources = append([]string(nil), r.blockedResources...)
+	r.blockedMu.Unlock()
+	return snapshot, err
 }
 
 func (r *HeadlessRenderer) cdpArgs(profile string) []string {

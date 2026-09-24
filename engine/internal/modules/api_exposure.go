@@ -3,20 +3,12 @@ package modules
 import (
 	"context"
 	"encoding/json"
-	"regexp"
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/secretscan"
+	"github.com/akha-security/akca/engine/internal/sensitivedata"
 )
-
-var sensitiveFieldPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)"password"\s*:\s*"[^"]+"`),
-	regexp.MustCompile(`(?i)"ssn"\s*:\s*"[^"]+"`),
-	regexp.MustCompile(`(?i)"credit_?card"\s*:\s*"[^"]+"`),
-	regexp.MustCompile(`(?i)"api_?key"\s*:\s*"[^"]+"`),
-	regexp.MustCompile(`(?i)"secret"\s*:\s*"[^"]+"`),
-	regexp.MustCompile(`(?i)"token"\s*:\s*"[^"]+"`),
-}
 
 func (r *Runner) runAPIExposure(ctx context.Context, target ScanTarget) []ModuleFinding {
 	if ok, reason := r.shouldRunModule("api_exposure", target); !ok {
@@ -55,6 +47,9 @@ func (r *Runner) runAPIExposure(ctx context.Context, target ScanTarget) []Module
 }
 
 func apiExposureResponseSurface(endpointURL string, response httpclient.ResponseRecord) bool {
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return false
+	}
 	contentType := strings.ToLower(response.Headers["Content-Type"])
 	body := strings.TrimSpace(response.Body)
 	if body == "" || strings.Contains(strings.ToLower(body), "<html") || strings.Contains(strings.ToLower(body), "<!doctype") {
@@ -72,17 +67,67 @@ func apiExposureResponseSurface(endpointURL string, response httpclient.Response
 }
 
 func apiExposureSignal(body string) (signal, field string) {
-	for _, re := range sensitiveFieldPatterns {
-		if m := re.FindString(body); m != "" {
-			return "sensitive_field_exposure", m
+	for _, match := range secretscan.Detect(body) {
+		if secretscan.IsReportable(match) {
+			return "server_secret_exposure", match.Kind
 		}
 	}
-	lower := strings.ToLower(body)
-	if strings.Contains(lower, "stack trace") || strings.Contains(lower, "sql syntax") {
-		return "verbose_error_exposure", "error_detail"
+	for _, finding := range sensitivedata.Analyze(body) {
+		switch finding.Kind {
+		case "pii_ssn", "pii_tckn", "pii_iban", "credit_card", "jwt_token", "session_id", "database_dump_leak":
+			return "sensitive_data_exposure", finding.Kind
+		case "stack_trace", "database_error":
+			return "verbose_error_exposure", finding.Kind
+		}
 	}
-	if strings.Contains(lower, `"internal_id"`) || strings.Contains(lower, `"employee_id"`) {
-		return "internal_id_exposure", "internal_id"
+	var decoded interface{}
+	if json.Unmarshal([]byte(body), &decoded) == nil {
+		if key := exposedCredentialField(decoded); key != "" {
+			return "sensitive_field_exposure", key
+		}
 	}
 	return "", ""
+}
+
+func exposedCredentialField(value interface{}) string {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		for key, child := range typed {
+			normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), " ", "_"))
+			if credentialValueExposed(normalized, child) {
+				return normalized
+			}
+			if nested := exposedCredentialField(child); nested != "" {
+				return nested
+			}
+		}
+	case []interface{}:
+		for _, child := range typed {
+			if nested := exposedCredentialField(child); nested != "" {
+				return nested
+			}
+		}
+	}
+	return ""
+}
+
+func credentialValueExposed(key string, value interface{}) bool {
+	text, ok := value.(string)
+	if !ok {
+		return false
+	}
+	text = strings.TrimSpace(text)
+	lower := strings.ToLower(text)
+	if text == "" || lower == "null" || lower == "none" || lower == "redacted" ||
+		strings.Trim(text, "*xX•") == "" {
+		return false
+	}
+	switch key {
+	case "password", "passwd", "password_hash", "api_key", "apikey", "client_secret", "private_key", "secret":
+		return len(text) >= 4
+	case "access_token", "refresh_token", "session_token", "auth_token", "bearer_token":
+		return len(text) >= 16
+	default:
+		return false
+	}
 }

@@ -47,9 +47,16 @@ func (e *Engine) runCrawlerPhase(ctx context.Context, targets []string) error {
 			browserCookies,
 			browserPoolSize,
 		)
+		if !browser.Available() {
+			_ = e.Emit("coverage_gap", "Chromium is unavailable; browser-only pages and WAF challenges may remain undiscovered", map[string]interface{}{
+				"phase": "crawling", "reason": "browser_runtime_unavailable",
+			})
+		}
 		if e.client != nil {
 			browser.SetRequestGuard(e.client.ReserveExternal)
+			browser.SetResourceGuard(e.client.ReserveBrowserResource)
 		}
+		defer browser.Close()
 		c.SetBrowser(browser)
 	}
 

@@ -2,6 +2,7 @@ package modules
 
 import (
 	"context"
+	"net/http"
 	"net/url"
 	"strings"
 	"testing"
@@ -330,6 +331,15 @@ func TestJWTIdentityChangeUsesSuccessfulValidBaseline(t *testing.T) {
 	}
 }
 
+func TestJWTIdentitySupportsNumericSubject(t *testing.T) {
+	identity := jwtIdentityFromResponse(httpclient.ResponseRecord{
+		StatusCode: http.StatusOK, Body: `{"sub":42,"role":"user"}`,
+	})
+	if !strings.Contains(identity, "sub=42") || !strings.Contains(identity, "role=user") {
+		t.Fatalf("numeric JWT subject was not captured: %q", identity)
+	}
+}
+
 func TestOAuthMisconfiguration(t *testing.T) {
 	c := &groupCClient{responses: map[string]string{
 		"https://app.example/callback":  "denied",
@@ -599,6 +609,28 @@ func TestAPIExposureRejectsHTMLTokenPage(t *testing.T) {
 	}
 }
 
+func TestAPIExposureRejectsMetadataAndMaskedCredentials(t *testing.T) {
+	for _, body := range []string{
+		`{"internal_id":"employee-7","csrf_token":"abc"}`,
+		`{"password":"********","access_token":"redacted"}`,
+		`{"token":"public-ui-label"}`,
+	} {
+		if signal, field := apiExposureSignal(body); signal != "" {
+			t.Fatalf("metadata/masked value became API exposure: signal=%s field=%s body=%s", signal, field, body)
+		}
+	}
+}
+
+func TestAPIExposureRejectsErrorStatusEvenWithSensitiveLookingJSON(t *testing.T) {
+	response := httpclient.ResponseRecord{
+		StatusCode: http.StatusBadRequest,
+		Body:       `{"password":"s3cret"}`, Headers: map[string]string{"Content-Type": "application/json"},
+	}
+	if apiExposureResponseSurface("https://example.test/api/login", response) {
+		t.Fatal("error response must not be treated as successful excessive data exposure")
+	}
+}
+
 func TestRateLimitWeakness(t *testing.T) {
 	c := &groupCClient{responses: map[string]string{"__default__": "invalid login attempt"}}
 	target := ScanTarget{EndpointURL: "http://example.com/login", Method: "GET", Parameter: "user"}
@@ -640,8 +672,8 @@ func TestRateLimitThresholdDiscoveryUsesOneAccountAndFindsThresholdAboveSix(t *t
 	if c.count != 11 {
 		t.Fatalf("threshold account request count = %d, want 11", c.count)
 	}
-	if len(findings) != 1 || findings[0].Evidence.Response.StatusCode != 429 {
-		t.Fatalf("threshold discovery did not preserve/report 429 evidence: %+v", findings)
+	if len(findings) != 0 {
+		t.Fatalf("a working defense must not become a policy violation: %+v", findings)
 	}
 }
 

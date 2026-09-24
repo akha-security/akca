@@ -323,7 +323,7 @@ func (r *Runner) collectSQLiBaselineAndTiming(ctx context.Context, target ScanTa
 		samples = append(samples, ms)
 
 		if !haveFirst {
-			if isSQLiClientError(rr.Response.StatusCode) {
+			if isSQLiClientError(rr.Response.StatusCode) && rr.Response.StatusCode != 400 && rr.Response.StatusCode != 422 {
 				return sqliBaselineSnapshot{ok: false, reason: fmt.Sprintf(
 					"baseline request was rejected with HTTP %d", rr.Response.StatusCode)}
 			}

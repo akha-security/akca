@@ -69,8 +69,8 @@ func TestRealHTTPAllocationIsChargedOnce(t *testing.T) {
 		}
 		return nil
 	}, cfg)
-	if _, err := r.RunModule(context.Background(), "xss", []ScanTarget{{EndpointURL: srv.URL + "?q=x", Method: "GET", Parameter: "q", Location: "query"}}); err != nil {
-		t.Fatal(err)
+	if _, err := r.RunModule(context.Background(), "xss", []ScanTarget{{EndpointURL: srv.URL + "?q=x", Method: "GET", Parameter: "q", Location: "query"}}); err == nil {
+		t.Fatal("budget-limited module must report incomplete coverage")
 	}
 	if hits.Load() != 12 || finished["requests_used"] != int64(12) || finished["targets_budget_exhausted"] != 1 {
 		t.Fatalf("double-charge or lost coverage: hits=%d event=%v", hits.Load(), finished)
@@ -178,8 +178,8 @@ func TestBoundedScanReservesLaterURLsAndReportsPartialCoverage(t *testing.T) {
 				return nil
 			}, cfg)
 		findings, err := r.RunModule(context.Background(), "xss", budgetTargets())
-		if err != nil {
-			t.Fatal(err)
+		if err == nil {
+			t.Fatal("partial coverage must propagate to scan status")
 		}
 		if len(findings) != 1 || client.calls["/vulnerable"] == 0 {
 			t.Fatalf("workers=%d: starved later URL: %v findings=%d", workers, client.calls, len(findings))
@@ -212,8 +212,8 @@ func TestSingleTargetBudgetCutIsNotComplete(t *testing.T) {
 				return nil
 			}, cfg)
 		_, err := r.RunModule(context.Background(), module, budgetTargets()[:1])
-		if err != nil {
-			t.Fatal(err)
+		if err == nil {
+			t.Fatal("single-target budget cut must report incomplete coverage")
 		}
 		if finished["targets_tested"] != 0 || finished["targets_budget_exhausted"] != 1 || client.calls["/a-safe"] != 10 {
 			t.Fatalf("%s: calls=%v event=%v", module, client.calls, finished)
@@ -277,8 +277,8 @@ func TestExhaustedExplicitBudgetIsNotUnlimited(t *testing.T) {
 	cfg.AllowedVulnerabilityClasses = []string{"xss"}
 	client := &budgetSurfaceClient{calls: map[string]int{}}
 	r := NewRunner("zero", client, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil, func(string, string, map[string]interface{}) error { return nil }, cfg, WithRemainingRequestBudget(0))
-	if _, err := r.RunModule(context.Background(), "xss", budgetTargets()); err != nil {
-		t.Fatal(err)
+	if _, err := r.RunModule(context.Background(), "xss", budgetTargets()); err == nil {
+		t.Fatal("exhausted budget must report incomplete coverage")
 	}
 	if len(client.calls) != 0 {
 		t.Fatalf("exhausted explicit budget sent requests: %v", client.calls)

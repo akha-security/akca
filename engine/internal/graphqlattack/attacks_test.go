@@ -1,67 +1,94 @@
 package graphqlattack
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/akha-security/akca/engine/internal/testfixtures"
 )
 
-func TestBuildBatchProbe(t *testing.T) {
-	p := BuildBatchProbe(20)
-	if !strings.Contains(p.Body, `"query"`) {
-		t.Fatal("expected batch json")
-	}
-}
-
-func TestTypeInversionAnalyze(t *testing.T) {
-	probe := BuildTypeInversionProbes("user")[1]
-	ok, sig := Analyze(`{"data":{"user":{"id":1}}}`, `{"data":{"users":[{"id":1,"email":"a@b.com"},{"id":2,"email":"c@d.com"}]}}`, probe)
-	if !ok {
-		t.Fatal("expected type inversion signal")
-	}
-	if sig == "" {
-		t.Fatal("expected signal name")
-	}
-}
-
-func TestSuggestionsProbe(t *testing.T) {
-	probe := BuildSuggestionsProbe("user")
-	ok, sig := Analyze(`{"data":{}}`, `{"errors":[{"message":"Cannot query field \"user_nonexistent_field_xyz\" on type \"Query\". Did you mean \"users\"?"}]}`, probe)
-	if !ok || sig != "field_suggestions_exposed" {
-		t.Fatal("expected field suggestions zafiyeti tespiti")
-	}
-}
-
-func TestGraphQLFieldAuthLeakRejectsErrorResponseFP(t *testing.T) {
-	probe := BuildAuthorizationBypassProbes("user")[3] // field-level auth probe
-
-	// Error response mentioning apiKey and password in validation message (Must be rejected as FP)
-	errorResponses := []string{
-		`{"errors":[{"message":"Cannot query field \"apiKey\" on type \"User\"."}]}`,
-		`{"errors":[{"message":"Field \"password\" of type \"String\" is not valid for User."}]}`,
-		`{"errors":[{"message":"Validation error of type FieldUndefined: Field 'secretToken' in type 'User' is undefined"}]}`,
-		`{"data":null,"errors":[{"message":"Field apiKey is not defined on type User"}]}`,
-		`{"data":{"user":null},"errors":[{"message":"Field password cannot be queried"}]}`,
-	}
-
-	baseline := `{"data":{"user":{"id":1,"name":"Alice"}}}`
-
-	for i, errResp := range errorResponses {
-		ok, sig := Analyze(baseline, errResp, probe)
-		if ok || sig != "" {
-			t.Fatalf("error response #%d was incorrectly flagged as leak (FP): ok=%v sig=%s body=%s", i, ok, sig, errResp)
+func TestGraphQLRejectsCapabilitiesAndFalsePositives(t *testing.T) {
+	stripePublishable := strings.Join([]string{"pk", "live", "123456789012345678901234"}, "_")
+	for _, body := range []string{
+		`{"data":{"user":{"isAdmin":false,"password":null,"token":""}}}`,
+		`{"data":{"message":"password token apiKey"},"extensions":{"tracing":{}}}`,
+		`{"errors":[{"message":"cannot use $where; expected type Int; Did you mean users?"}]}`,
+		`{"data":{"admin":null}}`,
+		`[{"data":{"__typename":"Query"}},{"data":{"__typename":"Query"}}]`,
+		`{"data":{"a1":{},"a2":{},"a5":{}}}`,
+		`{"data":{"user":{"apiKey":"` + stripePublishable + `"}}}`,
+		`{"data":{"user":{"token":"[REDACTED]"}}}`,
+		`{"data":{"config":{"key":"-----BEGIN PRIVATE KEY-----"}}}`,
+		`{"data":{"user":{"value":"AKCA_GQL_9991_EVAL"}}}`,
+		`<html>__schema types at f (/app/a.js:10:20)</html>`,
+		`{"query":"{ __schema { types { name } } }"}`,
+	} {
+		if got := Signals(body); len(got) != 0 {
+			t.Errorf("false positive %v for %s", got, body)
 		}
 	}
 }
 
-func TestGraphQLFieldAuthLeakAcceptsRealDataLeak(t *testing.T) {
-	probe := BuildAuthorizationBypassProbes("user")[3] // field-level auth probe
+func TestGraphQLDisclosureSignals(t *testing.T) {
+	stripeSecret := strings.Join([]string{"sk", "live", "A1b2C3d4E5f6G7h8I9j0K1l2"}, "_")
+	cases := []struct{ body, signal string }{
+		{`{"errors":[{"message":"resolver failed","extensions":{"exception":{"stacktrace":["Error: failed","at resolve (/srv/api/resolver.js:10:20)"]}}}]}`, "graphql_stack_trace_disclosure"},
+		{`{"errors":[{"message":"SQLSTATE[42P01]: relation does not exist"}]}`, "graphql_database_error_disclosure"},
+		{`{"data":{"config":{"key":"` + stripeSecret + `"}}}`, "graphql_server_secret_exposure"},
+		{`{"data":{"config":{"aws":"` + testfixtures.AWSDetectableAccessKey() + `"}}}`, "graphql_server_secret_exposure"},
+	}
+	for _, tt := range cases {
+		if !Confirmed(tt.body, tt.signal) {
+			t.Errorf("missing %s", tt.signal)
+		}
+		if ok, _ := Analyze(tt.body, tt.body, Probe{}); !ok {
+			t.Errorf("persistent %s suppressed", tt.signal)
+		}
+	}
+}
 
-	// Genuine leak returning data inside 'data' tree
-	realLeakResponse := `{"data":{"user":{"id":1,"email":"alice@test.com","apiKey":"sk_live_secret_99887766"}}}`
-	baseline := `{"data":{"user":{"id":1,"name":"Alice"}}}`
+func TestGraphQLSchemaProbes(t *testing.T) {
+	body := `{"data":{"__schema":{"queryType":{"name":"Root"},"types":[
+ {"name":"Mutation","fields":[{"name":"deleteUser","type":{"kind":"SCALAR","name":"Boolean"}}]},
+ {"name":"Other","fields":[{"name":"wrong","type":{"kind":"SCALAR","name":"String"}}]},
+ {"name":"Root","fields":[
+ {"name":"needsID","args":[{"name":"id","type":{"kind":"NON_NULL"}}],"type":{"kind":"OBJECT","name":"Account"}},
+ {"name":"viewer","args":[],"type":{"kind":"OBJECT","name":"Account"}},
+ {"name":"Viewer","args":[],"type":{"kind":"SCALAR","name":"String"}},
+ {"name":"withDefault","args":[{"name":"x","defaultValue":"1","type":{"kind":"NON_NULL"}}],"type":{"kind":"SCALAR","name":"Int"}},
+ {"name":"1invalid","type":{"kind":"SCALAR","name":"String"}}]},
+ {"name":"Account","fields":[
+ {"name":"apiKey","type":{"kind":"SCALAR","name":"String"}},
+ {"name":"password","args":[{"name":"id","type":{"kind":"NON_NULL"}}],"type":{"kind":"SCALAR","name":"String"}}]}
+ ]}}}`
+	probes := SchemaProbes(body)
+	if len(probes) != 3 {
+		t.Fatalf("probes=%+v", probes)
+	}
+	if !strings.Contains(probes[0].Body, "viewer { __typename apiKey }") {
+		t.Fatal(probes[0])
+	}
+	if !strings.Contains(probes[1].Body, "Viewer") {
+		t.Fatal("case-sensitive name lost")
+	}
+	if HasSchema(`{"query":"__schema types"}`) {
+		t.Fatal("reflected query counted as schema")
+	}
+}
 
-	ok, sig := Analyze(baseline, realLeakResponse, probe)
-	if !ok || sig != "graphql_field_auth_leak" {
-		t.Fatalf("expected genuine data leak to be confirmed: ok=%v sig=%s", ok, sig)
+func TestGraphQLProbeSafetyAndBudget(t *testing.T) {
+	for _, p := range DiscoveryProbes() {
+		if !json.Valid([]byte(p.Body)) {
+			t.Fatalf("invalid JSON: %s", p.Body)
+		}
+		if strings.Contains(p.Body, "mutation") || strings.Contains(p.Body, "$where") {
+			t.Fatal("unsafe probe")
+		}
+	}
+	var batch []interface{}
+	_ = json.Unmarshal([]byte(BuildBatchProbe(1000).Body), &batch)
+	if len(batch) > 20 {
+		t.Fatal("unbounded batch")
 	}
 }

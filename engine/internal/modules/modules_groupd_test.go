@@ -294,8 +294,10 @@ func TestCICDExposure(t *testing.T) {
 
 func TestGraphQLIntrospection(t *testing.T) {
 	c := &groupDClient{responses: map[string]string{
-		`{"query":"{user { __typename } }"}`:                          `{"data":{"user":{"__typename":"User"}}}`,
-		`{"query":"{ __schema { types { name fields { name } } } }"}`: `{"data":{"__schema":{"types":[{"name":"User","fields":[{"name":"password"}]}]}}}`,
+		graphqlattack.BaselineQuery:                      `{"data":{"__typename":"Query"}}`,
+		graphQLIntrospectionQuery:                        `{"data":{"__schema":{"queryType":{"name":"Query"},"types":[{"name":"Query","kind":"OBJECT","fields":[{"name":"viewer","args":[],"type":{"kind":"OBJECT","name":"User"}}]},{"name":"User","kind":"OBJECT","fields":[{"name":"password","type":{"kind":"SCALAR","name":"String"}}]}]}}}`,
+		`{"query":"{ viewer { __typename password } }"}`: `{"data":{"viewer":{"__typename":"User","password":null}}}`,
+		"__default__":                                    `{"errors":[{"message":"Cannot query field"}]}`,
 	}}
 	target := ScanTarget{
 		EndpointURL: "http://example.com/graphql", Method: "POST", Parameter: "body",
@@ -322,35 +324,84 @@ func TestScriptSourceBrokenCDN(t *testing.T) {
 	}
 }
 
-func TestGraphQLBatchAbuse(t *testing.T) {
-	batch := graphqlattack.BuildBatchProbe(20)
-	inversion := graphqlattack.BuildTypeInversionProbes("user")[0]
+func TestGraphQLCapabilitiesAreNotReportedAsAbuse(t *testing.T) {
+	batch := graphqlattack.BuildBatchProbe(2)
 	c := &groupDClient{responses: map[string]string{
-		`{"query":"{user { __typename } }"}`: `{"data":{"user":{"__typename":"User"}}}`,
-		inversion.Body:                       `{"errors":[{"message":"expected type Int"}]}`,
-		batch.Body:                           strings.Repeat(`{"data":{"__typename":"Query"}}`, 20),
+		graphqlattack.BaselineQuery: `{"data":{"__typename":"Query"}}`,
+		graphQLIntrospectionQuery:   `{"data":{"__schema":{"queryType":{"name":"Query"},"types":[{"name":"Query","kind":"OBJECT","fields":[]}]}}}`,
+		batch.Body:                  `[{"data":{"__typename":"Query"}},{"data":{"__typename":"Query"}}]`,
+		"__default__":               `{"errors":[{"message":"Cannot query field"}]}`,
 	}}
 	target := ScanTarget{
-		EndpointURL: "http://example.com/graphql", Method: "POST", Parameter: "user",
+		EndpointURL: "http://example.com/graphql", Method: "GET", Parameter: "user",
 		Profile: reflection.ReflectionProfile{ContentType: "application/json"},
 	}
-	baseline := httpclient.RequestResponse{Response: httpclient.ResponseRecord{Body: `{"data":{"user":{"__typename":"User"}}}`}}
-	findings := groupDRunner(t, c).runGraphQLAbuse(context.Background(), target, baseline, "user")
-	if len(findings) == 0 {
-		t.Fatal("expected graphql batch or abuse finding")
+	findings := groupDRunner(t, c).runGraphQL(context.Background(), target)
+	if len(findings) != 0 {
+		t.Fatalf("batch support and validation errors must not be reported as vulnerabilities: %+v", findings)
 	}
 }
 
-func TestGraphQLUsesIntrospectionFieldsForAbuseProbes(t *testing.T) {
+func TestGraphQLUsesIntrospectionFieldsForSecretExposure(t *testing.T) {
 	c := &groupDClient{responses: map[string]string{
-		graphQLIntrospectionQuery:                           `{"data":{"__schema":{"types":[{"name":"Query","fields":[{"name":"account"}]}]}}}`,
-		`{"query":"{account { __typename } }"}`:             `{"data":{"account":{"__typename":"Account"}}}`,
-		graphqlattack.BuildSuggestionsProbe("account").Body: `{"errors":[{"message":"Cannot query field account_nonexistent_field_xyz on type Query. Did you mean account?"}]}`,
+		graphqlattack.BaselineQuery:                     `{"data":{"__typename":"Query"}}`,
+		graphQLIntrospectionQuery:                       `{"data":{"__schema":{"queryType":{"name":"Query"},"types":[{"name":"Query","kind":"OBJECT","fields":[{"name":"account","args":[],"type":{"kind":"OBJECT","name":"Account"}}]},{"name":"Account","kind":"OBJECT","fields":[{"name":"apiKey","args":[],"type":{"kind":"SCALAR","name":"String"}}]}]}}}`,
+		`{"query":"{ account { __typename apiKey } }"}`: `{"data":{"account":{"__typename":"Account","apiKey":"` + testfixtures.StripeSecretKey() + `"}}}`,
+		"__default__":                                   `{"errors":[{"message":"Cannot query field"}]}`,
 	}}
 	target := ScanTarget{EndpointURL: "http://example.com/graphql", Method: "POST", Parameter: "body"}
 	findings := groupDRunner(t, c).runGraphQL(context.Background(), target)
 	if len(findings) == 0 {
-		t.Fatal("expected graphql probes to use introspected field candidates")
+		t.Fatal("expected graphql schema probe to find credential material")
+	}
+	if findings[0].Evidence.Signal != "graphql_server_secret_exposure" {
+		t.Fatalf("unexpected graphql signal: %+v", findings[0].Evidence)
+	}
+}
+
+func TestGraphQLReportsStructuredErrorDisclosures(t *testing.T) {
+	cases := []struct {
+		name   string
+		probe  graphqlattack.Probe
+		body   string
+		status int
+		signal string
+	}{
+		{
+			name:   "stack trace",
+			probe:  graphqlattack.DiscoveryProbes()[0],
+			body:   `{"errors":[{"message":"resolver failed","extensions":{"exception":{"stacktrace":["Error: failed","at resolve (/srv/api/resolver.js:10:20)"]}}}]}`,
+			status: 500,
+			signal: "graphql_stack_trace_disclosure",
+		},
+		{
+			name:   "database error",
+			probe:  graphqlattack.DiscoveryProbes()[1],
+			body:   `{"errors":[{"message":"SQLSTATE[42P01]: relation does not exist"}]}`,
+			status: 400,
+			signal: "graphql_database_error_disclosure",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &groupDClient{
+				responses: map[string]string{
+					graphqlattack.BaselineQuery: `{"data":{"__typename":"Query"}}`,
+					graphQLIntrospectionQuery:   `{"data":{"__schema":{"queryType":{"name":"Query"},"types":[{"name":"Query","kind":"OBJECT","fields":[]}]}}}`,
+					tc.probe.Body:               tc.body,
+					"__default__":               `{"errors":[{"message":"Cannot query field"}]}`,
+				},
+				statuses: map[string]int{tc.probe.Body: tc.status},
+			}
+			target := ScanTarget{EndpointURL: "http://example.com/graphql/" + tc.name, Method: "POST", Parameter: "body"}
+			findings := groupDRunner(t, c).runGraphQL(context.Background(), target)
+			if len(findings) == 0 {
+				t.Fatalf("expected %s finding", tc.signal)
+			}
+			if findings[0].Evidence.Signal != tc.signal {
+				t.Fatalf("unexpected graphql signal: %+v", findings[0].Evidence)
+			}
+		})
 	}
 }
 
@@ -358,8 +409,8 @@ func TestWebSocketDeepTesting(t *testing.T) {
 	c := &groupDClient{responses: map[string]string{}}
 	prober := websocketProberFunc(func(_ context.Context, rawURL, payload string) (httpclient.RequestResponse, error) {
 		body := "ok"
-		if payload == "' OR 1=1--" {
-			body = "mysql syntax error near"
+		if payload == "'" {
+			body = "SQLSTATE[42000]: syntax error near quote"
 		}
 		return httpclient.RequestResponse{
 			Request:  httpclient.RequestRecord{Method: "GET", URL: rawURL, Body: payload},
@@ -370,6 +421,9 @@ func TestWebSocketDeepTesting(t *testing.T) {
 	findings := groupDRunner(t, c, WithWebSocketProber(prober)).runWebSocket(context.Background(), target)
 	if len(findings) == 0 {
 		t.Fatal("expected websocket finding")
+	}
+	if findings[0].Evidence.Signal != "ws_database_error_disclosure" {
+		t.Fatalf("unexpected websocket signal: %s", findings[0].Evidence.Signal)
 	}
 }
 

@@ -42,7 +42,15 @@ func (a *Analyzer) AnalyzeContent(jsURL, body string) AnalysisResult {
 	ast := ExtractASTLite(content)
 	heur := ExtractHeuristic(content)
 	merged := DeduplicateSemantic(append(ast, heur...))
-	filtered := FilterByConfidence(merged, MinConfidence)
+	filtered := make([]ExtractedEndpoint, 0, len(merged))
+	for _, endpoint := range merged {
+		// Script dependencies are navigation inputs, not vulnerability signals.
+		// Retain them even when their generic API confidence is below the
+		// reporting threshold so lazy-loaded SPA chunks can be analyzed.
+		if endpoint.Confidence >= MinConfidence || javascriptDependency(endpoint) {
+			filtered = append(filtered, endpoint)
+		}
+	}
 
 	return AnalysisResult{
 		SourceContent: content, JSURL: jsURL, Truncated: truncated, PreviewOnly: previewOnly, BytesAnalyzed: len(content),
@@ -73,13 +81,66 @@ func (a *Analyzer) Run(ctx context.Context, jsURLs []string) error {
 	_ = a.emit("js_analysis_started", "js analysis started", map[string]interface{}{
 		"scan_id": a.scanID, "sources": len(jsURLs),
 	})
-	for _, jsURL := range jsURLs {
-		if _, err := a.DownloadAndAnalyze(ctx, jsURL); err != nil {
+	const maxRecursiveScripts = 2000
+	pending := append([]string(nil), jsURLs...)
+	scheduled := make(map[string]struct{}, len(pending))
+	for _, jsURL := range pending {
+		scheduled[jsURL] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(pending))
+	analyzed := 0
+	for len(pending) > 0 && analyzed < maxRecursiveScripts {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		jsURL := pending[0]
+		pending = pending[1:]
+		if _, duplicate := seen[jsURL]; duplicate {
+			continue
+		}
+		seen[jsURL] = struct{}{}
+		result, err := a.DownloadAndAnalyze(ctx, jsURL)
+		if err != nil {
 			_ = a.emit("log", err.Error(), map[string]interface{}{"js_url": jsURL})
+			continue
+		}
+		analyzed++
+		for _, endpoint := range result.Endpoints {
+			if !javascriptDependency(endpoint) {
+				continue
+			}
+			resolved, resolveErr := resolveReference(jsURL, endpoint.URL)
+			if resolveErr != nil || resolved == "" || !a.scope.IsInScope(resolved) {
+				continue
+			}
+			if _, duplicate := scheduled[resolved]; !duplicate {
+				scheduled[resolved] = struct{}{}
+				pending = append(pending, resolved)
+			}
 		}
 	}
-	_ = a.emit("js_analysis_finished", "js analysis finished", map[string]interface{}{"scan_id": a.scanID})
+	if len(pending) > 0 {
+		_ = a.emit("coverage_gap", "JavaScript dependency analysis reached its safety ceiling", map[string]interface{}{
+			"phase": "js_analysis", "analyzed": analyzed, "remaining": len(pending), "reason": "js_dependency_limit",
+		})
+	}
+	_ = a.emit("js_analysis_finished", "js analysis finished", map[string]interface{}{
+		"scan_id": a.scanID, "analyzed_sources": analyzed, "discovered_dependencies": len(scheduled),
+	})
 	return nil
+}
+
+func javascriptDependency(endpoint ExtractedEndpoint) bool {
+	lowerURL := strings.ToLower(strings.SplitN(endpoint.URL, "?", 2)[0])
+	if strings.HasSuffix(lowerURL, ".js") || strings.HasSuffix(lowerURL, ".mjs") || strings.HasSuffix(lowerURL, ".cjs") {
+		return true
+	}
+	switch endpoint.Source {
+	case "dynamic_import", "chunk", "vite_asset", "service_worker":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *Analyzer) RunFromStorage(ctx context.Context) error {
@@ -138,7 +199,7 @@ func (a *Analyzer) publishResult(result AnalysisResult) {
 
 	for _, sec := range result.Secrets {
 		_ = a.emit("js_secret_detected", sec.Kind, map[string]interface{}{
-			"scan_id": a.scanID, "kind": sec.Kind, "redacted": sec.Redacted, "value": sec.Value, "js_url": result.JSURL,
+			"scan_id": a.scanID, "kind": sec.Kind, "redacted": sec.Redacted, "js_url": result.JSURL,
 		})
 		if !secretscan.IsReportable(secretscan.Match{Kind: sec.Kind, Value: sec.Value, Confidence: sec.Confidence}) {
 			continue

@@ -16,6 +16,8 @@ type targetRun struct {
 	requests        atomic.Int64
 	failures        atomic.Int64
 	evidence        atomic.Bool
+	usableResponse  atomic.Bool
+	blockedResponse atomic.Bool
 	mu              sync.Mutex
 	skip            string
 	managed         bool
@@ -84,7 +86,21 @@ func noteExchange(ctx context.Context, err error) {
 		}
 	}
 }
-func noteCachedEvidence(ctx context.Context) {
+func noteResponse(ctx context.Context, rr httpclient.RequestResponse) {
+	if s, ok := ctx.Value(targetRunKey{}).(*targetRun); ok {
+		switch rr.Response.StatusCode {
+		case 401, 403, 429, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527:
+			s.blockedResponse.Store(true)
+		default:
+			if rr.Response.StatusCode > 0 {
+				s.usableResponse.Store(true)
+			}
+		}
+	}
+}
+
+func noteCachedEvidence(ctx context.Context, rr httpclient.RequestResponse) {
+	noteResponse(ctx, rr)
 	if s, ok := ctx.Value(targetRunKey{}).(*targetRun); ok {
 		s.evidence.Store(true)
 	}
@@ -98,6 +114,12 @@ func (c observedHTTP) Do(ctx context.Context, m, u string, b []byte, h map[strin
 		return httpclient.RequestResponse{}, err
 	}
 	rr, err := c.HTTPDoer.Do(ctx, m, u, b, h)
+	if err == nil {
+		noteResponse(ctx, rr)
+	}
+	if err == nil {
+		httpclient.StampExchange(&rr)
+	}
 	noteExchange(ctx, err)
 	return rr, err
 }
@@ -118,6 +140,12 @@ func (c observedAnonymous) DoWithoutSession(ctx context.Context, m, u string, b 
 		return httpclient.RequestResponse{}, err
 	}
 	rr, err := c.base.DoWithoutSession(ctx, m, u, b, h)
+	if err == nil {
+		noteResponse(ctx, rr)
+	}
+	if err == nil {
+		httpclient.StampExchange(&rr)
+	}
 	noteExchange(ctx, err)
 	return rr, err
 }
@@ -130,6 +158,12 @@ func (c observedProfile) DoWithAuthProfile(ctx context.Context, m, u string, b [
 		return httpclient.RequestResponse{}, err
 	}
 	rr, err := c.base.DoWithAuthProfile(ctx, m, u, b, h, p)
+	if err == nil {
+		noteResponse(ctx, rr)
+	}
+	if err == nil {
+		httpclient.StampExchange(&rr)
+	}
 	noteExchange(ctx, err)
 	return rr, err
 }

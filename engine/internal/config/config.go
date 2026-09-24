@@ -59,6 +59,7 @@ type RateLimitPolicy struct {
 	Account         string `json:"account"`
 	Threshold       int    `json:"threshold"`
 	CooldownSeconds int    `json:"cooldown_seconds"`
+	WindowSeconds   int    `json:"window_seconds,omitempty"`
 	PerIP           bool   `json:"per_ip"`
 	PerAccount      bool   `json:"per_account"`
 }
@@ -290,6 +291,8 @@ type ScanConfig struct {
 	EnableFindingCorrelation     bool                  `json:"enable_finding_correlation"`
 	EnableBrowserWorkerPool      bool                  `json:"enable_browser_worker_pool"`
 	BrowserWorkerPoolSize        int                   `json:"browser_worker_pool_size"`
+	BrowserResourceDomains       []string              `json:"browser_resource_domains,omitempty"`
+	RedactReports                bool                  `json:"redact_reports"`
 	EnableHealthMonitoring       bool                  `json:"enable_health_monitoring"`
 	EnableRulePackUpdates        bool                  `json:"enable_rule_pack_updates"`
 	RulePackChannels             []string              `json:"rule_pack_channels,omitempty"`
@@ -350,16 +353,27 @@ type ExplicitScanOptions struct {
 }
 
 type LoginCredentials struct {
-	LoginURL           string `json:"login_url"`
-	Username           string `json:"username,omitempty"`
-	Email              string `json:"email,omitempty"`
-	Password           string `json:"password,omitempty"`
-	UsernameField      string `json:"username_field,omitempty"`
-	PasswordField      string `json:"password_field,omitempty"`
-	HeartbeatURL       string `json:"heartbeat_url,omitempty"`
-	LoggedInMarker     string `json:"logged_in_marker,omitempty"`
-	LoggedOutMarker    string `json:"logged_out_marker,omitempty"`
-	DisableAutoRelogin bool   `json:"disable_auto_relogin,omitempty"`
+	LoginURL           string            `json:"login_url"`
+	Username           string            `json:"username,omitempty"`
+	Email              string            `json:"email,omitempty"`
+	Password           string            `json:"password,omitempty"`
+	UsernameField      string            `json:"username_field,omitempty"`
+	PasswordField      string            `json:"password_field,omitempty"`
+	ExtraFields        map[string]string `json:"extra_fields,omitempty"`
+	Steps              []LoginStep       `json:"steps,omitempty"`
+	HeartbeatURL       string            `json:"heartbeat_url,omitempty"`
+	LoggedInMarker     string            `json:"logged_in_marker,omitempty"`
+	LoggedOutMarker    string            `json:"logged_out_marker,omitempty"`
+	DisableAutoRelogin bool              `json:"disable_auto_relogin,omitempty"`
+}
+
+// LoginStep models an optional follow-up form/API request for multi-stage
+// authentication (tenant selection, static OTP in test environments, consent).
+type LoginStep struct {
+	URL     string            `json:"url"`
+	Method  string            `json:"method,omitempty"`
+	Fields  map[string]string `json:"fields,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 func DefaultScanConfig() ScanConfig {
@@ -394,6 +408,7 @@ func DefaultScanConfig() ScanConfig {
 		EnableFindingCorrelation:     true,
 		EnableBrowserWorkerPool:      true,
 		BrowserWorkerPoolSize:        3,
+		RedactReports:                true,
 		EnableHealthMonitoring:       true,
 		SmartScanProfile:             "Full Scan",
 		ReportTemplate:               "HackerOne",
@@ -438,6 +453,9 @@ func (c *ScanConfig) Validate() error {
 		}
 	}
 	for index, policy := range c.RateLimitPolicies {
+		if policy.WindowSeconds < 0 || policy.WindowSeconds > 86400 {
+			return fmt.Errorf("rate_limit_policies[%d].window_seconds must be between 0 and 86400", index)
+		}
 		if policy.URLContains == "" || policy.Account == "" || policy.Threshold < 1 || policy.Threshold > 50 ||
 			policy.CooldownSeconds < 1 || policy.CooldownSeconds > 300 || (!policy.PerIP && !policy.PerAccount) {
 			return fmt.Errorf("rate_limit_policies[%d] requires URL/account, threshold 1..50, cooldown 1..300 and an IP/account dimension", index)
@@ -455,6 +473,7 @@ func (c *ScanConfig) Validate() error {
 		authProfileIDs[id] = struct{}{}
 	}
 	roleProfileIDs := make(map[string]struct{}, len(c.RoleProfiles))
+	roleAuthProfiles := make(map[string]string, len(c.RoleProfiles))
 	for index, role := range c.RoleProfiles {
 		id := strings.TrimSpace(role.ID)
 		if id == "" || strings.TrimSpace(role.AuthProfileID) == "" {
@@ -467,6 +486,7 @@ func (c *ScanConfig) Validate() error {
 			return fmt.Errorf("role profile %q references unknown auth profile %q", id, role.AuthProfileID)
 		}
 		roleProfileIDs[id] = struct{}{}
+		roleAuthProfiles[id] = role.AuthProfileID
 	}
 
 	switch c.UserAgentMode {
@@ -586,6 +606,10 @@ func (c *ScanConfig) Validate() error {
 		seenObjectPolicies[policy.ID] = struct{}{}
 		if policy.OwnerRoleProfileID == policy.ForeignRoleProfileID {
 			return fmt.Errorf("object authorization policy %q must use distinct owner/foreign roles", policy.ID)
+		}
+		if ownerAuth := roleAuthProfiles[policy.OwnerRoleProfileID]; ownerAuth != "" &&
+			ownerAuth == roleAuthProfiles[policy.ForeignRoleProfileID] {
+			return fmt.Errorf("object authorization policy %q owner/foreign roles must use distinct auth profiles", policy.ID)
 		}
 		if !recordedReadMethod(policy.Method) {
 			return fmt.Errorf("object authorization policy %q must use a read-only method; use an authorization state/cleanup policy for writes", policy.ID)
@@ -910,10 +934,20 @@ func NormalizeDomain(domain string) string {
 // RedactedForStorage returns a copy of ScanConfig with sensitive credentials, passwords, and tokens masked.
 func (c ScanConfig) RedactedForStorage() ScanConfig {
 	redacted := c
-	if redacted.LoginCredentials != nil && redacted.LoginCredentials.Password != "" {
+	if redacted.LoginCredentials != nil {
 		credentials := *redacted.LoginCredentials
+		originalSteps := credentials.Steps
 		redacted.LoginCredentials = &credentials
-		redacted.LoginCredentials.Password = "[REDACTED]"
+		if credentials.Password != "" {
+			redacted.LoginCredentials.Password = "[REDACTED]"
+		}
+		redacted.LoginCredentials.ExtraFields = redactStringValues(credentials.ExtraFields)
+		redacted.LoginCredentials.Steps = make([]LoginStep, len(originalSteps))
+		for i, step := range originalSteps {
+			redacted.LoginCredentials.Steps[i] = step
+			redacted.LoginCredentials.Steps[i].Fields = redactStringValues(step.Fields)
+			redacted.LoginCredentials.Steps[i].Headers = redactStringValues(step.Headers)
+		}
 	}
 	if len(redacted.Authentication) > 0 {
 		auth := make(map[string]string, len(redacted.Authentication))
@@ -1013,6 +1047,17 @@ func (c ScanConfig) RedactedForStorage() ScanConfig {
 		redacted.JWTExpiredTokens = []string{"[REDACTED]"}
 	}
 	return redacted
+}
+
+func redactStringValues(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key := range values {
+		out[key] = "[REDACTED]"
+	}
+	return out
 }
 
 func redactStatefulSecurityPolicies(policies []StatefulSecurityProofPolicy) []StatefulSecurityProofPolicy {

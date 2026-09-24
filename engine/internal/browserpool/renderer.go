@@ -8,18 +8,26 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // HeadlessRenderer uses an installed Chromium-compatible browser. Dumping the
 // post-execution DOM lets XSS verification observe mutations made by JavaScript.
 type HeadlessRenderer struct {
-	requestGuard func(context.Context, string, string) error
-	binary       string
-	sem          chan struct{}
-	proxyURL     string
-	insecureTLS  bool
-	headers      map[string]string
-	cookies      map[string]string
+	blockedMu        sync.Mutex
+	blockedResources []string
+	crawlMu          sync.Mutex
+	persistent       bool
+	interactive      bool
+	session          *browserSession
+	resourceGuard    func(context.Context, string, string) error
+	requestGuard     func(context.Context, string, string) error
+	binary           string
+	sem              chan struct{}
+	proxyURL         string
+	insecureTLS      bool
+	headers          map[string]string
+	cookies          map[string]string
 }
 
 func NewHeadlessRenderer() *HeadlessRenderer {

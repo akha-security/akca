@@ -54,7 +54,7 @@ func TestSQLiBaselineAndTimingSharedAcrossQueryParams(t *testing.T) {
 	}
 }
 
-func TestSQLiBaselineRejectsBadRequest(t *testing.T) {
+func TestSQLiBaselineRetainsBadRequestForVendorErrorProbes(t *testing.T) {
 	c := &groupBClient{
 		responses: map[string]string{"__default__": "Bad Request"},
 		statuses:  map[string]int{"1": 400},
@@ -67,11 +67,11 @@ func TestSQLiBaselineRejectsBadRequest(t *testing.T) {
 		Location:    "query",
 	}
 
-	if _, _, ok, reason := r.stableSQLiBaselineAndTiming(context.Background(), target); ok || !strings.Contains(reason, "HTTP 400") {
-		t.Fatalf("rejected baseline was accepted: ok=%v reason=%q", ok, reason)
+	if _, _, ok, reason := r.stableSQLiBaselineAndTiming(context.Background(), target); !ok {
+		t.Fatalf("stable baseline unavailable for vendor-error checks: %q", reason)
 	}
-	if c.calls != 1 {
-		t.Fatalf("rejected baseline should stop immediately, calls=%d want 1", c.calls)
+	if c.calls < 3 {
+		t.Fatalf("baseline must be independently sampled, calls=%d", c.calls)
 	}
 }
 
@@ -817,7 +817,7 @@ func TestNativeTargetValueNestedJSON(t *testing.T) {
 	}
 }
 
-func TestSQLiNumericArithmeticProbeDetectsMathEvaluation(t *testing.T) {
+func TestSQLiNumericArithmeticAloneDoesNotProveSQL(t *testing.T) {
 	c := &groupBClient{
 		responses: map[string]string{
 			"__default__":       "user: admin profile",
@@ -845,11 +845,8 @@ func TestSQLiNumericArithmeticProbeDetectsMathEvaluation(t *testing.T) {
 		},
 	}
 	findings := r.numericArithmeticSQLiProbe(context.Background(), target, baseRR)
-	if len(findings) == 0 {
-		t.Fatalf("expected numeric arithmetic probe to detect SQL injection")
-	}
-	if findings[0].VulnClass != "sqli" {
-		t.Fatalf("expected sqli finding, got %s", findings[0].VulnClass)
+	if len(findings) != 0 {
+		t.Fatal("math evaluation without SQL-specific proof must remain a discovery")
 	}
 }
 

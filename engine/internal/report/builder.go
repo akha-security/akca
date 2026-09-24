@@ -37,6 +37,17 @@ func (b *Builder) BuildMeta(opts Options) (Document, error) {
 		doc.Warnings = append(doc.Warnings, fmt.Sprintf("scope retrieval warning: %v", err))
 	}
 	doc.Scope = scopeSec
+	if opts.Redact {
+		for i := range doc.Scope.Targets {
+			doc.Scope.Targets[i] = RedactString(doc.Scope.Targets[i])
+		}
+		for i := range doc.Scope.InScope {
+			doc.Scope.InScope[i] = RedactString(doc.Scope.InScope[i])
+		}
+		for i := range doc.Scope.OutOfScope {
+			doc.Scope.OutOfScope[i] = RedactString(doc.Scope.OutOfScope[i])
+		}
+	}
 
 	metrics, err := b.db.DashboardMetrics(opts.ScanID)
 	if err != nil {
@@ -54,6 +65,12 @@ func (b *Builder) BuildMeta(opts Options) (Document, error) {
 		return doc, err
 	}
 	doc.RootCauseGroups = groups
+	if opts.Redact {
+		for i := range doc.RootCauseGroups {
+			doc.RootCauseGroups[i].RootCause = RedactString(doc.RootCauseGroups[i].RootCause)
+			doc.RootCauseGroups[i].GroupJSON = RedactString(doc.RootCauseGroups[i].GroupJSON)
+		}
+	}
 
 	apiKeys, err := b.buildAPIKeySection(opts.ScanID, opts.Redact)
 	if err != nil {
@@ -76,6 +93,17 @@ func (b *Builder) BuildMeta(opts Options) (Document, error) {
 	}
 	doc.PathDiscoveries = paths
 
+	coverage, coverageIncomplete, err := b.buildCoverageSection(opts.ScanID, opts.Redact)
+	if err != nil {
+		doc.Partial = true
+		doc.Warnings = append(doc.Warnings, fmt.Sprintf("coverage section warning: %v", err))
+	}
+	doc.Coverage = coverage
+	if coverageIncomplete {
+		doc.Partial = true
+		doc.Warnings = append(doc.Warnings, "Scan coverage contains explicit gaps; review the coverage section before treating absence of findings as assurance.")
+	}
+
 	if opts.Template == TemplateInternal || opts.Template == TemplateAppendix {
 		leads, err := b.buildManualLeads(opts)
 		if err != nil {
@@ -88,6 +116,49 @@ func (b *Builder) BuildMeta(opts Options) (Document, error) {
 		doc.AppendixNotes = "Technical evidence appendix - raw request/response excerpts are preserved."
 	}
 	return doc, nil
+}
+
+func (b *Builder) buildCoverageSection(scanID string, redact bool) ([]CoverageEntry, bool, error) {
+	rows, err := b.db.ListTimelineUI(scanID, "", 5000)
+	if err != nil {
+		return nil, false, err
+	}
+	out := make([]CoverageEntry, 0)
+	incomplete := false
+	for _, row := range rows {
+		switch row.EventType {
+		case "module_readiness", "coverage_gap", "plugin_skipped", "resource_limit_reached", "scan_error":
+		default:
+			continue
+		}
+		var payload struct {
+			Module     string `json:"module"`
+			Phase      string `json:"phase"`
+			Endpoint   string `json:"endpoint"`
+			Reason     string `json:"reason"`
+			Configured *bool  `json:"configured"`
+		}
+		_ = json.Unmarshal([]byte(row.EventJSON), &payload)
+		entry := CoverageEntry{
+			EventType: row.EventType, Summary: row.Summary, Module: payload.Module,
+			Phase: payload.Phase, Endpoint: payload.Endpoint, Reason: payload.Reason, Configured: payload.Configured,
+		}
+		if redact {
+			entry.Summary = RedactString(entry.Summary)
+			entry.Endpoint = RedactString(entry.Endpoint)
+			entry.Reason = RedactString(entry.Reason)
+		}
+		switch row.EventType {
+		case "coverage_gap", "resource_limit_reached", "scan_error":
+			incomplete = true
+		case "module_readiness":
+			if payload.Configured == nil || !*payload.Configured {
+				incomplete = true
+			}
+		}
+		out = append(out, entry)
+	}
+	return out, incomplete, nil
 }
 
 func (b *Builder) buildManualLeads(opts Options) ([]ManualLeadEntry, error) {
@@ -126,6 +197,7 @@ func (b *Builder) buildTrafficSection(scanID string, redact bool) ([]TrafficEntr
 		if redact {
 			rawRequest = RedactString(rawRequest)
 			rawResponse = RedactString(rawResponse)
+			rec.URL = RedactString(rec.URL)
 		}
 		out = append(out, TrafficEntry{Method: rec.Method, URL: rec.URL, StatusCode: rec.StatusCode, DurationMs: rec.DurationMs, RawRequest: rawRequest, RawResponse: rawResponse})
 	}
@@ -208,7 +280,7 @@ func (b *Builder) buildAPIKeySection(scanID string, redact bool) ([]APIKeySectio
 	for _, rec := range recs {
 		details := rec.ResultJSON
 		if redact {
-			details = RedactString(details)
+			details = "[REDACTED]"
 		}
 		out = append(out, APIKeySection{
 			Service:     rec.Service,

@@ -1,10 +1,10 @@
 package modules
 
 import (
-	"encoding/json"
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/deeptraversal"
+	"github.com/akha-security/akca/engine/internal/graphqlattack"
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/nosql"
 	"github.com/akha-security/akca/engine/internal/payloadgen"
@@ -588,71 +588,10 @@ func normalizeVolatileFields(body string) string {
 }
 
 func graphqlSignalConfirmed(body, baseBody, signal string, probeStatus, baseStatus int) bool {
-	if probeStatus >= 400 {
+	// GraphQL errors can legitimately use 400 or 500. Require a parsed envelope
+	// with typed disclosure evidence, never an HTML proxy/WAF error.
+	if probeStatus < 200 || probeStatus == 401 || probeStatus == 403 || probeStatus == 429 || probeStatus >= 502 {
 		return false
 	}
-	lower := strings.ToLower(body)
-	switch signal {
-	case "graphql_schema_exposure":
-		return strings.Contains(lower, "__schema") && strings.Contains(lower, "types")
-	case "field_suggestions_exposed", "graphql_field_suggestions":
-		return (strings.Contains(lower, "did you mean") || strings.Contains(lower, "perhaps you meant")) &&
-			!strings.Contains(strings.ToLower(baseBody), "did you mean")
-	case "graphql_field_auth_leak":
-		var resp struct {
-			Data map[string]interface{} `json:"data"`
-		}
-		if json.Unmarshal([]byte(body), &resp) != nil || len(resp.Data) == 0 {
-			return false
-		}
-		dataBytes, _ := json.Marshal(resp.Data)
-		dataStr := strings.ToLower(string(dataBytes))
-		for _, kw := range []string{"apikey", "secrettoken", "ssn", "password", "token", "isadmin"} {
-			if strings.Contains(dataStr, kw) && !strings.Contains(strings.ToLower(baseBody), kw) {
-				if !strings.Contains(dataStr, `"`+kw+`":null`) && !strings.Contains(dataStr, `"`+kw+`":""`) {
-					return true
-				}
-			}
-		}
-		return false
-	case "graphql_filter_where_rce":
-		return strings.Contains(body, "AKCA_GQL_9991_EVAL") || strings.Contains(body, "AKCA_ENV_object")
-	case "type_inversion_data_leak":
-		var resp struct {
-			Data map[string]interface{} `json:"data"`
-		}
-		if json.Unmarshal([]byte(body), &resp) != nil || len(resp.Data) == 0 {
-			return false
-		}
-		dataRaw, _ := json.Marshal(resp.Data)
-		dataLower := strings.ToLower(string(dataRaw))
-		baseLower := strings.ToLower(baseBody)
-		if len(body) <= len(baseBody)*2 {
-			return false
-		}
-		for _, kw := range []string{"email", "password", "token", "secret", "admin", "credential", "session", "oauth"} {
-			if strings.Contains(dataLower, kw) && !strings.Contains(baseLower, kw) {
-				return true
-			}
-		}
-		return false
-	case "type_inversion_error_disclosure":
-		baseLower := strings.ToLower(baseBody)
-		for _, kw := range []string{"cannot represent", "expected type", "int cannot", "validation error", "bad user input"} {
-			if strings.Contains(lower, kw) && !strings.Contains(baseLower, kw) {
-				return true
-			}
-		}
-		return false
-	case "graphql_sift_where_detected":
-		return strings.Contains(lower, "in csp mode, sift does not support strings") ||
-			strings.Contains(lower, `in "$where" condition`) ||
-			strings.Contains(lower, "cannot use $where")
-	case "graphql_batch_accepted":
-		return strings.Count(body, `"data"`) >= 5 || strings.Count(body, `__typename`) >= 5
-	case "graphql_alias_overload":
-		return strings.Contains(lower, `"a1"`) && strings.Contains(lower, `"a2"`) && strings.Contains(lower, `"a5"`)
-	default:
-		return false
-	}
+	return graphqlattack.Confirmed(body, signal)
 }

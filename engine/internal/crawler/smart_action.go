@@ -1,10 +1,7 @@
 package crawler
 
-import (
-	"fmt"
-)
+import "fmt"
 
-// SmartActionConfig defines settings for browser-based interactive crawling.
 type SmartActionConfig struct {
 	MaxActionsPerStep int  `json:"max_actions_per_step"`
 	FillForms         bool `json:"fill_forms"`
@@ -12,102 +9,38 @@ type SmartActionConfig struct {
 	TriggerHover      bool `json:"trigger_hover"`
 }
 
-// DefaultSmartActionConfig returns optimal settings for SPA crawling.
 func DefaultSmartActionConfig() SmartActionConfig {
-	return SmartActionConfig{
-		MaxActionsPerStep: 25,
-		FillForms:         true,
-		TraverseShadowDOM: true,
-		TriggerHover:      true,
-	}
+	return SmartActionConfig{MaxActionsPerStep: 12, TraverseShadowDOM: true}
 }
 
-// GenerateSmartActionScript returns a self-executing JavaScript payload to be evaluated in
-// the browser page context to simulate realistic user clicks and form interactions in SPAs.
+// Discovery never fills or submits forms. Only explicitly marked navigation
+// tabs and collapsed panels are activated, at most once per document.
 func GenerateSmartActionScript(cfg SmartActionConfig) string {
-	return fmt.Sprintf(`(function() {
-	if (window.__akca_smart_action_done) return [];
-	window.__akca_smart_action_done = true;
-
-	const capturedURLs = new Set();
-	const maxActions = %d;
-	let actionCount = 0;
-
-	// Helper to collect all DOM elements including Shadow DOM
-	function getAllElements(root = document) {
-		const elements = [];
-		function traverse(node) {
-			if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
-			elements.push(node);
-			if (node.shadowRoot) {
-				Array.from(node.shadowRoot.children).forEach(traverse);
-			}
-			Array.from(node.children).forEach(traverse);
-		}
-		Array.from(root.children).forEach(traverse);
-		return elements;
+	limit := cfg.MaxActionsPerStep
+	if limit < 0 {
+		limit = 0
 	}
-
-	const allNodes = getAllElements();
-
-	// 1. Auto-fill Form Inputs with realistic test values
-	if (%t) {
-		allNodes.forEach(el => {
-			if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') {
-				const type = (el.type || 'text').toLowerCase();
-				const name = (el.name || el.id || '').toLowerCase();
-
-				if (type === 'email' || name.includes('email') || name.includes('mail')) {
-					el.value = 'crawler@akca-test.local';
-				} else if (type === 'password' || name.includes('pass') || name.includes('pwd')) {
-					el.value = 'AkcaPass123!#';
-				} else if (type === 'number' || type === 'tel' || name.includes('phone') || name.includes('amount') || name.includes('count')) {
-					el.value = '100';
-				} else if (type === 'checkbox' || type === 'radio') {
-					el.checked = true;
-				} else if (type === 'text' || type === 'search' || el.tagName === 'TEXTAREA') {
-					el.value = 'akca_crawler_query';
-				}
-				el.dispatchEvent(new Event('input', { bubbles: true }));
-				el.dispatchEvent(new Event('change', { bubbles: true }));
-			}
-		});
+	if limit > 25 {
+		limit = 25
 	}
-
-	// 2. Trigger Buttons, Tabs, Dropdowns & Actionable Elements
-	for (const el of allNodes) {
-		if (actionCount >= maxActions) break;
-
-		const tag = el.tagName;
-		const role = (el.getAttribute('role') || '').toLowerCase();
-		const isClickable = tag === 'BUTTON' || tag === 'A' || role === 'button' || role === 'tab' ||
-			role === 'menuitem' || el.hasAttribute('onclick') || el.classList.contains('btn') ||
-			el.classList.contains('button') || el.classList.contains('tab');
-
-		if (isClickable && !el.disabled && el.offsetParent !== null) {
-			try {
-				if (%t) {
-					el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-				}
-				el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-				el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-				el.click();
-				actionCount++;
-			} catch (e) {}
-		}
-	}
-
-	// 3. Extract any newly generated link targets from DOM
-	getAllElements().forEach(el => {
-		if (el.tagName === 'A' && el.href) {
-			capturedURLs.add(el.href);
-		} else if (el.hasAttribute('data-href')) {
-			capturedURLs.add(el.getAttribute('data-href'));
-		} else if (el.hasAttribute('data-url')) {
-			capturedURLs.add(el.getAttribute('data-url'));
-		}
-	});
-
-	return Array.from(capturedURLs);
-})();`, cfg.MaxActionsPerStep, cfg.FillForms, cfg.TriggerHover)
+	return fmt.Sprintf(`(async function() {
+ if (window.__akca_smart_action_done) return [];
+ window.__akca_smart_action_done = true;
+ function nodes(root) {
+  const out = Array.from(root.querySelectorAll('*'));
+  if (%t) for (const el of [...out]) if (el.shadowRoot) out.push(...nodes(el.shadowRoot));
+  return out;
+ }
+ let count = 0;
+ for (const el of nodes(document)) {
+  if (count >= %d) break;
+  if (el.tagName !== 'BUTTON' || el.type !== 'button' || el.disabled || el.offsetParent === null || el.closest('form')) continue;
+  if (!el.hasAttribute('aria-controls')) continue;
+  if (el.getAttribute('role') !== 'tab' && el.getAttribute('aria-expanded') !== 'false') continue;
+  if (/delete|remove|logout|sign.out|purchase|pay|submit|confirm/i.test(el.textContent + ' ' + el.getAttribute('aria-label'))) continue;
+  el.click(); count++;
+  await new Promise(resolve => setTimeout(resolve, 100));
+ }
+ return nodes(document).filter(el => el.tagName === 'A' && el.href).map(el => el.href);
+})();`, cfg.TraverseShadowDOM, limit)
 }

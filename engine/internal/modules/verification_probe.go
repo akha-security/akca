@@ -332,8 +332,13 @@ func (r *Runner) buildCandidate(ctx context.Context, module string, target ScanT
 
 func (r *Runner) observation(module string, target ScanTarget, role verification.ObservationRole,
 	attempt int, rr httpclient.RequestResponse) verification.Observation {
-	return verification.NewHTTPObservation(
+	item := verification.NewHTTPObservation(
 		r.scanID, module, target.EndpointURL, target.Parameter, target.Location, role, attempt, "",
 		rr.Request.Method, rr.Request.URL, rr.Request.Body, rr.Request.Headers, snapshot(rr.Response),
 	)
+	item.RequestID = rr.ExchangeID
+	if rr.ExchangeID != "" {
+		item.ID = fmt.Sprintf("%x", sha256.Sum256([]byte(item.ID+"|"+rr.ExchangeID)))
+	}
+	return item
 }

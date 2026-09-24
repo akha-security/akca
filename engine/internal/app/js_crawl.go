@@ -65,12 +65,16 @@ func (e *Engine) runJSDiscoveredCrawlPhase(ctx context.Context) error {
 		)
 		if e.client != nil {
 			browser.SetRequestGuard(e.client.ReserveExternal)
+			browser.SetResourceGuard(e.client.ReserveBrowserResource)
 		}
+		defer browser.Close()
 		c.SetBrowser(browser)
 	}
 	budget := crawler.Budget{
-		MaxDepth: e.session.Config.MaxDepth,
-		MaxPages: e.session.Config.MaxPages,
+		MaxDepth:      e.session.Config.MaxDepth,
+		MaxPages:      e.session.Config.EffectiveMaxPages(),
+		RequestBudget: e.session.Config.EffectiveCrawlerBudget(),
+		TimeBudget:    e.session.Config.TimeBudget,
 	}
 	if err := c.CrawlEndpointSeeds(ctx, seeds, budget); err != nil {
 		return err

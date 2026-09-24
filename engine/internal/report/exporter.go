@@ -194,6 +194,11 @@ func (e *Exporter) ExportHTML(w io.Writer, opts Options) error {
 			return err
 		}
 	}
+	if len(meta.Coverage) > 0 && opts.Template != TemplateExecutive {
+		if err := renderHTMLSection(w, "coverage", "Coverage & Readiness", coverageHTML(meta.Coverage)); err != nil {
+			return err
+		}
+	}
 	if opts.Template == TemplateAppendix {
 		e.emit(opts, "appendix", 90, 0)
 		if _, err := io.WriteString(w, `<section class="report-section"><h2>Appendix</h2><div class="card"><p>`+template.HTMLEscapeString(meta.AppendixNotes)+`</p></div></section>`); err != nil {
@@ -296,6 +301,7 @@ func (e *Exporter) ExportJSON(w io.Writer, opts Options) error {
 		APIKeyValidations []APIKeySection      `json:"api_key_validations,omitempty"`
 		TrafficEvidence   []TrafficEntry       `json:"traffic_evidence,omitempty"`
 		PathDiscoveries   []PathDiscoveryEntry `json:"path_discoveries,omitempty"`
+		Coverage          []CoverageEntry      `json:"coverage,omitempty"`
 		ManualLeads       []ManualLeadEntry    `json:"manual_leads,omitempty"`
 		AppendixNotes     string               `json:"appendix_notes,omitempty"`
 	}
@@ -307,6 +313,7 @@ func (e *Exporter) ExportJSON(w io.Writer, opts Options) error {
 		APIKeyValidations: meta.APIKeyValidations, AppendixNotes: meta.AppendixNotes,
 		TrafficEvidence: meta.TrafficEvidence,
 		PathDiscoveries: meta.PathDiscoveries,
+		Coverage:        meta.Coverage,
 		ManualLeads:     meta.ManualLeads,
 	}
 	hdrBytes, err := json.Marshal(hdr)
@@ -468,6 +475,17 @@ func (e *Exporter) ExportMarkdown(w io.Writer, opts Options) error {
 		}
 		for _, entry := range meta.PathDiscoveries {
 			if _, writeErr := fmt.Fprintf(w, "- `%s %s` -> HTTP %d (%s)\n", entry.Method, entry.URL, entry.StatusCode, entry.Signal); writeErr != nil {
+				return writeErr
+			}
+		}
+	}
+	if err == nil && len(meta.Coverage) > 0 {
+		if _, writeErr := io.WriteString(w, "\n## Coverage & Readiness\n\n"); writeErr != nil {
+			return writeErr
+		}
+		for _, entry := range meta.Coverage {
+			detail := strings.TrimSpace(strings.Join([]string{entry.Module, entry.Phase, entry.Reason}, " · "))
+			if _, writeErr := fmt.Fprintf(w, "- `%s` %s — %s\n", entry.EventType, entry.Summary, detail); writeErr != nil {
 				return writeErr
 			}
 		}

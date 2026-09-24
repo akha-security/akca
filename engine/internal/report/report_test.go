@@ -75,8 +75,8 @@ func TestExportFormatsSampleData(t *testing.T) {
 	if !strings.Contains(htmlBuf.String(), ProductName) {
 		t.Fatal("expected product title")
 	}
-	if strings.Contains(htmlBuf.String(), "[REDACTED]") {
-		t.Fatal("did not expect redacted markers in HTML")
+	if strings.Contains(htmlBuf.String(), testfixtures.GitHubReportToken()) {
+		t.Fatal("redacted export exposed an API credential")
 	}
 
 	opts.Template = TemplateBugcrowd
@@ -160,6 +160,48 @@ func TestPathDiscoverySectionUsesFuzzResults(t *testing.T) {
 	if !strings.Contains(htmlBuf.String(), "Directory &amp; Path Discovery") ||
 		!strings.Contains(htmlBuf.String(), "https://example.com/admin") {
 		t.Fatalf("HTML report did not render path discovery section: %s", htmlBuf.String())
+	}
+}
+
+func TestCoverageDiagnosticsMarkReportPartialAndRender(t *testing.T) {
+	db, scanID := setupReportDB(t, 0)
+	defer db.Close()
+	if err := db.SaveTimelineEvent(scanID, "module_readiness", "GraphQL is not configured", `{"module":"graphql","configured":false,"reason":"no endpoint"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveTimelineEvent(scanID, "coverage_gap", "Crawler budget exhausted", `{"phase":"crawl","reason":"request_budget","endpoint":"https://example.com/private"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	builder := NewBuilder(evidencestore.New(db), db)
+	meta, err := builder.BuildMeta(Options{ScanID: scanID, Template: TemplateInternal, Redact: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !meta.Partial || len(meta.Coverage) != 2 || len(meta.Warnings) == 0 {
+		t.Fatalf("coverage diagnostics were not reflected in report metadata: %+v", meta)
+	}
+	var htmlBuf bytes.Buffer
+	if err := NewExporter(builder, nil).Export(&htmlBuf, Options{ScanID: scanID, Template: TemplateInternal, Format: FormatHTML, Redact: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(htmlBuf.String(), "Coverage &amp; Readiness") || !strings.Contains(htmlBuf.String(), "Crawler budget exhausted") {
+		t.Fatalf("HTML report omitted coverage diagnostics: %s", htmlBuf.String())
+	}
+}
+
+func TestRoutinePluginSkipDoesNotAloneMarkReportPartial(t *testing.T) {
+	db, scanID := setupReportDB(t, 0)
+	defer db.Close()
+	if err := db.SaveTimelineEvent(scanID, "plugin_skipped", "WebSocket check not applicable", `{"module":"websocket","reason":"no upgrade endpoint"}`); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := NewBuilder(evidencestore.New(db), db).BuildMeta(Options{ScanID: scanID, Template: TemplateInternal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Partial {
+		t.Fatalf("routine applicability skip should remain visible without marking report partial: %+v", meta.Warnings)
 	}
 }
 
@@ -262,11 +304,11 @@ func TestLargeScanStreamingMemory(t *testing.T) {
 	}
 }
 
-func TestRedactionPreservesRawValues(t *testing.T) {
+func TestRedactionRemovesCredentials(t *testing.T) {
 	in := "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.x and api_key=supersecretvalue"
 	out := RedactString(in)
-	if !strings.Contains(out, "supersecretvalue") || !strings.Contains(out, "eyJhbGci") {
-		t.Fatalf("raw values were unexpectedly redacted: %s", out)
+	if strings.Contains(out, "supersecretvalue") || strings.Contains(out, "eyJhbGci") || !strings.Contains(out, "[REDACTED]") {
+		t.Fatalf("credentials were not redacted: %s", out)
 	}
 }
 

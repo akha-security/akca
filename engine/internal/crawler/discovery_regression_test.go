@@ -2,6 +2,7 @@ package crawler
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -13,9 +14,10 @@ import (
 )
 
 type discoveryClient struct {
-	mu        sync.Mutex
-	responses map[string]httpclient.ResponseRecord
-	visited   map[string]bool
+	mu             sync.Mutex
+	responses      map[string]httpclient.ResponseRecord
+	visited        map[string]bool
+	sessionCookies map[string]string
 }
 
 type documentBrowser struct {
@@ -52,6 +54,81 @@ func TestDeniedDocumentBrowserRecovery(t *testing.T) {
 			t.Fatalf("rejected/unverified browser document accepted: status=%d err=%v", status, err)
 		}
 		db.Close()
+	}
+}
+
+func TestBrowserRecoveryCoversAuthAndChallengeStatuses(t *testing.T) {
+	for _, responseStatus := range []int{401, 403, 429, 503} {
+		t.Run(http.StatusText(responseStatus), func(t *testing.T) {
+			cfg := config.DefaultScanConfig()
+			cfg.IncludeDomains = []string{"example.test"}
+			db, err := storage.Open(t.TempDir() + "/browser-challenge.db")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if err = db.Migrate(); err != nil {
+				t.Fatal(err)
+			}
+			client := &discoveryClient{responses: map[string]httpclient.ResponseRecord{
+				"https://example.test/":              {StatusCode: responseStatus},
+				"https://example.test/browser-child": {StatusCode: 200, Body: "ok"},
+			}, visited: map[string]bool{}}
+			c := New("browser-challenge", cfg, client, scope.NewEngine(cfg), db, nil)
+			c.SetBrowser(&documentBrowser{status: 200})
+			if err = c.Crawl(context.Background(), []string{"https://example.test/"}); err != nil {
+				t.Fatalf("HTTP %d was not recovered through browser: %v", responseStatus, err)
+			}
+			if !client.visited["https://example.test/browser-child"] {
+				t.Fatalf("HTTP %d browser DOM was not crawled", responseStatus)
+			}
+		})
+	}
+}
+
+func TestBrowserCookiesAreAdoptedForLaterCrawlRequests(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"example.test"}
+	db, err := storage.Open(t.TempDir() + "/browser-session.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err = db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	client := &discoveryClient{responses: map[string]httpclient.ResponseRecord{
+		"https://example.test/":              {StatusCode: 403},
+		"https://example.test/browser-child": {StatusCode: 200, Body: "ok"},
+	}, visited: map[string]bool{}}
+	c := New("browser-session", cfg, client, scope.NewEngine(cfg), db, nil)
+	c.SetBrowser(&cookieDocumentBrowser{})
+	if err = c.Crawl(context.Background(), []string{"https://example.test/"}); err != nil {
+		t.Fatal(err)
+	}
+	if client.sessionCookies["clearance"] != "browser-value" {
+		t.Fatalf("browser cookies were not adopted: %v", client.sessionCookies)
+	}
+	if _, invalid := client.sessionCookies[".example.test|sid"]; invalid {
+		t.Fatalf("ambiguous CDP cookie name was adopted: %v", client.sessionCookies)
+	}
+}
+
+type cookieDocumentBrowser struct{ documentBrowser }
+
+func (b *cookieDocumentBrowser) FetchInstrumented(_ context.Context, rawURL string) (BrowserSnapshot, error) {
+	return BrowserSnapshot{
+		URL: rawURL, DocumentStatus: 200, DOM: `<a href="/browser-child">child</a>`,
+		Cookies: map[string]string{"clearance": "browser-value", ".example.test|sid": "ambiguous"},
+	}, nil
+}
+
+func (c *discoveryClient) SetSession(cookies map[string]string, _ map[string]string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sessionCookies = make(map[string]string, len(cookies))
+	for key, value := range cookies {
+		c.sessionCookies[key] = value
 	}
 }
 

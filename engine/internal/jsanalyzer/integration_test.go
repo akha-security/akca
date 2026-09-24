@@ -78,3 +78,52 @@ func TestAnalyzerUsesCentralHTTPClient(t *testing.T) {
 		t.Fatalf("expected secret/sourcemap events, got %v", events)
 	}
 }
+
+func TestAnalyzerRecursivelyAnalyzesDynamicChunks(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/app.js":
+			_, _ = w.Write([]byte(`import("/chunks/lazy.js")`))
+		case "/chunks/lazy.js":
+			_, _ = w.Write([]byte(`fetch("/api/deep-resource")`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"127.0.0.1"}
+	scopeEngine := scope.NewEngine(cfg)
+	client, err := httpclient.New(cfg, scopeEngine, ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := storage.Open(t.TempDir() + "/recursive-js.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureScan("scan-recursive-js"); err != nil {
+		t.Fatal(err)
+	}
+
+	a := New("scan-recursive-js", client, scopeEngine, db, queue.NewRequestQueue(), func(string, string, map[string]interface{}) error { return nil })
+	if err := a.Run(context.Background(), []string{srv.URL + "/app.js"}); err != nil {
+		t.Fatal(err)
+	}
+	urls, err := db.ListJSDiscoveredAPIURLs("scan-recursive-js", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := srv.URL + "/api/deep-resource"
+	for _, got := range urls {
+		if got == want {
+			return
+		}
+	}
+	t.Fatalf("recursive chunk endpoint %q was not persisted; got %v", want, urls)
+}

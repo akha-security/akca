@@ -26,6 +26,15 @@ func (r *Runner) runRateLimit(ctx context.Context, target ScanTarget) []ModuleFi
 		return nil
 	}
 	attemptCount := policy.Threshold + 3
+	if policy.WindowSeconds < 1 {
+		r.emitSkip("rate_limit", target, "window_seconds is required to prove that the configured threshold was exceeded within one window")
+		return nil
+	}
+	windowStart := time.Now()
+	if policy.Threshold >= 50 {
+		r.emitSkip("rate_limit", target, "configured threshold exceeds the 50-attempt verification ceiling")
+		return nil
+	}
 	if attemptCount > 50 {
 		attemptCount = 50
 	}
@@ -45,6 +54,10 @@ func (r *Runner) runRateLimit(ctx context.Context, target ScanTarget) []ModuleFi
 			return nil
 		}
 		attempts = append(attempts, rr)
+		if time.Since(windowStart) >= time.Duration(policy.WindowSeconds)*time.Second {
+			r.emitSkip("rate_limit", target, "verification exceeded the configured rate-limit window")
+			return nil
+		}
 		if index%3 == 2 {
 			control, err := r.probeForModule(ctx, "rate_limit", target, "akca-control-"+randomAccountNonce()+"@example.invalid")
 			if err != nil || rateLimitBlockSignal(control.Response.StatusCode, control.Response.Body) {
@@ -160,7 +173,7 @@ func failedAuthenticationOutcome(response httpclient.ResponseRecord) bool {
 		return false
 	}
 	lower := strings.ToLower(response.Body)
-	if response.StatusCode == 401 || response.StatusCode == 403 {
+	if response.StatusCode == 401 {
 		return true
 	}
 	for _, marker := range []string{"invalid password", "invalid credentials", "login failed", "authentication failed"} {
@@ -221,97 +234,30 @@ func rateLimitMeaningfulResponse(body string, target ScanTarget) bool {
 }
 
 func (r *Runner) runRateLimitThresholdDiscovery(ctx context.Context, target ScanTarget) []ModuleFinding {
-	baseline, err := r.cachedEmptyProbe(ctx, target)
-	if err != nil {
-		return nil
-	}
-
 	const maxBurst = 25
-	probeAccount := "akca-threshold-" + randomAccountNonce() + "@example.invalid"
-	var attempts []httpclient.RequestResponse
-	blockedIndex := -1
-
-	for i := 1; i <= maxBurst; i++ {
+	account := "akca-threshold-" + randomAccountNonce() + "@example.invalid"
+	started := time.Now()
+	processed := 0
+	for i := 0; i < maxBurst; i++ {
 		if ctx.Err() != nil {
-			break
+			return nil
 		}
-		rr, err := r.probeForModule(ctx, "rate_limit", target, probeAccount)
+		rr, err := r.probeForModule(ctx, "rate_limit", target, account)
 		if err != nil {
-			break
+			return nil
 		}
-		attempts = append(attempts, rr)
-
 		if rateLimitBlockSignal(rr.Response.StatusCode, rr.Response.Body) {
-			blockedIndex = i
-			break
+			r.emitDiscovery("rate_limit", target, "throttling_observed",
+				fmt.Sprintf("A blocking response was observed after %d processed failures in %s; account/IP scope and threshold remain unproven", processed, time.Since(started)))
+			return nil
 		}
+		if !failedAuthenticationOutcome(rr.Response) {
+			r.emitSkip("rate_limit", target, "request did not produce a verified authentication failure")
+			return nil
+		}
+		processed++
 	}
-
-	var out []ModuleFinding
-	if blockedIndex > 0 {
-		// Prove that the block is account-specific rather than a host-wide WAF
-		// response. Two fresh-account controls must remain processable.
-		var controls []httpclient.RequestResponse
-		for i := 0; i < 2; i++ {
-			control, controlErr := r.probeForModule(ctx, "rate_limit", target,
-				"akca-control-"+randomAccountNonce()+"@example.invalid")
-			if controlErr != nil || rateLimitBlockSignal(control.Response.StatusCode, control.Response.Body) {
-				return nil
-			}
-			controls = append(controls, control)
-		}
-		// Rate limit threshold was discovered
-		payload := defaultPayload("rate_limit", "threshold_discovered",
-			fmt.Sprintf("threshold=%d requests", blockedIndex-1), "rate_limit_threshold_discovered")
-		blockedRR := attempts[len(attempts)-1]
-		finding := r.verifyAndBuildWithCandidate(ctx, "rate_limit", target, payload, baseline, blockedRR,
-			"rate_limit_threshold_discovered", false, false, "", "", func(candidate *verification.Candidate) {
-				candidate.RequestedProofType = verification.ProofPolicyViolation
-				candidate.NegativeControlSet = true
-				candidate.NegativeControlOK = true
-				for index, rr := range attempts {
-					candidate.Observations = append(candidate.Observations,
-						r.observation("rate_limit", target, verification.RolePositiveReplay, index+2, rr))
-				}
-				for index, rr := range controls {
-					candidate.Observations = append(candidate.Observations,
-						r.observation("rate_limit", target, verification.RoleNegativeControl, index+1, rr))
-				}
-			})
-		if finding != nil {
-			finding.Title = fmt.Sprintf("Rate Limit Enforced: Blocked After %d Requests", blockedIndex-1)
-			finding.Severity = "info"
-			finding.Description = fmt.Sprintf("Rate limit policy verification confirmed that %s enforces throttling after %d consecutive requests (defense active).",
-				target.EndpointURL, blockedIndex-1)
-			r.recordFinding(ctx, &out, finding, "rate_limit", "rate_limit_threshold_discovered")
-		}
-	} else if len(attempts) >= maxBurst {
-		// 25 requests processed without rate limiting on a sensitive endpoint.
-		payload := defaultPayload("rate_limit", "missing_rate_limit",
-			fmt.Sprintf("%d requests processed without block", len(attempts)), "missing_rate_limiting")
-		finding := r.verifyAndBuildWithCandidate(ctx, "rate_limit", target, payload, baseline, attempts[len(attempts)-1],
-			"missing_rate_limiting", false, false, "", "", func(candidate *verification.Candidate) {
-				candidate.RequestedProofType = verification.ProofPolicyViolation
-				candidate.NegativeControlSet = true
-				candidate.NegativeControlOK = true
-				for index, rr := range attempts {
-					candidate.Observations = append(candidate.Observations,
-						r.observation("rate_limit", target, verification.RolePositiveReplay, index+2, rr))
-				}
-				// Baseline is the conservative negative control: unlike the rapid
-				// failed-auth attempts it contains no injected account value.
-				candidate.Observations = append(candidate.Observations,
-					r.observation("rate_limit", target, verification.RoleNegativeControl, 1, baseline),
-					r.observation("rate_limit", target, verification.RoleNegativeControl, 2, baseline))
-			})
-		if finding != nil {
-			finding.Title = "Missing Rate Limiting on Sensitive Authentication Endpoint"
-			finding.Severity = "high"
-			finding.Description = fmt.Sprintf("The sensitive endpoint %s processed %d rapid consecutive authentication requests without triggering any rate limit block or delay.",
-				target.EndpointURL, len(attempts))
-			r.recordFinding(ctx, &out, finding, "rate_limit", "missing_rate_limiting")
-		}
-	}
-
-	return out
+	r.emitDiscovery("rate_limit", target, "rate_limit_not_observed",
+		fmt.Sprintf("No block observed during %d failed authentication requests over %s; no target policy was supplied, so this is not a vulnerability finding", processed, time.Since(started)))
+	return nil
 }

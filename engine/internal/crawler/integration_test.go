@@ -31,9 +31,10 @@ func TestCrawlerScopeBlockingAndPersistence(t *testing.T) {
 
 	cfg := config.DefaultScanConfig()
 	cfg.IncludeDomains = []string{"127.0.0.1"}
-	cfg.MaxPages = 10
+	cfg.MaxPages = 100
 	cfg.MaxDepth = 2
-	cfg.RequestBudget = 20
+	cfg.RequestBudget = 100
+	cfg.CrawlerRequestBudget = 100
 
 	scopeEngine := scope.NewEngine(cfg)
 	client, err := httpclient.New(cfg, scopeEngine, ratelimit.New(1000, 1000))

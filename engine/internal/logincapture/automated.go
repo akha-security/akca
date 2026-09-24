@@ -3,6 +3,7 @@ package logincapture
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,7 +24,15 @@ type LoginRequest struct {
 	UsernameField string            `json:"username_field,omitempty"`
 	PasswordField string            `json:"password_field,omitempty"`
 	ExtraFields   map[string]string `json:"extra_fields,omitempty"`
+	Steps         []LoginStep       `json:"steps,omitempty"`
 	ForceHTTP1    bool              `json:"force_http1"`
+}
+
+type LoginStep struct {
+	URL     string            `json:"url"`
+	Method  string            `json:"method,omitempty"`
+	Fields  map[string]string `json:"fields,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 var (
@@ -110,30 +119,124 @@ func AutomatedLogin(ctx context.Context, req LoginRequest) (Session, error) {
 	if err != nil {
 		return Session{}, fmt.Errorf("submit login: %w", err)
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(postResp.Body, 1<<20))
+	postBody, _ := io.ReadAll(io.LimitReader(postResp.Body, 1<<20))
 	postResp.Body.Close()
+	responses := []capturedLoginResponse{{response: postResp, body: postBody}}
+	lastURL := postResp.Request.URL
+
+	for index, step := range req.Steps {
+		method := strings.ToUpper(strings.TrimSpace(step.Method))
+		if method == "" {
+			method = http.MethodPost
+		}
+		stepURL := strings.TrimSpace(step.URL)
+		if stepURL == "" && lastURL != nil {
+			stepURL = lastURL.String()
+		} else if lastURL != nil {
+			stepURL = resolveURL(lastURL, stepURL)
+		}
+		form := url.Values{}
+		for key, value := range step.Fields {
+			form.Set(key, value)
+		}
+		var bodyReader io.Reader
+		if method != http.MethodGet && method != http.MethodHead {
+			bodyReader = strings.NewReader(form.Encode())
+		} else if len(form) > 0 {
+			parsed, parseErr := url.Parse(stepURL)
+			if parseErr != nil {
+				return Session{}, fmt.Errorf("login step %d URL: %w", index+1, parseErr)
+			}
+			query := parsed.Query()
+			for key, values := range form {
+				for _, value := range values {
+					query.Add(key, value)
+				}
+			}
+			parsed.RawQuery = query.Encode()
+			stepURL = parsed.String()
+		}
+		stepReq, requestErr := http.NewRequestWithContext(ctx, method, stepURL, bodyReader)
+		if requestErr != nil {
+			return Session{}, fmt.Errorf("login step %d: %w", index+1, requestErr)
+		}
+		stepReq.Header.Set("User-Agent", defaultUserAgent())
+		if bodyReader != nil {
+			stepReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+		for key, value := range step.Headers {
+			stepReq.Header.Set(key, value)
+		}
+		stepResp, stepErr := client.Do(stepReq)
+		if stepErr != nil {
+			return Session{}, fmt.Errorf("login step %d request: %w", index+1, stepErr)
+		}
+		stepBody, _ := io.ReadAll(io.LimitReader(stepResp.Body, 1<<20))
+		stepResp.Body.Close()
+		responses = append(responses, capturedLoginResponse{response: stepResp, body: stepBody})
+		lastURL = stepResp.Request.URL
+		if stepResp.StatusCode >= 400 {
+			return Session{}, fmt.Errorf("login step %d returned HTTP %d", index+1, stepResp.StatusCode)
+		}
+	}
 
 	sess := NewSession()
 	sess.MergeCookies(cookiesFromJar(jar, loginURL))
-	for _, u := range []*url.URL{loginURL, postResp.Request.URL} {
+	for _, u := range []*url.URL{loginURL, lastURL} {
 		if u != nil {
 			sess.MergeCookies(cookiesFromJar(jar, u))
 		}
 	}
-	for k, vals := range postResp.Header {
-		if strings.EqualFold(k, "set-cookie") {
-			for _, v := range vals {
-				sess.MergeCookies(parseSetCookie(v))
-			}
-		}
+	for _, captured := range responses {
+		mergeLoginResponse(&sess, captured)
 	}
-	if len(sess.Cookies) == 0 {
-		return sess, fmt.Errorf("login submitted but no session cookies were captured")
+	if len(sess.Cookies) == 0 && !hasAuthenticationHeader(sess.Headers) {
+		return sess, fmt.Errorf("login submitted but no session cookies or authentication tokens were captured")
 	}
 	if postResp.StatusCode >= 400 {
 		sess.Notes = fmt.Sprintf("login POST returned HTTP %d; cookies captured anyway", postResp.StatusCode)
 	}
 	return sess, nil
+}
+
+func hasAuthenticationHeader(headers map[string]string) bool {
+	for key, value := range headers {
+		if isAuthHeader(key) && strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+type capturedLoginResponse struct {
+	response *http.Response
+	body     []byte
+}
+
+func mergeLoginResponse(session *Session, captured capturedLoginResponse) {
+	if captured.response == nil {
+		return
+	}
+	for key, values := range captured.response.Header {
+		if strings.EqualFold(key, "set-cookie") {
+			for _, value := range values {
+				session.MergeCookies(parseSetCookie(value))
+			}
+		}
+		if isAuthHeader(key) && len(values) > 0 {
+			session.MergeHeaders(map[string]string{key: values[0]})
+		}
+	}
+	var object map[string]interface{}
+	if json.Unmarshal(captured.body, &object) != nil {
+		return
+	}
+	for _, key := range []string{"access_token", "token", "id_token"} {
+		if token, ok := object[key].(string); ok && strings.TrimSpace(token) != "" {
+			session.MergeHeaders(map[string]string{"Authorization": "Bearer " + strings.TrimSpace(token)})
+			return
+		}
+	}
 }
 
 func httpTransport(forceHTTP1 bool) *http.Transport {

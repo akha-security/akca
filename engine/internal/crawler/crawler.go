@@ -3,6 +3,7 @@ package crawler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -26,41 +27,48 @@ import (
 // avoid pathological CPU usage on very large assets.
 const maxSecretScanBytes = 3 * 1024 * 1024
 
+var ErrIncomplete = errors.New("crawl incomplete")
+
 type HTTPDoer interface {
 	Do(ctx context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error)
 }
 
 type Crawler struct {
-	mu              sync.Mutex
-	scanID          string
-	cfg             config.ScanConfig
-	client          HTTPDoer
-	scope           *scope.Engine
-	db              *storage.DB
-	q               *queue.RequestQueue
-	seen            map[string]struct{}
-	recorded        map[string]struct{}
-	runtimeSeen     map[string]struct{}
-	secretsSeen     map[string]struct{}
-	queryVariants   map[string]map[string]struct{}
-	linkedHostsSeen map[string]struct{}
-	seeds           []string
-	emit            EventSink
-	browser         BrowserFetcher
-	pagesVisited    int
-	contentPages    int
-	rejectedPages   int
-	networkErrors   int
-	requestsMade    int
-	discovered      int
-	runtimeFound    int
-	failures        int
-	startedAt       time.Time
-	eventBatch      []map[string]interface{}
-	stateGraph      *stategraph.Graph
+	mu               sync.Mutex
+	scanID           string
+	cfg              config.ScanConfig
+	client           HTTPDoer
+	scope            *scope.Engine
+	db               *storage.DB
+	q                *queue.RequestQueue
+	seen             map[string]struct{}
+	recorded         map[string]struct{}
+	runtimeSeen      map[string]struct{}
+	secretsSeen      map[string]struct{}
+	queryVariants    map[string]map[string]struct{}
+	linkedHostsSeen  map[string]struct{}
+	seeds            []string
+	emit             EventSink
+	browser          BrowserFetcher
+	pagesVisited     int
+	contentPages     int
+	rejectedPages    int
+	networkErrors    int
+	requestsMade     int
+	discovered       int
+	runtimeFound     int
+	browserAttempts  int
+	browserRecovered int
+	failures         int
+	startedAt        time.Time
+	eventBatch       []map[string]interface{}
+	stateGraph       *stategraph.Graph
 }
 
 func New(scanID string, cfg config.ScanConfig, client HTTPDoer, scopeEngine *scope.Engine, db *storage.DB, emit EventSink) *Crawler {
+	if emit == nil {
+		emit = func(string, string, map[string]interface{}) error { return nil }
+	}
 	linked := make(map[string]struct{})
 	for _, inc := range cfg.IncludeDomains {
 		if host := strings.ToLower(config.NormalizeDomain(inc)); host != "" {
@@ -131,6 +139,9 @@ func (c *Crawler) Crawl(ctx context.Context, seeds []string) error {
 	c.networkErrors = 0
 	c.requestsMade = 0
 	c.discovered = 0
+	c.runtimeFound = 0
+	c.browserAttempts = 0
+	c.browserRecovered = 0
 	c.failures = 0
 	c.eventBatch = nil
 	c.mu.Unlock()
@@ -150,9 +161,22 @@ func (c *Crawler) Crawl(ctx context.Context, seeds []string) error {
 	for _, seed := range seeds {
 		c.enqueueCandidate(seed, "GET", 0, SourceSeed, 1.0, "initial seed", budget, nil, "")
 	}
+	seedQueueSize := c.q.Len()
 	c.IngestSeeds(c.seeds)
 
 	c.fetchSpecialPaths(ctx, seeds, budget)
+	if c.q.Len() == 0 {
+		message := "Crawler has no crawlable in-scope requests; verify the target URL and include/exclude domain rules"
+		_ = c.emit("coverage_gap", message, map[string]interface{}{
+			"scan_id": c.scanID, "phase": "crawling", "reason": "empty_initial_queue",
+			"seed_count": len(seeds), "accepted_seed_requests": seedQueueSize,
+		})
+		_ = c.emit("crawler_finished", "crawler stopped without requests", map[string]interface{}{
+			"scan_id": c.scanID, "pages": 0, "requests": 0, "discovered": c.discovered,
+			"has_usable_content": false, "reason": "empty_initial_queue",
+		})
+		return fmt.Errorf("crawl incomplete: %s", strings.ToLower(message))
+	}
 
 	// Surface seed/well-known endpoints right away so the UI shows discoveries
 	// before any (potentially slow) network round-trip completes.
@@ -168,17 +192,23 @@ func (c *Crawler) Crawl(ctx context.Context, seeds []string) error {
 	c.mu.Unlock()
 
 	_ = c.flushEndpointEvents()
-	_ = c.emit("queue_updated", "crawl queue drained", map[string]interface{}{
+	_ = c.emit("queue_updated", "crawl workers stopped", map[string]interface{}{
 		"scan_id": c.scanID, "queue_size": c.q.Len(), "discovered": c.discovered,
 	})
 	_ = c.emit("crawler_finished", "crawler finished", map[string]interface{}{
 		"scan_id": c.scanID, "pages": c.pagesVisited, "requests": c.requestsMade, "discovered": c.discovered,
 		"errors":        c.failureCount(),
 		"content_pages": contentPages, "rejected_pages": rejectedPages, "network_errors": networkErrors,
+		"browser_attempts": c.browserAttemptCount(), "browser_recovered_pages": c.browserRecoveryCount(),
 		"has_usable_content": contentPages > 0,
 	})
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	if c.q.Len() > 0 {
+		reason := c.stopReason(budget)
+		_ = c.emit("coverage_gap", "Crawl stopped before all queued URLs were visited", map[string]interface{}{"queue_remaining": c.q.Len(), "phase": "crawling", "reason": reason})
+		return fmt.Errorf("%w: %d queued URLs remain (%s)", ErrIncomplete, c.q.Len(), reason)
 	}
 	if contentPages == 0 {
 		return fmt.Errorf("crawl incomplete: no usable page content received (%d rejected responses, %d network errors); check target access, authentication and HTTP responses", rejectedPages, networkErrors)
@@ -307,7 +337,8 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 			_ = c.emit("log", fmt.Sprintf("crawler visit recovered from panic: %v", r), map[string]interface{}{
 				"scan_id": c.scanID, "url": item.URL,
 			})
-			visitErr = nil
+			c.recordFailure()
+			visitErr = fmt.Errorf("crawler visit panic: %v", r)
 		}
 	}()
 	rawURL := item.URL
@@ -355,6 +386,7 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 	}
 
 	if !c.reserveRequest(budget) {
+		c.q.Enqueue(item)
 		return nil
 	}
 	rr, err := c.client.Do(ctx, method, visitURL, reqBody, reqHeaders)
@@ -367,7 +399,7 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 
 	c.mu.Lock()
 	c.pagesVisited++
-	if rr.Response.StatusCode >= 200 && rr.Response.StatusCode < 300 && strings.TrimSpace(rr.Response.Body) != "" {
+	if rr.Response.StatusCode >= 200 && rr.Response.StatusCode < 300 && strings.TrimSpace(rr.Response.Body) != "" && usableApplicationSource(source) {
 		c.contentPages++
 	}
 	if rr.Response.StatusCode >= 400 {
@@ -497,13 +529,19 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 
 	var browserState *BrowserSnapshot
 	hasScripts := strings.Contains(strings.ToLower(body), "<script")
-	// Retry denied document navigation once through the configured browser.
-	// Do not launch browsers for speculative API-doc probes or rate limits.
-	deniedDocument := rr.Response.StatusCode == http.StatusForbidden && method == http.MethodGet &&
+	// Retry browser-only authentication and anti-bot responses once through the
+	// configured browser. Do not launch browsers for speculative API-doc probes.
+	deniedDocument := browserRecoverableDocumentStatus(rr.Response.StatusCode) && method == http.MethodGet &&
 		(source == SourceSeed || source == SourceSeedIngest || source == SourceLink || source == SourceBrowserXHR)
 	if ((isHTML && hasScripts) || deniedDocument) && c.cfg.EnableHeadlessCrawler && c.browser != nil {
+		c.mu.Lock()
+		c.browserAttempts++
+		c.mu.Unlock()
 		if instrumented, ok := c.browser.(InstrumentedBrowserFetcher); ok {
 			snapshot, browserErr := instrumented.FetchInstrumented(ctx, rawURL)
+			if len(snapshot.BlockedResources) > 0 {
+				_ = c.emit("coverage_gap", "Browser requests were blocked by scope or budget; explicitly configure browser_resource_domains for required passive CDN dependencies", map[string]interface{}{"phase": "crawling", "url": rawURL, "blocked_requests": len(snapshot.BlockedResources)})
+			}
 			if deniedDocument && browserErr == nil {
 				if snapshot.DocumentStatus < 200 || snapshot.DocumentStatus >= 300 ||
 					strings.TrimSpace(snapshot.DOM) == "" || !c.scope.IsInScope(snapshot.URL) {
@@ -511,6 +549,7 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 				} else {
 					c.mu.Lock()
 					c.contentPages++
+					c.browserRecovered++
 					c.mu.Unlock()
 					c.recordEndpoint(rawURL, method, source, 1, depth, "browser document after HTTP rejection", &RequestTemplate{
 						Method: method, URL: snapshot.URL, ResponseStatus: snapshot.DocumentStatus,
@@ -523,6 +562,7 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 				_ = c.emit("coverage_gap", "Browser discovery unavailable: "+browserErr.Error(), map[string]interface{}{"url": rawURL, "phase": "crawling"})
 			}
 			if browserErr == nil {
+				c.adoptBrowserCookies(snapshot.Cookies)
 				browserState = &snapshot
 				discovered = append(discovered, snapshot.NetworkCalls...)
 				base := pageURL
@@ -582,6 +622,43 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 		c.enqueueCandidate(ep.URL, ep.Method, depth+1, ep.Source, ep.Confidence, ep.WhyDiscovered, budget, ep.RequestTemplate, rawURL)
 	}
 	return nil
+}
+
+func browserRecoverableDocumentStatus(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
+type crawlSessionUpdater interface {
+	SetSession(cookies map[string]string, headers map[string]string)
+}
+
+// adoptBrowserCookies carries cookies created during a browser navigation
+// (login redirects, anti-bot clearance, SPA bootstrap) into later HTTP crawl
+// requests. Ambiguous CDP keys use "domain|name" and are not valid Cookie
+// header names, so they are deliberately skipped.
+func (c *Crawler) adoptBrowserCookies(cookies map[string]string) {
+	if len(cookies) == 0 {
+		return
+	}
+	clean := make(map[string]string, len(cookies))
+	for name, value := range cookies {
+		name = strings.TrimSpace(name)
+		if name == "" || strings.ContainsAny(name, "|;=\r\n") {
+			continue
+		}
+		clean[name] = value
+	}
+	if len(clean) == 0 {
+		return
+	}
+	if updater, ok := c.client.(crawlSessionUpdater); ok {
+		updater.SetSession(clean, nil)
+	}
 }
 
 func (c *Crawler) graphIdentity() string {
@@ -672,6 +749,9 @@ func (c *Crawler) fetchSpecialPaths(_ context.Context, seeds []string, budget Bu
 
 // CrawlEndpointSeeds enqueues discovered endpoints with their HTTP methods (used for JS API re-crawl).
 func (c *Crawler) CrawlEndpointSeeds(ctx context.Context, seeds []DiscoveredEndpoint, budget Budget) error {
+	c.mu.Lock()
+	c.startedAt = time.Now()
+	c.mu.Unlock()
 	if budget.MaxDepth <= 0 && c.cfg.MaxDepth > 0 {
 		budget.MaxDepth = c.cfg.MaxDepth
 	}
@@ -680,6 +760,12 @@ func (c *Crawler) CrawlEndpointSeeds(ctx context.Context, seeds []DiscoveredEndp
 	}
 	c.runWorkers(ctx, budget)
 	_ = c.flushEndpointEvents()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if c.q.Len() > 0 || c.failureCount() > 0 {
+		return fmt.Errorf("JS crawl incomplete: %d queued URLs, %d persistence/worker errors", c.q.Len(), c.failureCount())
+	}
 	return nil
 }
 
@@ -694,6 +780,7 @@ func (c *Crawler) enqueueCandidate(rawURL, method string, depth int, source Disc
 		return
 	}
 	if IsCrawlerTrap(rawURL) {
+		c.recordEndpoint(rawURL, method, source, confidence, depth, "discovered; excluded by structural URL limit", tmpl)
 		if c.emit != nil {
 			_ = c.emit("url_skipped", fmt.Sprintf("bounded by crawler trap heuristic: %s", rawURL), map[string]interface{}{
 				"url":    rawURL,
@@ -773,11 +860,17 @@ func (c *Crawler) enqueueCandidate(rawURL, method string, depth int, source Disc
 	// Endpoints discovered beyond the configured depth are still recorded for
 	// reporting, but we do not crawl them further to respect MaxDepth.
 	if budget.MaxDepth > 0 && depth > budget.MaxDepth {
+		c.mu.Lock()
+		delete(c.seen, key)
+		c.mu.Unlock()
 		return
 	}
 	// Low confidence candidates (< 0.50) or low-confidence SPA guesses are recorded for reporting
 	// but not actively fetched to prevent crawling arbitrary noise.
 	if confidence < 0.50 || (source == SourceSPARoute && confidence < 0.65) {
+		c.mu.Lock()
+		delete(c.seen, key)
+		c.mu.Unlock()
 		return
 	}
 	item := queue.Item{
@@ -871,13 +964,7 @@ func (c *Crawler) recordEndpoint(rawURL, method string, source DiscoverySource, 
 		return
 	}
 
-	isWriteMethod := method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions
-	// For non-seeds, GET/HEAD/OPTIONS are saved only after successful visit (non-nil tmpl).
-	// Write methods (POST, PUT, PATCH, DELETE) and AST/JS discovered endpoints are valid attack surface
-	// and must be recorded even before active replay so parameter discovery and vuln modules can test them.
-	if tmpl == nil && !isSeed && !isWriteMethod {
-		return
-	}
+	// Discovery is retained even when depth, confidence or budget prevents a visit.
 
 	ep := DiscoveredEndpoint{
 		URL: rawURL, Method: method, NormalizedURL: norm, Source: source,
@@ -1161,7 +1248,7 @@ func (c *Crawler) flushEndpointEvents() error {
 func (c *Crawler) budgetExceeded(budget Budget) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if budget.MaxPages > 0 && c.pagesVisited >= budget.MaxPages {
+	if budget.MaxPages > 0 && c.requestsMade >= budget.MaxPages {
 		return true
 	}
 	if budget.RequestBudget > 0 && c.requestsMade >= budget.RequestBudget {
@@ -1173,9 +1260,27 @@ func (c *Crawler) budgetExceeded(budget Budget) bool {
 	return false
 }
 
+func (c *Crawler) stopReason(budget Budget) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if budget.MaxPages > 0 && c.requestsMade >= budget.MaxPages {
+		return "max_pages_reached"
+	}
+	if budget.RequestBudget > 0 && c.requestsMade >= budget.RequestBudget {
+		return "crawler_request_budget_reached"
+	}
+	if budget.TimeBudget > 0 && time.Since(c.startedAt) >= budget.TimeBudget {
+		return "time_budget_reached"
+	}
+	return "worker_or_context_stopped"
+}
+
 func (c *Crawler) reserveRequest(budget Budget) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if budget.MaxPages > 0 && c.requestsMade >= budget.MaxPages {
+		return false
+	}
 	if budget.RequestBudget > 0 && c.requestsMade >= budget.RequestBudget {
 		return false
 	}
@@ -1184,6 +1289,10 @@ func (c *Crawler) reserveRequest(budget Budget) bool {
 	}
 	c.requestsMade++
 	return true
+}
+
+func usableApplicationSource(source DiscoverySource) bool {
+	return source != SourceRobots && source != SourceSitemap && source != SourceScript && source != SourceAPIDoc
 }
 
 func (c *Crawler) Stats() (pages, requests, discovered int) {
@@ -1211,6 +1320,18 @@ func (c *Crawler) RuntimeCoverage() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.runtimeFound
+}
+
+func (c *Crawler) browserAttemptCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.browserAttempts
+}
+
+func (c *Crawler) browserRecoveryCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.browserRecovered
 }
 
 func runtimeDiscoverySource(source DiscoverySource) bool {
