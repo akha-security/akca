@@ -18,8 +18,8 @@ import (
 )
 
 func TestVersionIsStableReleaseString(t *testing.T) {
-	if version != "0.2.2" {
-		t.Fatalf("version=%q, want 0.2.2", version)
+	if version != "0.2.3" {
+		t.Fatalf("version=%q, want 0.2.3", version)
 	}
 }
 
@@ -48,7 +48,7 @@ func TestUsageHelpAndVersionPrintBrandBanner(t *testing.T) {
 			if !strings.Contains(combined, akcaASCII[0]) {
 				t.Fatalf("ASCII wordmark missing for %s: %q", tc.name, combined)
 			}
-			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.2") {
+			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.3") {
 				t.Fatalf("brand/version line missing for %s: %q", tc.name, combined)
 			}
 		})
@@ -150,11 +150,11 @@ func TestFindingProofExplainsTimingState(t *testing.T) {
 
 func TestSessionOASTStatus(t *testing.T) {
 	status, _ := sessionOASTStatus(map[string]interface{}{"oast_enabled": true})
-	if status != "READY" {
+	if status != "Ready" {
 		t.Fatalf("enabled OAST status = %q", status)
 	}
 	status, _ = sessionOASTStatus(map[string]interface{}{"oast_enabled": false})
-	if status != "OFF" {
+	if status != "Disabled" {
 		t.Fatalf("disabled OAST status = %q", status)
 	}
 }
@@ -204,8 +204,8 @@ func TestScanSessionPanelIsCompactAndUsesStringTargets(t *testing.T) {
 		"oast_enabled":           true,
 	})
 	for _, want := range []string{
-		"http://example.test", "FullBugBounty", "50 req/s",
-		"1000 URLs", "1000 crawler requests", "1000 endpoints", "Payloads", "unlimited", "OAST", "READY", "RUNNING",
+		"http://example.test", "FullBugBounty", "50 requests/sec",
+		"Up to 1,000 URLs", "up to 1,000 endpoints", "Coverage", "Traffic", "OAST", "Ready", "Active",
 	} {
 		if !strings.Contains(panel, want) {
 			t.Fatalf("session panel omitted %q: %q", want, panel)
@@ -215,7 +215,7 @@ func TestScanSessionPanelIsCompactAndUsesStringTargets(t *testing.T) {
 		t.Fatalf("legacy duplicate OAST banner leaked into session panel: %q", panel)
 	}
 	lines := strings.Split(strings.TrimSuffix(panel, "\n\n"), "\n")
-	if len(lines) != 8 {
+	if len(lines) != 7 {
 		t.Fatalf("session panel should remain compact, lines=%d: %q", len(lines), panel)
 	}
 	for _, line := range lines {
@@ -246,10 +246,8 @@ func TestUnlimitedDiscoveryLimitsAreNotDisplayedAsZero(t *testing.T) {
 	}
 	panel := scanSessionPanel(payload)
 	line := scanSessionLine(payload)
-	for _, want := range []string{"unlimited URLs", "unlimited endpoints", "unlimited crawler requests"} {
-		if !strings.Contains(panel, want) {
-			t.Fatalf("unlimited session panel omitted %q: %q", want, panel)
-		}
+	if want := "No URL or endpoint limit"; !strings.Contains(panel, want) {
+		t.Fatalf("unlimited session panel omitted %q: %q", want, panel)
 	}
 	for _, want := range []string{"urls=unlimited", "endpoints=unlimited", "crawler_requests=unlimited"} {
 		if !strings.Contains(line, want) {
@@ -259,7 +257,7 @@ func TestUnlimitedDiscoveryLimitsAreNotDisplayedAsZero(t *testing.T) {
 	cw := NewConsoleWriter()
 	cw.urlsCrawled = 12
 	cw.urlLimit = 0
-	if got := cw.runningStatusPanel(); !strings.Contains(got, "12 / unlimited URLs") {
+	if got := cw.runningStatusPanel(); !strings.Contains(got, "12 URLs discovered") {
 		t.Fatalf("running panel displayed zero as a crawl limit: %q", got)
 	}
 }
@@ -278,7 +276,7 @@ func TestRunningStatusPanelShowsScanHealth(t *testing.T) {
 	cw.memoryLimitMB = 12_284
 	cw.eta = "00:02:10"
 	panel := cw.runningStatusPanel()
-	for _, want := range []string{"LIVE SCAN", "RUNNING", "http://example.test/", "Full Scan", "42.5 req/s", "peak: 52.0", "Ready (Active)", "50%", "00:02:10", "318 / 1000 URLs", "620 / 12284 MB"} {
+	for _, want := range []string{"LIVE SCAN", "Running", "http://example.test/", "Full Scan", "42.5 requests/sec", "peak 52.0", "Ready and active", "50%", "00:02:10", "318 / 1,000 URLs", "620 MB / 12.0 GB"} {
 		if !strings.Contains(panel, want) {
 			t.Fatalf("running panel omitted %q: %q", want, panel)
 		}
@@ -404,8 +402,11 @@ func TestRunningStatusUsesPortableSingleLine(t *testing.T) {
 
 	cw.writeRunningStatus()
 	got := output.String()
-	if !strings.Contains(got, "RUN") || !strings.Contains(got, "0/1000 URLs") {
+	if !strings.Contains(got, "SCAN") || !strings.Contains(got, "0 / 1,000 URLs") {
 		t.Fatalf("single-line scan status was not rendered: %q", got)
+	}
+	if strings.Contains(got, "0.0 requests/sec") || strings.Contains(got, "0.0 req/s") {
+		t.Fatalf("idle request-rate noise leaked into scan status: %q", got)
 	}
 	if strings.Contains(got, "\033[999;1H") || strings.Contains(got, "\n") {
 		t.Fatalf("status line used a fixed region or multiple lines: %q", got)

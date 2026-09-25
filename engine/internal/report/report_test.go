@@ -129,6 +129,41 @@ func TestExportFormatsSampleData(t *testing.T) {
 	}
 }
 
+func TestHTMLUsesComprehensiveScannerLayout(t *testing.T) {
+	db, scanID := setupReportDB(t, 0)
+	defer db.Close()
+	evidence := `{
+	  "module":"sqli","signal":"database_error","proof_satisfied":true,
+	  "verification":{"proof_type":"content_evidence","proof_policy_version":"3.0","proof_satisfied":true},
+	  "request":{"method":"GET","url":"https://example.com/item?id=1","raw":"GET /item?id=1 HTTP/1.1\r\nHost: example.com\r\n\r\n"},
+	  "response":{"status_code":200,"raw":"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nSQLSTATE[42000]"}
+	}`
+	if _, err := db.SaveFinding(scanID, "SQL Injection", "high", "sqli", "Database error proof.", "https://example.com/item?id=1", "id", 0.95, evidence); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveTimelineEvent(scanID, "coverage_gap", "Browser dependency blocked", `{"phase":"browser","reason":"resource_policy"}`); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	exporter := NewExporter(NewBuilder(evidencestore.New(db), db), nil)
+	if err := exporter.Export(&buf, Options{ScanID: scanID, Template: TemplateInternal, Format: FormatHTML}); err != nil {
+		t.Fatal(err)
+	}
+	html := buf.String()
+	for _, want := range []string{
+		"AKCA threat assessment", "Scan details", "Severity distribution", "Vulnerability statistics",
+		"Vulnerability Description", "Recommendation", `data-evidence-tab="request"`,
+		`data-evidence-tab="response"`, "Coverage", "Print / PDF",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("comprehensive scanner layout omitted %q", want)
+		}
+	}
+	if strings.Contains(html, "fonts.googleapis.com") || strings.Contains(html, "%!") {
+		t.Fatalf("HTML report is not self-contained or contains formatting errors")
+	}
+}
+
 func TestPathDiscoverySectionUsesFuzzResults(t *testing.T) {
 	db, scanID := setupReportDB(t, 0)
 	defer db.Close()

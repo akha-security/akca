@@ -67,20 +67,34 @@ func htmlDocStart(meta Document) string {
 	lowCount := meta.Metrics.BySeverity["low"]
 	infoCount := meta.Metrics.BySeverity["info"]
 
-	riskLabel := "Secure / Low Risk"
+	riskLabel := "Safe"
 	riskClass := "risk-info"
+	riskLevel := 0
+	riskDescription := "No reportable vulnerabilities were identified. Review coverage diagnostics before treating this result as assurance."
 	if critCount > 0 {
 		riskLabel = "Critical Risk"
 		riskClass = "risk-critical"
+		riskLevel = 4
+		riskDescription = "Critical-severity findings require immediate investigation and remediation. Exploitation may lead to full application or data compromise."
 	} else if highCount > 0 {
 		riskLabel = "High Risk"
 		riskClass = "risk-high"
+		riskLevel = 3
+		riskDescription = "High-severity findings can materially affect confidentiality, integrity or availability and should be prioritized."
 	} else if medCount > 0 {
 		riskLabel = "Medium Risk"
 		riskClass = "risk-medium"
+		riskLevel = 2
+		riskDescription = "Medium-severity findings should be investigated and scheduled for remediation before they can be chained or escalated."
 	} else if lowCount > 0 {
 		riskLabel = "Low Risk"
 		riskClass = "risk-low"
+		riskLevel = 1
+		riskDescription = "Low-severity findings have limited direct impact but may expose useful information or weaken defense in depth."
+	}
+	partialBanner := ""
+	if meta.Partial {
+		partialBanner = `<div class="coverage-warning"><strong>Partial coverage</strong><span>This scan contains explicit coverage gaps. Review Coverage &amp; Readiness before relying on the absence of findings.</span></div>`
 	}
 
 	targetsStr := "Unknown"
@@ -104,9 +118,6 @@ func htmlDocStart(meta Document) string {
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>%s</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root {
 	/* Light Mode Variables (Default) */
@@ -211,7 +222,7 @@ body {
 	margin: 0;
 	background: var(--bg);
 	color: var(--ink);
-	font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+	font-family: 'Segoe UI', Inter, -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
 	font-size: 14px;
 	line-height: 1.6;
 	-webkit-font-smoothing: antialiased;
@@ -476,6 +487,109 @@ body {
 .empty-state span { color: var(--muted); font-size: 0.85rem; }
 
 /* Grid for Metadata, Risk, and Breakdown */
+.scan-overview {
+	display: grid;
+	grid-template-columns: minmax(0, 1.15fr) minmax(380px, 0.85fr);
+	gap: 1.25rem;
+	margin-bottom: 1.25rem;
+}
+.threat-panel, .scan-detail-panel, .severity-panel {
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	box-shadow: var(--shadow-sm);
+}
+.threat-panel {
+	display: grid;
+	grid-template-columns: 190px 1fr;
+	align-items: center;
+	gap: 1.6rem;
+	padding: 1.65rem;
+}
+.threat-orbit {
+	width: 160px;
+	height: 160px;
+	border-radius: 50%%;
+	display: grid;
+	place-items: center;
+	position: relative;
+	background: conic-gradient(var(--risk-color) 0 72%%, var(--panel-soft) 72%% 100%%);
+}
+.threat-orbit::before {
+	content: '';
+	position: absolute;
+	inset: 13px;
+	border-radius: 50%%;
+	background: var(--card);
+	border: 1px solid var(--line);
+}
+.threat-orbit-content { position: relative; text-align: center; z-index: 1; }
+.threat-orbit-content strong { display: block; color: var(--risk-color); font-size: 2.8rem; line-height: 1; }
+.threat-orbit-content span { display: block; margin-top: 0.35rem; color: var(--muted); font-size: 0.7rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; }
+.threat-copy h2 { margin: 0 0 0.65rem; color: var(--ink-heading); font-size: 1.45rem; }
+.threat-copy p { margin: 0; color: var(--muted); }
+.threat-copy .level-line { color: var(--risk-color); font-size: 0.74rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.09em; }
+.risk-critical { --risk-color: var(--crit); }
+.risk-high { --risk-color: var(--high); }
+.risk-medium { --risk-color: var(--med); }
+.risk-low { --risk-color: var(--low); }
+.risk-info { --risk-color: var(--info); }
+.panel-title {
+	padding: 0.85rem 1.15rem;
+	background: var(--panel);
+	border-bottom: 1px solid var(--line);
+	border-radius: var(--radius) var(--radius) 0 0;
+	font-size: 0.78rem;
+	font-weight: 800;
+	text-transform: uppercase;
+	letter-spacing: 0.07em;
+	color: var(--ink-heading);
+}
+.scan-detail-panel .meta-table { margin: 0.75rem 1.1rem 1rem; width: calc(100%% - 2.2rem); }
+.severity-dashboard {
+	display: grid;
+	grid-template-columns: 1.15fr 0.85fr;
+	gap: 1.25rem;
+	margin-bottom: 2rem;
+}
+.severity-panel { padding: 1.3rem; }
+.severity-circles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.8rem; align-items: start; }
+.severity-circle { text-align: center; color: var(--muted); font-size: 0.7rem; font-weight: 800; text-transform: uppercase; }
+.severity-circle strong {
+	display: grid;
+	place-items: center;
+	width: 66px;
+	height: 66px;
+	margin: 0 auto 0.45rem;
+	border-radius: 50%%;
+	font-size: 1.45rem;
+	background: var(--panel);
+	border: 4px solid currentColor;
+}
+.severity-circle.critical { color: var(--crit); }
+.severity-circle.high { color: var(--high); }
+.severity-circle.medium { color: var(--med); }
+.severity-circle.low { color: var(--low); }
+.severity-circle.info { color: var(--info); }
+.severity-summary { width: 100%%; border-collapse: collapse; }
+.severity-summary th, .severity-summary td { padding: 0.55rem 0.65rem; border-bottom: 1px solid var(--line); text-align: left; }
+.severity-summary th { color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.severity-summary td:last-child, .severity-summary th:last-child { text-align: right; }
+.severity-dot { display: inline-block; width: 9px; height: 9px; margin-right: 0.45rem; border-radius: 50%%; background: currentColor; }
+.coverage-warning { display: flex; gap: 0.75rem; align-items: center; margin: 0 0 1.25rem; padding: 0.85rem 1rem; color: var(--med-ink); background: var(--med-bg); border: 1px solid var(--med-border); border-radius: var(--radius); }
+.coverage-warning strong { white-space: nowrap; text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.06em; }
+.coverage-warning span { font-size: 0.82rem; }
+@media (max-width: 900px) {
+	.scan-overview, .severity-dashboard { grid-template-columns: 1fr; }
+	.threat-panel { grid-template-columns: 140px 1fr; }
+	.threat-orbit { width: 125px; height: 125px; }
+}
+@media (max-width: 620px) {
+	.threat-panel { grid-template-columns: 1fr; text-align: center; }
+	.threat-orbit { margin: 0 auto; }
+	.severity-circles { grid-template-columns: repeat(3, 1fr); }
+}
+
 .report-grid {
 	display: grid;
 	grid-template-columns: 1.3fr 1fr 1.7fr;
@@ -731,6 +845,67 @@ section.report-section > h2 {
 .finding.sev-medium { border-left: 5px solid var(--med); }
 .finding.sev-low { border-left: 5px solid var(--low); }
 .finding.sev-info { border-left: 5px solid var(--info); }
+.finding-header {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 1rem;
+	margin: -1.75rem -1.75rem 1.25rem;
+	padding: 1.15rem 1.35rem;
+	background: var(--panel);
+	border-bottom: 1px solid var(--line);
+	border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
+}
+.finding-title-row { display: flex; align-items: flex-start; gap: 0.8rem; min-width: 0; }
+.severity-icon {
+	display: grid;
+	place-items: center;
+	flex: 0 0 32px;
+	width: 32px;
+	height: 32px;
+	border-radius: 50%%;
+	color: #fff;
+	font-size: 0.8rem;
+	font-weight: 900;
+	background: var(--info);
+}
+.sev-critical .severity-icon { background: var(--crit); }
+.sev-high .severity-icon { background: var(--high); }
+.sev-medium .severity-icon { background: var(--med); }
+.sev-low .severity-icon { background: var(--low); }
+.finding-header h3 { margin: 0 0 0.25rem; }
+.finding-header-meta { color: var(--muted); font-size: 0.77rem; }
+.finding-endpoint {
+	display: flex;
+	align-items: center;
+	gap: 0.7rem;
+	margin-bottom: 1.2rem;
+	padding: 0.7rem 0.85rem;
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: 7px;
+	min-width: 0;
+}
+.finding-endpoint .method { flex: 0 0 auto; padding: 0.18rem 0.42rem; color: #fff; background: var(--accent); border-radius: 4px; font: 700 0.68rem 'JetBrains Mono', Consolas, monospace; }
+.finding-endpoint code { overflow-wrap: anywhere; }
+.finding-section-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.finding-section { padding: 1rem; background: var(--panel-soft); border: 1px solid var(--line); border-radius: 8px; }
+.finding-section h4 { margin-top: 0; }
+.finding-section.recommendation { margin-top: 1rem; border-left: 4px solid var(--low); }
+.classification-strip { display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0.85rem 0 1rem; }
+.classification-strip span { padding: 0.25rem 0.5rem; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: var(--card); font-size: 0.72rem; }
+.traffic-detail { margin-top: 1rem; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.traffic-tabs { display: flex; background: var(--panel); border-bottom: 1px solid var(--line); }
+.traffic-tab { padding: 0.7rem 1rem; border: 0; border-right: 1px solid var(--line); background: transparent; color: var(--muted); font: 700 0.78rem inherit; cursor: pointer; }
+.traffic-tab.active { color: var(--accent); background: var(--card); box-shadow: inset 0 -2px 0 var(--accent); }
+.traffic-tab-panel { display: none; }
+.traffic-tab-panel.active { display: block; }
+.traffic-tab-panel .code-header { border-radius: 0; border: 0; border-bottom: 1px solid var(--http-border); }
+.traffic-tab-panel pre.http { margin: 0; border: 0; border-radius: 0; max-height: 520px; }
+@media (max-width: 720px) {
+	.finding-section-grid { grid-template-columns: 1fr; }
+	.finding-header { flex-direction: column; }
+}
 
 .finding h3 {
 	margin: 0 0 0.6rem;
@@ -991,6 +1166,8 @@ ul.scope li {
 		color: #000000 !important;
 		border: 1px solid #cbd5e1 !important;
 	}
+	.traffic-tabs { display: none !important; }
+	.traffic-tab-panel { display: block !important; break-inside: avoid; }
 	.vuln-hit { background: #fef08a !important; color: #000000 !important; }
 }
 </style></head><body><div class="wrap">
@@ -1018,72 +1195,75 @@ ul.scope li {
   </div>
 </header>
 %s
-<div class="report-grid">
-  <div class="card meta-card">
-    <h3>Scan Information</h3>
+<div class="scan-overview">
+  <section class="threat-panel %s" aria-label="Overall threat level">
+    <div class="threat-orbit"><div class="threat-orbit-content"><strong>%d</strong><span>Threat level</span></div></div>
+    <div class="threat-copy"><span class="level-line">AKCA threat assessment</span><h2>%s</h2><p>%s</p></div>
+  </section>
+  <section class="scan-detail-panel">
+    <div class="panel-title">Scan details</div>
     <table class="meta-table">
       <tr><td>Target:</td><td><strong>%s</strong></td></tr>
+      <tr><td>Report type:</td><td>%s</td></tr>
       <tr><td>Scan ID:</td><td><code>%s</code></td></tr>
       <tr><td>Started:</td><td>%s</td></tr>
       <tr><td>Finished:</td><td>%s</td></tr>
       <tr><td>Duration:</td><td><strong>%s</strong></td></tr>
-      <tr><td>Requests / Probes:</td><td><strong>%d sent</strong></td></tr>
+      <tr><td>Requests:</td><td><strong>%d</strong></td></tr>
+      <tr><td>Discovered endpoints:</td><td><strong>%d</strong></td></tr>
       <tr><td>Report Generated:</td><td>%s</td></tr>
       <tr><td>Scope:</td><td>%d targets</td></tr>
     </table>
-  </div>
-  <div class="card risk-card %s">
-    <h3>Overall Risk Level</h3>
-    <div class="risk-gauge">%s</div>
-    <p class="risk-desc">Highest severity vulnerability determines the overall target risk level.</p>
-  </div>
-  <div class="card breakdown-card">
-    <h3>Vulnerabilities Found</h3>
-    <div class="breakdown-grid">
-      <div class="b-box crit">
-        <span class="cnt">%d</span>
-        <span class="lbl">Critical</span>
-      </div>
-      <div class="b-box high">
-        <span class="cnt">%d</span>
-        <span class="lbl">High</span>
-      </div>
-      <div class="b-box med">
-        <span class="cnt">%d</span>
-        <span class="lbl">Medium</span>
-      </div>
-      <div class="b-box low">
-        <span class="cnt">%d</span>
-        <span class="lbl">Low</span>
-      </div>
-      <div class="b-box info">
-        <span class="cnt">%d</span>
-        <span class="lbl">Info</span>
-      </div>
-    </div>
-  </div>
-</div>`,
+  </section>
+</div>
+<div class="severity-dashboard">
+  <section class="severity-panel"><div class="panel-title">Severity distribution</div><div class="severity-circles">
+    <div class="severity-circle critical"><strong>%d</strong><span>Critical</span></div>
+    <div class="severity-circle high"><strong>%d</strong><span>High</span></div>
+    <div class="severity-circle medium"><strong>%d</strong><span>Medium</span></div>
+    <div class="severity-circle low"><strong>%d</strong><span>Low</span></div>
+    <div class="severity-circle info"><strong>%d</strong><span>Info</span></div>
+  </div></section>
+  <section class="severity-panel"><div class="panel-title">Vulnerability statistics</div><table class="severity-summary"><thead><tr><th>Severity</th><th>Instances</th></tr></thead><tbody>
+    <tr><td class="severity-circle critical"><span class="severity-dot"></span>Critical</td><td>%d</td></tr>
+    <tr><td class="severity-circle high"><span class="severity-dot"></span>High</td><td>%d</td></tr>
+    <tr><td class="severity-circle medium"><span class="severity-dot"></span>Medium</td><td>%d</td></tr>
+    <tr><td class="severity-circle low"><span class="severity-dot"></span>Low</td><td>%d</td></tr>
+    <tr><td class="severity-circle info"><span class="severity-dot"></span>Informational</td><td>%d</td></tr>
+  </tbody></table></section>
+</div>
+%s`,
 		template.HTMLEscapeString(meta.Title),
 		template.HTMLEscapeString(ProductName),
 		template.HTMLEscapeString(meta.Title),
 		template.HTMLEscapeString(meta.Summary),
 		meta.Metrics.TotalFindings,
-		vulnerabilityOverviewHTML(meta.Metrics),
+		partialBanner,
+		riskClass,
+		riskLevel,
+		template.HTMLEscapeString(riskLabel),
+		template.HTMLEscapeString(riskDescription),
 		template.HTMLEscapeString(targetsStr),
+		template.HTMLEscapeString(string(meta.Template)),
 		template.HTMLEscapeString(meta.Scope.ScanID),
 		template.HTMLEscapeString(startedStr),
 		template.HTMLEscapeString(finishedStr),
 		template.HTMLEscapeString(durationStr),
 		totalReqs,
+		meta.Metrics.EndpointCount,
 		meta.GeneratedAt.Format("2006-01-02 15:04 UTC"),
 		len(meta.Scope.Targets),
-		riskClass,
-		riskLabel,
 		critCount,
 		highCount,
 		medCount,
 		lowCount,
 		infoCount,
+		critCount,
+		highCount,
+		medCount,
+		lowCount,
+		infoCount,
+		vulnerabilityOverviewHTML(meta.Metrics),
 	)
 }
 
@@ -1166,6 +1346,17 @@ function applyFilters() {
 function toggleAllDetails(expand) {
     document.querySelectorAll('.finding details').forEach(d => {
         d.open = expand;
+    });
+}
+
+function selectEvidenceTab(button, panelName) {
+    const detail = button ? button.closest('.traffic-detail') : null;
+    if (!detail) return;
+    detail.querySelectorAll('.traffic-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.getAttribute('data-evidence-tab') === panelName);
+    });
+    detail.querySelectorAll('.traffic-tab-panel').forEach(panel => {
+        panel.classList.toggle('active', panel.getAttribute('data-evidence-panel') === panelName);
     });
 }
 
@@ -1293,44 +1484,59 @@ func findingHTML(f FindingEntry, kind TemplateKind) string {
 	b.WriteString(`<article class="finding sev-` + template.HTMLEscapeString(sevKey) +
 		`" data-severity="` + template.HTMLEscapeString(sevKey) +
 		`" data-class="` + template.HTMLEscapeString(f.VulnClass) + `">`)
-	b.WriteString("<h3>" + template.HTMLEscapeString(f.Title) + "</h3>")
-	b.WriteString(`<p class="meta-line"><span class="badge badge-` + template.HTMLEscapeString(sevKey) + `">` +
-		template.HTMLEscapeString(f.Severity) + `</span>`)
-	b.WriteString(`Confidence: <strong>` + template.HTMLEscapeString(f.Confidence) +
-		`</strong> · Class: <code>` + template.HTMLEscapeString(f.VulnClass) + `</code></p>`)
-	if len(f.CWE) > 0 || len(f.OWASPTop102025) > 0 {
-		b.WriteString(`<p class="meta-line">`)
-		if len(f.CWE) > 0 {
-			b.WriteString(`CWE: <code>` + template.HTMLEscapeString(strings.Join(f.CWE, ", ")) + `</code>`)
+	b.WriteString(`<div class="finding-header"><div class="finding-title-row"><span class="severity-icon">!</span><div><h3>` +
+		template.HTMLEscapeString(f.Title) + `</h3><div class="finding-header-meta">` +
+		template.HTMLEscapeString(f.VulnClass) + ` · Finding #` + fmt.Sprintf("%d", f.ID) +
+		`</div></div></div><div><span class="badge badge-` + template.HTMLEscapeString(sevKey) + `">` +
+		template.HTMLEscapeString(f.Severity) + `</span><span class="badge">` +
+		template.HTMLEscapeString(f.Confidence) + `</span></div></div>`)
+	if f.EndpointURL != "" || f.HTTPEvidence.URL != "" {
+		method := f.HTTPEvidence.Method
+		if method == "" {
+			method = "HTTP"
 		}
-		if len(f.CWE) > 0 && len(f.OWASPTop102025) > 0 {
-			b.WriteString(` · `)
+		endpoint := f.EndpointURL
+		if endpoint == "" {
+			endpoint = f.HTTPEvidence.URL
+		}
+		b.WriteString(`<div class="finding-endpoint"><span class="method">` + template.HTMLEscapeString(method) +
+			`</span><code>` + template.HTMLEscapeString(endpoint) + `</code></div>`)
+	}
+	if len(f.CWE) > 0 || len(f.OWASPTop102025) > 0 {
+		b.WriteString(`<div class="classification-strip">`)
+		if len(f.CWE) > 0 {
+			b.WriteString(`<span>CWE: ` + template.HTMLEscapeString(strings.Join(f.CWE, ", ")) + `</span>`)
 		}
 		if len(f.OWASPTop102025) > 0 {
-			b.WriteString(`OWASP: <code>` + template.HTMLEscapeString(strings.Join(f.OWASPTop102025, ", ")) + `</code>`)
+			b.WriteString(`<span>OWASP: ` + template.HTMLEscapeString(strings.Join(f.OWASPTop102025, ", ")) + `</span>`)
 		}
-		b.WriteString(`</p>`)
+		b.WriteString(`</div>`)
 	}
 
+	b.WriteString(`<div class="finding-section-grid">`)
 	switch kind {
 	case TemplateHackerOne:
-		b.WriteString("<h4>Weakness</h4><p>" + template.HTMLEscapeString(f.Description) + "</p>")
-		b.WriteString("<h4>Steps to Reproduce</h4><ol>")
+		b.WriteString(`<section class="finding-section"><h4>Weakness</h4><p>` + template.HTMLEscapeString(f.Description) + `</p></section>`)
+		b.WriteString(`<section class="finding-section"><h4>Steps to Reproduce</h4><ol>`)
 		for _, s := range f.ReproductionSteps {
 			b.WriteString("<li>" + template.HTMLEscapeString(s) + "</li>")
 		}
-		b.WriteString("</ol>")
+		b.WriteString("</ol></section>")
 	case TemplateBugcrowd:
-		b.WriteString("<h4>Description</h4><p>" + template.HTMLEscapeString(f.Description) + "</p>")
-		b.WriteString("<h4>Proof of Concept</h4>")
+		b.WriteString(`<section class="finding-section"><h4>Description</h4><p>` + template.HTMLEscapeString(f.Description) + `</p></section>`)
+		b.WriteString(`<section class="finding-section"><h4>Proof of Concept</h4><p>See the affected instance and HTTP evidence below.</p><h4>Impact</h4><p>` + template.HTMLEscapeString(f.Impact) + `</p></section>`)
 	default:
-		b.WriteString("<h4>Description</h4><p>" + template.HTMLEscapeString(f.Description) + "</p>")
+		b.WriteString(`<section class="finding-section"><h4>Vulnerability Description</h4><p>` + template.HTMLEscapeString(f.Description) + `</p></section>`)
+		b.WriteString(`<section class="finding-section"><h4>Impact</h4><p>` + template.HTMLEscapeString(f.Impact) + `</p></section>`)
 	}
-
+	b.WriteString(`</div>`)
 	b.WriteString(findingMetaHTML(f))
-	b.WriteString("<h4>Impact</h4><p>" + template.HTMLEscapeString(f.Impact) + "</p>")
+	if kind == TemplateHackerOne {
+		b.WriteString("<h4>Impact</h4><p>" + template.HTMLEscapeString(f.Impact) + "</p>")
+	}
 	if kind != TemplateHackerOne {
-		b.WriteString("<h4>Remediation</h4><p>" + template.HTMLEscapeString(f.Remediation) + "</p>")
+		b.WriteString(`<section class="finding-section recommendation"><h4>Recommendation</h4><p>` +
+			template.HTMLEscapeString(f.Remediation) + `</p></section>`)
 	}
 	b.WriteString(httpEvidenceHTML(f.HTTPEvidence))
 	b.WriteString("<p class=\"meta-line\"><em>" + template.HTMLEscapeString(f.ConfidenceExplain) + "</em></p>")
@@ -1409,16 +1615,50 @@ func httpEvidenceHTML(ev HTTPEvidence) string {
 		b.WriteString(`<p><strong>DOM snapshot</strong>: <code>` +
 			template.HTMLEscapeString(ev.DOMSnapshotRef) + `</code></p>`)
 	}
-	if ev.RawRequest != "" {
-		b.WriteString(`<details><summary>▼ Show Raw HTTP Request</summary><div class="code-header"><span>HTTP Request</span><button type="button" class="copy-btn" onclick="copyToClipboard(this)">📋 Copy Request</button></div><pre class="http">` +
-			highlightEvidence(template.HTMLEscapeString(ev.RawRequest), []string{ev.Payload}) + `</pre></details>`)
+	responseEvidence := ev.RawResponse
+	responseLabel := "HTTP Response"
+	if responseEvidence == "" {
+		responseEvidence = ev.RespBody
+		responseLabel = "Response Evidence"
 	}
-	if ev.RawResponse != "" {
-		b.WriteString(`<details><summary>▼ Show Raw HTTP Response (proof highlighted)</summary><div class="code-header"><span>HTTP Response</span><button type="button" class="copy-btn" onclick="copyToClipboard(this)">📋 Copy Response</button></div><pre class="http">` +
-			highlightEvidence(template.HTMLEscapeString(ev.RawResponse), markers) + `</pre></details>`)
-	} else if ev.RespBody != "" {
-		b.WriteString(`<details open><summary>▼ Show Response Evidence (finding highlighted)</summary><div class="code-header"><span>Response excerpt</span><button type="button" class="copy-btn" onclick="copyToClipboard(this)">📋 Copy Response</button></div><pre class="http">` +
-			highlightEvidence(template.HTMLEscapeString(ev.RespBody), markers) + `</pre></details>`)
+	if ev.RawRequest != "" || responseEvidence != "" {
+		defaultTab := "response"
+		if ev.RawRequest != "" {
+			defaultTab = "request"
+		}
+		b.WriteString(`<div class="traffic-detail"><div class="traffic-tabs">`)
+		if ev.RawRequest != "" {
+			active := ""
+			if defaultTab == "request" {
+				active = " active"
+			}
+			b.WriteString(`<button type="button" class="traffic-tab` + active + `" data-evidence-tab="request" onclick="selectEvidenceTab(this,'request')">Request</button>`)
+		}
+		if responseEvidence != "" {
+			active := ""
+			if defaultTab == "response" {
+				active = " active"
+			}
+			b.WriteString(`<button type="button" class="traffic-tab` + active + `" data-evidence-tab="response" onclick="selectEvidenceTab(this,'response')">Response</button>`)
+		}
+		b.WriteString(`</div>`)
+		if ev.RawRequest != "" {
+			active := ""
+			if defaultTab == "request" {
+				active = " active"
+			}
+			b.WriteString(`<div class="traffic-tab-panel` + active + `" data-evidence-panel="request"><div class="code-header"><span>HTTP Request</span><button type="button" class="copy-btn" onclick="copyToClipboard(this)">📋 Copy Request</button></div><pre class="http">` +
+				highlightEvidence(template.HTMLEscapeString(ev.RawRequest), []string{ev.Payload}) + `</pre></div>`)
+		}
+		if responseEvidence != "" {
+			active := ""
+			if defaultTab == "response" {
+				active = " active"
+			}
+			b.WriteString(`<div class="traffic-tab-panel` + active + `" data-evidence-panel="response"><div class="code-header"><span>` + responseLabel + ` (proof highlighted)</span><button type="button" class="copy-btn" onclick="copyToClipboard(this)">📋 Copy Response</button></div><pre class="http">` +
+				highlightEvidence(template.HTMLEscapeString(responseEvidence), markers) + `</pre></div>`)
+		}
+		b.WriteString(`</div>`)
 	}
 	if ev.CurlCommand != "" {
 		b.WriteString(`<details><summary>▼ Show cURL Command (Reproduce)</summary><div class="code-header"><span>cURL Reproduction Command</span><button type="button" class="copy-btn" onclick="copyToClipboard(this)">📋 Copy cURL</button></div><pre class="http">` + template.HTMLEscapeString(ev.CurlCommand) + `</pre></details>`)

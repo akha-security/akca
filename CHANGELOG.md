@@ -5,6 +5,28 @@ All notable changes to AKCA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [v0.2.3] - 2026-09-25
+
+### Added
+
+- Add a redesigned HTML security report with an executive risk overview, severity distribution, scan metadata and structured vulnerability statistics.
+- Add dedicated finding sections for affected endpoints, impact, classification and remediation guidance.
+- Add tabbed HTTP request and response evidence while retaining proof highlighting, cURL reproduction and clipboard controls.
+- Add a prominent partial-coverage warning when scan gaps prevent a clean result from representing complete assurance.
+
+### Changed
+
+- Simplify the scan-session card around target, profile, coverage and traffic policy instead of exposing raw internal budget values.
+- Refine the live progress row with readable URL counts, professional status text and suppression of meaningless zero-rate output.
+- Format large counters and memory limits consistently for terminal readability.
+- Document why comprehensive Full Scans take longer and how to request faster, bounded feedback safely.
+
+### Validation
+
+- Full Go package tests pass with `go test ./... -count=1`.
+- CLI static analysis passes with `go vet ./cmd/akca`.
+- Report regression tests cover the risk dashboard, severity statistics, partial-coverage warning and tabbed HTTP evidence.
+
 ## [v0.2.2] - 2026-09-25
 
 ### Fixed
@@ -227,7 +249,9 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - HTML, JSON, Markdown, CSV and SARIF reporting.
 - CWE and OWASP Top 10:2025 report classification.
 
-[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.3...HEAD
+[v0.2.3]: https://github.com/akha-security/akca/compare/v0.2.2...v0.2.3
+[v0.2.2]: https://github.com/akha-security/akca/compare/v0.2.1...v0.2.2
 [v0.2.1]: https://github.com/akha-security/akca/releases/tag/v0.2.1
 [v0.2.0]: https://github.com/akha-security/akca/releases/tag/v0.2.0
 [v0.1.9]: https://github.com/akha-security/akca/releases/tag/v0.1.9

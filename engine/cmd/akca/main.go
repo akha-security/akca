@@ -745,9 +745,9 @@ func findingProof(signal string, payload map[string]interface{}) string {
 
 func sessionOASTStatus(payload map[string]interface{}) (string, string) {
 	if payloadBool(payload, "oast_enabled") {
-		return "READY", bMint
+		return "Ready", bMint
 	}
-	return "OFF", cGhost
+	return "Disabled", cGhost
 }
 
 func payloadTargets(payload map[string]interface{}) string {
@@ -794,77 +794,58 @@ func scanSessionPanel(payload map[string]interface{}) string {
 	maxPages := payloadInt(payload, "max_pages")
 	subdomainCount := payloadInt(payload, "subdomain_count")
 	maxDepth := payloadInt(payload, "max_depth")
-	memoryLimit := payloadInt(payload, "memory_limit_mb")
-	memorySource := safeTerminalText(fmt.Sprint(payload["memory_limit_source"]))
 	maxEndpoints := payloadInt(payload, "max_endpoints")
-	crawlerBudget := payloadInt(payload, "crawler_request_budget")
 	requestBudget := payloadInt(payload, "request_budget")
-	payloadBudget := safeTerminalText(fmt.Sprint(payload["payload_budget"]))
-	if payloadBudget == "" || payloadBudget == "<nil>" {
-		payloadBudget = "unlimited"
-	}
 	oastStatus, oastColor := sessionOASTStatus(payload)
 	profile := safeTerminalText(fmt.Sprint(payload["scan_profile"]))
 	if profile == "" || profile == "<nil>" {
 		profile = safeTerminalText(fmt.Sprint(payload["scan_intensity"]))
 	}
 	if profile == "" || profile == "<nil>" {
-		profile = "default"
+		profile = "Full Scan"
 	}
 	profile = truncateText(profile, 20)
 
-	// Format discovery breadth as URLs; payload traffic has its own unlimited
-	// default and therefore does not consume this count.
-	pagesStr := ""
-	switch {
-	case maxPages >= 10000:
-		pagesStr = fmt.Sprintf("%.0fK URLs", float64(maxPages)/1000)
-	case maxPages > 0:
-		pagesStr = fmt.Sprintf("%d URLs", maxPages)
-	default:
-		pagesStr = "unlimited URLs"
-	}
-
-	scopeStr := ""
-	if subdomainCount > 1 {
-		scopeStr = fmt.Sprintf("  %s•%s  %s%d subdomains%s", cGhost, rst, cAmber, subdomainCount, rst)
-	} else if maxDepth > 0 {
-		scopeStr = fmt.Sprintf("  %s•%s  %sdepth %d%s", cGhost, rst, cSlate, maxDepth, rst)
-	}
-	totalBudget := "unlimited"
-	if requestBudget > 0 {
-		totalBudget = fmt.Sprintf("%d", requestBudget)
-	}
-	memory := "automatic"
-	if memoryLimit > 0 {
-		mode := "manual"
-		if strings.HasPrefix(memorySource, "automatic_") {
-			mode = "auto"
+	coverage := "No URL or endpoint limit"
+	if maxPages > 0 || maxEndpoints > 0 {
+		parts := make([]string, 0, 2)
+		if maxPages > 0 {
+			parts = append(parts, fmt.Sprintf("up to %s URLs", formattedCount(maxPages)))
+		} else {
+			parts = append(parts, "no URL limit")
 		}
-		memory = fmt.Sprintf("%d MB (%s)", memoryLimit, mode)
+		if maxEndpoints > 0 {
+			parts = append(parts, fmt.Sprintf("up to %s endpoints", formattedCount(maxEndpoints)))
+		} else {
+			parts = append(parts, "no endpoint limit")
+		}
+		coverage = sentenceCase(strings.Join(parts, "; "))
 	}
-	endpointLimit := "unlimited"
-	if maxEndpoints > 0 {
-		endpointLimit = fmt.Sprint(maxEndpoints)
+	if subdomainCount > 1 {
+		coverage += fmt.Sprintf("; %s subdomains in scope", formattedCount(subdomainCount))
+	} else if maxDepth > 0 {
+		coverage += fmt.Sprintf("; depth %d", maxDepth)
 	}
-	crawlerRequestLimit := "unlimited"
-	if crawlerBudget > 0 {
-		crawlerRequestLimit = fmt.Sprint(crawlerBudget)
+	traffic := "Adaptive request pacing"
+	if rate > 0 {
+		traffic = fmt.Sprintf("Up to %.0f requests/sec", rate)
+	}
+	if requestBudget > 0 {
+		traffic += fmt.Sprintf("; %s total-request limit", formattedCount(requestBudget))
+	} else {
+		traffic += "; no total request limit"
 	}
 
 	var b strings.Builder
-	b.WriteString(panelTitle("SCAN SESSION", "RUNNING", w, cLavender) + "\n")
+	b.WriteString(panelTitle("SCAN SESSION", "Active", w, cLavender) + "\n")
 	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sTarget%s    %s%s%s", cSlate, rst, cIce, targets, rst), w, cLavender) + "\n")
 	b.WriteString(panelDivider(w, cLavender) + "\n")
-	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sMode%s      %s%s%s  %s•%s  %s%.0f req/s%s  %s•%s  OAST %s%s%s",
-		cSlate, rst, cFrost, profile, rst, cGhost, rst, cSilver, rate, rst,
-		cGhost, rst, oastColor, oastStatus, rst), w, cLavender) + "\n")
-	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sCrawl%s     %s%s%s  %s•%s  %s%s endpoints%s%s",
-		cSlate, rst, cSilver, pagesStr, rst, cGhost, rst, cSilver, endpointLimit, rst, scopeStr), w, cLavender) + "\n")
-	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sBudget%s    %s%s crawler requests%s  %s•%s  %stotal %s%s",
-		cSlate, rst, cSilver, crawlerRequestLimit, rst, cGhost, rst, cSilver, totalBudget, rst), w, cLavender) + "\n")
-	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sPayloads%s  %s%s%s  %s•%s  %sMemory %s%s",
-		cSlate, rst, cSilver, payloadBudget, rst, cGhost, rst, cSilver, memory, rst), w, cLavender) + "\n")
+	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sProfile%s   %s%s%s  %s—%s  OAST %s%s%s",
+		cSlate, rst, cFrost, profile, rst, cGhost, rst, oastColor, oastStatus, rst), w, cLavender) + "\n")
+	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sCoverage%s  %s%s%s",
+		cSlate, rst, cSilver, coverage, rst), w, cLavender) + "\n")
+	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sTraffic%s   %s%s%s",
+		cSlate, rst, cSilver, traffic, rst), w, cLavender) + "\n")
 	b.WriteString(panelBottom(w, cLavender) + "\n\n")
 	return b.String()
 }
@@ -1312,24 +1293,61 @@ func (cw *ConsoleWriter) updateETALocked(now time.Time) {
 	cw.eta = clockDuration(estimate)
 }
 
-func compactCount(value int) string {
-	switch {
-	case value >= 1_000_000:
-		return fmt.Sprintf("%.1fM", float64(value)/1_000_000)
-	case value >= 10_000:
-		return fmt.Sprintf("%.1fK", float64(value)/1_000)
-	default:
-		return fmt.Sprint(value)
+func formattedCount(value int) string {
+	digits := fmt.Sprint(value)
+	for i := len(digits) - 3; i > 0; i -= 3 {
+		digits = digits[:i] + "," + digits[i:]
 	}
+	return digits
+}
+
+func sentenceCase(value string) string {
+	if value == "" {
+		return value
+	}
+	runes := []rune(value)
+	runes[0] = unicode.ToUpper(runes[0])
+	return string(runes)
+}
+
+func urlProgress(value, limit int) string {
+	if limit <= 0 {
+		return fmt.Sprintf("%s URLs discovered", formattedCount(value))
+	}
+	return fmt.Sprintf("%s / %s URLs", formattedCount(value), formattedCount(limit))
+}
+
+func memoryUsage(value, limit int) string {
+	format := func(mb int) string {
+		if mb >= 1024 {
+			return fmt.Sprintf("%.1f GB", float64(mb)/1024)
+		}
+		return fmt.Sprintf("%d MB", mb)
+	}
+	if limit <= 0 {
+		return format(value)
+	}
+	return fmt.Sprintf("%s / %s", format(value), format(limit))
+}
+
+func requestActivity(rate, peak float64) string {
+	if rate <= 0 {
+		return "Waiting for traffic"
+	}
+	if peak > rate {
+		return fmt.Sprintf("%.1f requests/sec (peak %.1f)", rate, peak)
+	}
+	return fmt.Sprintf("%.1f requests/sec", rate)
 }
 
 func runningPanelTop(status string) string {
+	status = sentenceCase(strings.ToLower(strings.TrimSpace(status)))
 	return panelTitle("LIVE SCAN", status, currentUIWidth(), cLavender)
 }
 
 func statusPair(leftLabel, leftValue string, leftWidth int, rightLabel, rightValue string) string {
 	w := currentUIWidth()
-	leftWidth = min(leftWidth, max(12, w/2-10))
+	leftWidth = min(leftWidth, max(12, w/2-6))
 	leftValue = truncateText(safeTerminalText(leftValue), leftWidth)
 	rightWidth := w - 1 - 9 - 2 - leftWidth - 1 - 8 - 2
 	if rightWidth < 1 {
@@ -1369,21 +1387,18 @@ func (cw *ConsoleWriter) runningStatusPanel() string {
 	}
 	oast := "Disabled"
 	if oastEnabled {
-		oast = "Ready (Active)"
+		oast = "Ready and active"
 	}
 	if eta == "" {
 		eta = "Calculating"
 	}
-	crawled := fmt.Sprintf("%s / %s URLs", compactCount(urlsCrawled), limitValue(urlLimit))
-	memory := fmt.Sprintf("%d MB", processMemoryMB)
-	if memoryLimitMB > 0 {
-		memory = fmt.Sprintf("%d / %d MB", processMemoryMB, memoryLimitMB)
-	}
+	crawled := urlProgress(urlsCrawled, urlLimit)
+	memory := memoryUsage(processMemoryMB, memoryLimitMB)
 
 	var b strings.Builder
 	b.WriteString(runningPanelTop(status) + "\n")
-	b.WriteString(boxText(statusPair("Target", target, 30, "Mode", profile), w) + "\n")
-	b.WriteString(boxText(statusPair("Speed", fmt.Sprintf("%.1f req/s (peak: %.1f)", rate, peakRate), 30, "OAST", oast), w) + "\n")
+	b.WriteString(boxText(statusPair("Target", target, 30, "Profile", profile), w) + "\n")
+	b.WriteString(boxText(statusPair("Activity", requestActivity(rate, peakRate), 30, "OAST", oast), w) + "\n")
 	progress := fmt.Sprintf(" %s%-9s%s: [%s] %s%3d%%%s  %s%-8s%s: %s%s%s",
 		cSlate, "Progress", rst, progressBar(percent, 18), bCloud, percent, rst,
 		cSlate, "ETA", rst, cCloud, eta, rst)
@@ -1413,14 +1428,18 @@ func (cw *ConsoleWriter) runningStatusLine() string {
 	if w < 68 {
 		barWidth = 8
 	}
-	line := fmt.Sprintf("%sRUN%s  [%s] %s%3d%%%s  %s%s%s  %s•%s  %.1f req/s",
+	line := fmt.Sprintf("%sSCAN%s  [%s] %s%3d%%%s  %s%s%s",
 		bLavender, rst, progressBar(percent, barWidth), bCloud, percent, rst,
-		cSilver, truncateText(phase, max(12, w/3)), rst, cGhost, rst, rate)
+		cSilver, truncateText(phase, max(12, w/3)), rst)
 	if w >= 68 {
-		line += fmt.Sprintf("  %s•%s  %s/%s URLs", cGhost, rst, compactCount(urls), limitValue(urlLimit))
+		line += fmt.Sprintf("  %s│%s  %s", cGhost, rst, urlProgress(urls, urlLimit))
 	}
 	if w >= 84 {
-		line += fmt.Sprintf("  %s•%s  ETA %s", cGhost, rst, eta)
+		if eta != "Calculating" {
+			line += fmt.Sprintf("  %s│%s  ETA %s", cGhost, rst, eta)
+		} else if rate > 0 {
+			line += fmt.Sprintf("  %s│%s  %.1f requests/sec", cGhost, rst, rate)
+		}
 	}
 	return truncateANSI(line, w)
 }

@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/akha-security/akca/actions/workflows/ci.yml"><img src="https://github.com/akha-security/akca/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/akha-security/akca/releases/tag/v0.2.2"><img src="https://img.shields.io/badge/version-v0.2.2-8b5cf6" alt="Version v0.2.2"></a>
+  <a href="https://github.com/akha-security/akca/releases/tag/v0.2.3"><img src="https://img.shields.io/badge/version-v0.2.3-8b5cf6" alt="Version v0.2.3"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25 or newer"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache License 2.0"></a>
 </p>
@@ -201,6 +201,19 @@ Linked API/service subdomains are outside the default target scope. To include l
 akca -u https://www.example.com --include-linked-api-subdomains
 ```
 
+### Why a Full Scan takes longer
+
+AKCA's default Full Scan is designed around coverage and evidence quality, not the shortest possible completion time. Its runtime is therefore not directly comparable to tools that stop after a shallow HTTP crawl or report a vulnerability from a single response difference.
+
+A comprehensive run may take longer because AKCA:
+
+- Maintains a browser session for client-rendered routes and inspects JavaScript, including lazily loaded application chunks.
+- Replays promising results with controls before promoting them to findings, reducing false positives caused by generic errors, unstable pages, and WAF responses.
+- Performs identity-, state-, and callback-aware checks when a module requires stronger proof.
+- Respects target pacing, retries, request budgets, and out-of-band observation windows instead of treating speed as the only success metric.
+
+Scan duration also depends on application size, response latency, authentication flows, defensive controls, and the configured scope. For faster feedback, select only the relevant modules with `-m` or apply explicit crawl, request, and time budgets. Increase rate and concurrency only when the authorized target can safely handle the additional traffic. A shorter scan is not necessarily a more complete scan.
+
 ## Reports
 
 Choose an output format with `-f` and a file path with `-o`:
@@ -247,14 +260,13 @@ Discovered URLs are retained even when they cannot be visited. A crawl that exha
 
 Unconfigured rate-limit checks produce observations, not vulnerability findings. A configured threshold proof also requires `window_seconds`; if the requests do not fit inside that window, the check is inconclusive. SQLi does not treat a 400 response or arithmetic evaluation alone as proof. New vendor-specific SQL errors in 400/422 responses must pass the replay and control verification path.
 
-## What's new in v0.2.2
+## What's new in v0.2.3
 
-- Browser-assisted crawling now takes over when the initial HTTP fetch is blocked or empty, including 403 responses that still load in a real browser.
-- Lazy-loaded SPA chunks are recursively analyzed so APIs referenced outside the initial bundle remain discoverable.
-- Automated login supports extra form fields, multi-step flows and bearer-token sessions, and carries refreshed credentials into active scan profiles.
-- SQL injection verification rejects HTTP 4xx baseline/payload responses as proof, preventing bad-request boolean payloads from becoming findings.
-- GraphQL, WebSocket, JWT, authorization and API exposure checks require typed control-backed evidence; coverage gaps and module readiness are included in reports.
-- Full scan module budgets are now derived from the module catalog, so newly registered modules are not silently left outside adaptive request planning.
+- HTML reports now provide a clearer risk overview, severity distribution, scan metadata and structured finding details.
+- Request and response evidence is organized into tabs while preserving proof highlighting and copy controls.
+- Partial coverage is prominently disclosed so an incomplete scan cannot be mistaken for a clean result.
+- The scan-session card and live progress row use concise labels, readable limits and less visual noise.
+- Full Scan runtime behavior and the controls for faster, bounded feedback are documented explicitly.
 
 See [CHANGELOG.md](CHANGELOG.md) for release details.
 

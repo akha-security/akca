@@ -2,7 +2,7 @@ package branding
 
 const (
 	ProductName  = "AKCA ADVANCED WEB SECURITY SCANNER"
-	Version      = "0.2.2"
+	Version      = "0.2.3"
 	VersionLabel = "v" + Version
 	UserAgent    = ProductName + "/" + Version
 )
