@@ -77,13 +77,18 @@ jobs:
       - name: Generate checksums
         run: sha256sum dist/* > dist/SHA256SUMS.txt
 
-      - name: Create release
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           notes_file=".github/release-notes/${GITHUB_REF_NAME}.md"
-          if [ -f "${notes_file}" ]; then
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            if [ -f "${notes_file}" ]; then
+              gh release edit "${GITHUB_REF_NAME}" --title "AKCA ${GITHUB_REF_NAME}" --notes-file "${notes_file}"
+            fi
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          elif [ -f "${notes_file}" ]; then
             gh release create "${GITHUB_REF_NAME}" dist/* --title "AKCA ${GITHUB_REF_NAME}" --notes-file "${notes_file}" --verify-tag
           else
             gh release create "${GITHUB_REF_NAME}" dist/* --title "AKCA ${GITHUB_REF_NAME}" --generate-notes --verify-tag

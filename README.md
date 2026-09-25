@@ -263,9 +263,9 @@ Unconfigured rate-limit checks produce observations, not vulnerability findings.
 ## What's new in v0.2.3
 
 - HTML reports now provide a clearer risk overview, severity distribution, scan metadata and structured finding details.
-- Request and response evidence is organized into tabs while preserving proof highlighting and copy controls.
-- Partial coverage is prominently disclosed so an incomplete scan cannot be mistaken for a clean result.
-- The scan-session card and live progress row use concise labels, readable limits and less visual noise.
+- Request and response evidence uses a transaction viewer with clear direction, method or status context, proof highlighting and copy controls.
+- The standalone Coverage & Readiness section is removed; incomplete scans remain prominently disclosed and coverage data remains available to machine-readable consumers.
+- The startup summary is rebuilt as a focused Scan Control dashboard, and the live progress row uses concise labels with less visual noise.
 - Full Scan runtime behavior and the controls for faster, bounded feedback are documented explicitly.
 
 See [CHANGELOG.md](CHANGELOG.md) for release details.

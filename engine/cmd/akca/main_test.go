@@ -204,8 +204,9 @@ func TestScanSessionPanelIsCompactAndUsesStringTargets(t *testing.T) {
 		"oast_enabled":           true,
 	})
 	for _, want := range []string{
-		"http://example.test", "FullBugBounty", "50 requests/sec",
-		"Up to 1,000 URLs", "up to 1,000 endpoints", "Coverage", "Traffic", "OAST", "Ready", "Active",
+		"SCAN CONTROL", "LIVE", "TARGET", "http://example.test", "PROFILE", "FullBugBounty",
+		"DISCOVERY", "1K URLs / 1K endpoints", "VERIFICATION", "OAST Ready",
+		"Traffic policy", "50 requests/sec maximum", "No total request cap",
 	} {
 		if !strings.Contains(panel, want) {
 			t.Fatalf("session panel omitted %q: %q", want, panel)
@@ -215,7 +216,7 @@ func TestScanSessionPanelIsCompactAndUsesStringTargets(t *testing.T) {
 		t.Fatalf("legacy duplicate OAST banner leaked into session panel: %q", panel)
 	}
 	lines := strings.Split(strings.TrimSuffix(panel, "\n\n"), "\n")
-	if len(lines) != 7 {
+	if len(lines) != 9 {
 		t.Fatalf("session panel should remain compact, lines=%d: %q", len(lines), panel)
 	}
 	for _, line := range lines {
@@ -246,7 +247,7 @@ func TestUnlimitedDiscoveryLimitsAreNotDisplayedAsZero(t *testing.T) {
 	}
 	panel := scanSessionPanel(payload)
 	line := scanSessionLine(payload)
-	if want := "No URL or endpoint limit"; !strings.Contains(panel, want) {
+	if want := "No crawl ceiling"; !strings.Contains(panel, want) {
 		t.Fatalf("unlimited session panel omitted %q: %q", want, panel)
 	}
 	for _, want := range []string{"urls=unlimited", "endpoints=unlimited", "crawler_requests=unlimited"} {

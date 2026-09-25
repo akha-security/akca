@@ -11,21 +11,22 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 - Add a redesigned HTML security report with an executive risk overview, severity distribution, scan metadata and structured vulnerability statistics.
 - Add dedicated finding sections for affected endpoints, impact, classification and remediation guidance.
-- Add tabbed HTTP request and response evidence while retaining proof highlighting, cURL reproduction and clipboard controls.
+- Add a transaction-focused request and response viewer with outbound/inbound context, method or status details, proof highlighting and clipboard controls.
 - Add a prominent partial-coverage warning when scan gaps prevent a clean result from representing complete assurance.
 
 ### Changed
 
-- Simplify the scan-session card around target, profile, coverage and traffic policy instead of exposing raw internal budget values.
+- Replace the scan-session card with a purpose-built Scan Control dashboard covering target, profile, discovery, verification and traffic policy.
 - Refine the live progress row with readable URL counts, professional status text and suppression of meaningless zero-rate output.
 - Format large counters and memory limits consistently for terminal readability.
+- Remove the standalone Coverage & Readiness section from HTML and Markdown output while retaining coverage metadata and the partial-scan warning.
 - Document why comprehensive Full Scans take longer and how to request faster, bounded feedback safely.
 
 ### Validation
 
 - Full Go package tests pass with `go test ./... -count=1`.
-- CLI static analysis passes with `go vet ./cmd/akca`.
-- Report regression tests cover the risk dashboard, severity statistics, partial-coverage warning and tabbed HTTP evidence.
+- CLI and report static analysis passes with `go vet ./cmd/akca ./internal/report`.
+- Report regression tests cover the risk dashboard, severity statistics, partial-scan warning and transaction evidence viewer.
 
 ## [v0.2.2] - 2026-09-25
 

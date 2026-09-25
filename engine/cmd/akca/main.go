@@ -789,11 +789,9 @@ func payloadTargets(payload map[string]interface{}) string {
 
 func scanSessionPanel(payload map[string]interface{}) string {
 	w := currentUIWidth()
-	targets := truncateText(payloadTargets(payload), w-10)
+	targets := truncateText(payloadTargets(payload), w-2)
 	rate := payloadFloat(payload, "global_rate_limit")
 	maxPages := payloadInt(payload, "max_pages")
-	subdomainCount := payloadInt(payload, "subdomain_count")
-	maxDepth := payloadInt(payload, "max_depth")
 	maxEndpoints := payloadInt(payload, "max_endpoints")
 	requestBudget := payloadInt(payload, "request_budget")
 	oastStatus, oastColor := sessionOASTStatus(payload)
@@ -806,48 +804,67 @@ func scanSessionPanel(payload map[string]interface{}) string {
 	}
 	profile = truncateText(profile, 20)
 
-	coverage := "No URL or endpoint limit"
-	if maxPages > 0 || maxEndpoints > 0 {
-		parts := make([]string, 0, 2)
-		if maxPages > 0 {
-			parts = append(parts, fmt.Sprintf("up to %s URLs", formattedCount(maxPages)))
-		} else {
-			parts = append(parts, "no URL limit")
-		}
-		if maxEndpoints > 0 {
-			parts = append(parts, fmt.Sprintf("up to %s endpoints", formattedCount(maxEndpoints)))
-		} else {
-			parts = append(parts, "no endpoint limit")
-		}
-		coverage = sentenceCase(strings.Join(parts, "; "))
-	}
-	if subdomainCount > 1 {
-		coverage += fmt.Sprintf("; %s subdomains in scope", formattedCount(subdomainCount))
-	} else if maxDepth > 0 {
-		coverage += fmt.Sprintf("; depth %d", maxDepth)
-	}
-	traffic := "Adaptive request pacing"
+	discovery := sessionDiscoverySummary(maxPages, maxEndpoints)
+	traffic := "Adaptive pacing"
 	if rate > 0 {
-		traffic = fmt.Sprintf("Up to %.0f requests/sec", rate)
+		traffic = fmt.Sprintf("%.0f requests/sec maximum", rate)
 	}
 	if requestBudget > 0 {
-		traffic += fmt.Sprintf("; %s total-request limit", formattedCount(requestBudget))
+		traffic += fmt.Sprintf(" — %s total request cap", formattedCount(requestBudget))
 	} else {
-		traffic += "; no total request limit"
+		traffic += " — No total request cap"
 	}
 
 	var b strings.Builder
-	b.WriteString(panelTitle("SCAN SESSION", "Active", w, cLavender) + "\n")
-	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sTarget%s    %s%s%s", cSlate, rst, cIce, targets, rst), w, cLavender) + "\n")
+	b.WriteString(panelTitle("SCAN CONTROL", "LIVE", w, cLavender) + "\n")
+	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %s%sTARGET%s", cSlate, bld, rst), w, cLavender) + "\n")
+	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %s%s%s", cIce, targets, rst), w, cLavender) + "\n")
 	b.WriteString(panelDivider(w, cLavender) + "\n")
-	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sProfile%s   %s%s%s  %s—%s  OAST %s%s%s",
-		cSlate, rst, cFrost, profile, rst, cGhost, rst, oastColor, oastStatus, rst), w, cLavender) + "\n")
-	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sCoverage%s  %s%s%s",
-		cSlate, rst, cSilver, coverage, rst), w, cLavender) + "\n")
-	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sTraffic%s   %s%s%s",
-		cSlate, rst, cSilver, traffic, rst), w, cLavender) + "\n")
+	b.WriteString(sessionColumnRow([3]string{"PROFILE", "DISCOVERY", "VERIFICATION"}, [3]string{cSlate, cSlate, cSlate}, w) + "\n")
+	b.WriteString(sessionColumnRow([3]string{profile, discovery, "OAST " + oastStatus}, [3]string{cFrost, cSilver, oastColor}, w) + "\n")
+	b.WriteString(panelDivider(w, cLavender) + "\n")
+	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sTraffic policy%s  %s%s%s", cSlate, rst, cSilver, traffic, rst), w, cLavender) + "\n")
 	b.WriteString(panelBottom(w, cLavender) + "\n\n")
 	return b.String()
+}
+
+func sessionColumnRow(values [3]string, colors [3]string, width int) string {
+	const gap = 2
+	available := max(3, width-gap*2)
+	columnWidth := available / 3
+	widths := [3]int{columnWidth, columnWidth, available - columnWidth*2}
+	parts := make([]string, 0, len(values))
+	for i, value := range values {
+		value = truncateText(safeTerminalText(value), widths[i])
+		parts = append(parts, colors[i]+padToWidth(value, widths[i])+rst)
+	}
+	return boxTextWithBorder(strings.Join(parts, strings.Repeat(" ", gap)), width, cLavender)
+}
+
+func sessionDiscoverySummary(maxPages, maxEndpoints int) string {
+	switch {
+	case maxPages <= 0 && maxEndpoints <= 0:
+		return "No crawl ceiling"
+	case maxPages > 0 && maxEndpoints > 0:
+		return fmt.Sprintf("%s URLs / %s endpoints", shortSessionCount(maxPages), shortSessionCount(maxEndpoints))
+	case maxPages > 0:
+		return fmt.Sprintf("%s URL limit", shortSessionCount(maxPages))
+	default:
+		return fmt.Sprintf("%s endpoint limit", shortSessionCount(maxEndpoints))
+	}
+}
+
+func shortSessionCount(value int) string {
+	switch {
+	case value >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(value)/1_000_000)
+	case value >= 1_000 && value%1_000 == 0:
+		return fmt.Sprintf("%dK", value/1_000)
+	case value >= 1_000:
+		return fmt.Sprintf("%.1fK", float64(value)/1_000)
+	default:
+		return fmt.Sprint(value)
+	}
 }
 
 func scanSessionLine(payload map[string]interface{}) string {

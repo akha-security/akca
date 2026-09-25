@@ -153,7 +153,7 @@ func TestHTMLUsesComprehensiveScannerLayout(t *testing.T) {
 	for _, want := range []string{
 		"AKCA threat assessment", "Scan details", "Severity distribution", "Vulnerability statistics",
 		"Vulnerability Description", "Recommendation", `data-evidence-tab="request"`,
-		`data-evidence-tab="response"`, "Coverage", "Print / PDF",
+		`data-evidence-tab="response"`, "OUTBOUND", "INBOUND", "Captured transaction", "Print / PDF",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("comprehensive scanner layout omitted %q", want)
@@ -161,6 +161,9 @@ func TestHTMLUsesComprehensiveScannerLayout(t *testing.T) {
 	}
 	if strings.Contains(html, "fonts.googleapis.com") || strings.Contains(html, "%!") {
 		t.Fatalf("HTML report is not self-contained or contains formatting errors")
+	}
+	if strings.Contains(html, "Coverage &amp; Readiness") || strings.Contains(html, ">HTTP Request<") {
+		t.Fatalf("removed report labels leaked into the redesigned layout")
 	}
 }
 
@@ -198,7 +201,7 @@ func TestPathDiscoverySectionUsesFuzzResults(t *testing.T) {
 	}
 }
 
-func TestCoverageDiagnosticsMarkReportPartialAndRender(t *testing.T) {
+func TestCoverageDiagnosticsMarkReportPartialWithoutDedicatedSection(t *testing.T) {
 	db, scanID := setupReportDB(t, 0)
 	defer db.Close()
 	if err := db.SaveTimelineEvent(scanID, "module_readiness", "GraphQL is not configured", `{"module":"graphql","configured":false,"reason":"no endpoint"}`); err != nil {
@@ -220,8 +223,19 @@ func TestCoverageDiagnosticsMarkReportPartialAndRender(t *testing.T) {
 	if err := NewExporter(builder, nil).Export(&htmlBuf, Options{ScanID: scanID, Template: TemplateInternal, Format: FormatHTML, Redact: true}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(htmlBuf.String(), "Coverage &amp; Readiness") || !strings.Contains(htmlBuf.String(), "Crawler budget exhausted") {
-		t.Fatalf("HTML report omitted coverage diagnostics: %s", htmlBuf.String())
+	html := htmlBuf.String()
+	if !strings.Contains(html, "Partial scan") {
+		t.Fatalf("HTML report omitted the partial-scan warning")
+	}
+	if strings.Contains(html, "Coverage &amp; Readiness") || strings.Contains(html, "Crawler budget exhausted") {
+		t.Fatalf("HTML report retained the removed coverage section")
+	}
+	var markdown bytes.Buffer
+	if err := NewExporter(builder, nil).Export(&markdown, Options{ScanID: scanID, Template: TemplateInternal, Format: FormatMarkdown, Redact: true}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(markdown.String(), "Coverage & Readiness") || strings.Contains(markdown.String(), "Crawler budget exhausted") {
+		t.Fatalf("Markdown report retained the removed coverage section")
 	}
 }
 

@@ -70,7 +70,7 @@ func htmlDocStart(meta Document) string {
 	riskLabel := "Safe"
 	riskClass := "risk-info"
 	riskLevel := 0
-	riskDescription := "No reportable vulnerabilities were identified. Review coverage diagnostics before treating this result as assurance."
+	riskDescription := "No reportable vulnerabilities were identified. Review scan completeness before treating this result as assurance."
 	if critCount > 0 {
 		riskLabel = "Critical Risk"
 		riskClass = "risk-critical"
@@ -94,7 +94,7 @@ func htmlDocStart(meta Document) string {
 	}
 	partialBanner := ""
 	if meta.Partial {
-		partialBanner = `<div class="coverage-warning"><strong>Partial coverage</strong><span>This scan contains explicit coverage gaps. Review Coverage &amp; Readiness before relying on the absence of findings.</span></div>`
+		partialBanner = `<div class="coverage-warning"><strong>Partial scan</strong><span>One or more checks could not complete. Treat the absence of findings as inconclusive and review the scan execution logs.</span></div>`
 	}
 
 	targetsStr := "Unknown"
@@ -894,14 +894,75 @@ section.report-section > h2 {
 .finding-section.recommendation { margin-top: 1rem; border-left: 4px solid var(--low); }
 .classification-strip { display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0.85rem 0 1rem; }
 .classification-strip span { padding: 0.25rem 0.5rem; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: var(--card); font-size: 0.72rem; }
-.traffic-detail { margin-top: 1rem; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-.traffic-tabs { display: flex; background: var(--panel); border-bottom: 1px solid var(--line); }
-.traffic-tab { padding: 0.7rem 1rem; border: 0; border-right: 1px solid var(--line); background: transparent; color: var(--muted); font: 700 0.78rem inherit; cursor: pointer; }
-.traffic-tab.active { color: var(--accent); background: var(--card); box-shadow: inset 0 -2px 0 var(--accent); }
+.traffic-detail {
+	margin-top: 1.2rem;
+	border: 1px solid var(--http-border);
+	border-radius: 11px;
+	overflow: hidden;
+	background: var(--http-bg);
+	box-shadow: 0 12px 28px rgba(2, 6, 23, 0.18);
+}
+.traffic-tabs {
+	display: flex;
+	align-items: center;
+	gap: 0.35rem;
+	padding: 0.48rem;
+	background: var(--http-header-bg);
+	border-bottom: 1px solid var(--http-border);
+}
+.traffic-tab {
+	position: relative;
+	min-width: 108px;
+	padding: 0.58rem 1rem 0.58rem 2rem;
+	border: 1px solid transparent;
+	border-radius: 7px;
+	background: transparent;
+	color: #94a3b8;
+	font: 700 0.76rem 'Segoe UI', sans-serif;
+	letter-spacing: 0.02em;
+	cursor: pointer;
+	transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.traffic-tab::before {
+	content: '';
+	position: absolute;
+	left: 0.85rem;
+	top: 50%%;
+	width: 7px;
+	height: 7px;
+	transform: translateY(-50%%);
+	border-radius: 50%%;
+	background: #475569;
+}
+.traffic-tab:hover { color: #e2e8f0; background: rgba(255, 255, 255, 0.04); }
+.traffic-tab.active { color: #fff; background: rgba(255, 255, 255, 0.08); border-color: #334155; }
+.traffic-tab.active::before { background: #22d3ee; box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.13); }
 .traffic-tab-panel { display: none; }
 .traffic-tab-panel.active { display: block; }
-.traffic-tab-panel .code-header { border-radius: 0; border: 0; border-bottom: 1px solid var(--http-border); }
-.traffic-tab-panel pre.http { margin: 0; border: 0; border-radius: 0; max-height: 520px; }
+.evidence-toolbar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 1rem;
+	padding: 0.68rem 0.9rem;
+	background: #0b1220;
+	border-bottom: 1px solid var(--http-border);
+}
+.evidence-context { display: flex; align-items: center; gap: 0.55rem; min-width: 0; color: #94a3b8; font-size: 0.72rem; }
+.evidence-direction {
+	display: inline-flex;
+	align-items: center;
+	padding: 0.18rem 0.48rem;
+	border: 1px solid #334155;
+	border-radius: 999px;
+	color: #cbd5e1;
+	font: 800 0.63rem 'Segoe UI', sans-serif;
+	letter-spacing: 0.08em;
+}
+.evidence-method, .evidence-status { color: #67e8f9; font: 700 0.72rem 'JetBrains Mono', Consolas, monospace; }
+.traffic-detail .copy-btn { color: #cbd5e1; background: #111827; border-color: #334155; }
+.traffic-detail .copy-btn:hover { color: #fff; background: #1e293b; border-color: #475569; }
+.traffic-tab-panel pre.http { margin: 0; border: 0; border-radius: 0; max-height: 520px; padding: 1.15rem 1.25rem; }
 @media (max-width: 720px) {
 	.finding-section-grid { grid-template-columns: 1fr; }
 	.finding-header { flex-direction: column; }
@@ -1375,7 +1436,7 @@ function showToast(msg) {
 function copyToClipboard(btn, text) {
     if (text == null && btn) {
         const explicit = btn.getAttribute('data-copy');
-        const header = btn.closest('.code-header');
+        const header = btn.closest('.code-header, .evidence-toolbar');
         const block = header ? header.nextElementSibling : btn.nextElementSibling;
         text = explicit !== null ? explicit : (block ? block.textContent : '');
     }
@@ -1616,10 +1677,10 @@ func httpEvidenceHTML(ev HTTPEvidence) string {
 			template.HTMLEscapeString(ev.DOMSnapshotRef) + `</code></p>`)
 	}
 	responseEvidence := ev.RawResponse
-	responseLabel := "HTTP Response"
+	responseLabel := "Proof markers highlighted"
 	if responseEvidence == "" {
 		responseEvidence = ev.RespBody
-		responseLabel = "Response Evidence"
+		responseLabel = "Response excerpt"
 	}
 	if ev.RawRequest != "" || responseEvidence != "" {
 		defaultTab := "response"
@@ -1647,7 +1708,11 @@ func httpEvidenceHTML(ev HTTPEvidence) string {
 			if defaultTab == "request" {
 				active = " active"
 			}
-			b.WriteString(`<div class="traffic-tab-panel` + active + `" data-evidence-panel="request"><div class="code-header"><span>HTTP Request</span><button type="button" class="copy-btn" onclick="copyToClipboard(this)">📋 Copy Request</button></div><pre class="http">` +
+			method := ev.Method
+			if method == "" {
+				method = "HTTP"
+			}
+			b.WriteString(`<div class="traffic-tab-panel` + active + `" data-evidence-panel="request"><div class="evidence-toolbar"><div class="evidence-context"><span class="evidence-direction">OUTBOUND</span><span class="evidence-method">` + template.HTMLEscapeString(method) + `</span><span>Captured transaction</span></div><button type="button" class="copy-btn" onclick="copyToClipboard(this)">Copy</button></div><pre class="http">` +
 				highlightEvidence(template.HTMLEscapeString(ev.RawRequest), []string{ev.Payload}) + `</pre></div>`)
 		}
 		if responseEvidence != "" {
@@ -1655,7 +1720,11 @@ func httpEvidenceHTML(ev HTTPEvidence) string {
 			if defaultTab == "response" {
 				active = " active"
 			}
-			b.WriteString(`<div class="traffic-tab-panel` + active + `" data-evidence-panel="response"><div class="code-header"><span>` + responseLabel + ` (proof highlighted)</span><button type="button" class="copy-btn" onclick="copyToClipboard(this)">📋 Copy Response</button></div><pre class="http">` +
+			status := "Response"
+			if ev.StatusCode > 0 {
+				status = fmt.Sprintf("Status %d", ev.StatusCode)
+			}
+			b.WriteString(`<div class="traffic-tab-panel` + active + `" data-evidence-panel="response"><div class="evidence-toolbar"><div class="evidence-context"><span class="evidence-direction">INBOUND</span><span class="evidence-status">` + template.HTMLEscapeString(status) + `</span><span>` + template.HTMLEscapeString(responseLabel) + `</span></div><button type="button" class="copy-btn" onclick="copyToClipboard(this)">Copy</button></div><pre class="http">` +
 				highlightEvidence(template.HTMLEscapeString(responseEvidence), markers) + `</pre></div>`)
 		}
 		b.WriteString(`</div>`)
@@ -1705,22 +1774,6 @@ func pathDiscoveryHTML(entries []PathDiscoveryEntry) string {
 			template.HTMLEscapeString(signal),
 			entry.BodyLength,
 		))
-	}
-	b.WriteString(`</tbody></table>`)
-	return b.String()
-}
-
-func coverageHTML(entries []CoverageEntry) string {
-	if len(entries) == 0 {
-		return `<p class="meta-line">No coverage diagnostics recorded.</p>`
-	}
-	var b strings.Builder
-	b.WriteString(`<table class="data"><thead><tr><th>Type</th><th>Module</th><th>Phase</th><th>Summary</th><th>Reason</th></tr></thead><tbody>`)
-	for _, entry := range entries {
-		b.WriteString(`<tr><td>` + template.HTMLEscapeString(entry.EventType) + `</td><td>` +
-			template.HTMLEscapeString(entry.Module) + `</td><td>` + template.HTMLEscapeString(entry.Phase) +
-			`</td><td>` + template.HTMLEscapeString(entry.Summary) + `</td><td>` +
-			template.HTMLEscapeString(entry.Reason) + `</td></tr>`)
 	}
 	b.WriteString(`</tbody></table>`)
 	return b.String()
