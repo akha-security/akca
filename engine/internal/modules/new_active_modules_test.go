@@ -35,6 +35,10 @@ func (c *activeTestClient) Do(_ context.Context, method, rawURL string, _ []byte
 	}, nil
 }
 
+func (c *activeTestClient) DoWithoutSession(ctx context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	return c.Do(ctx, method, rawURL, body, headers)
+}
+
 func newActiveRunner(t *testing.T, client HTTPDoer) *Runner {
 	t.Helper()
 	cfg := config.DefaultScanConfig()

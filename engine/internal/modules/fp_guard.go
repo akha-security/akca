@@ -215,6 +215,8 @@ func moduleSignalConfirmed(
 		return cloudTakeoverSignalConfirmed(signal, probe)
 	case "devops_exposure":
 		return devopsExposureSignalConfirmed(signal, probeStatus, body)
+	case "improper_auth":
+		return improperAuthSignalConfirmed(signal, probeStatus, body)
 	case "http_methods":
 		return (signal == "http_put_unauthenticated_upload" && probeStatus == 200 && strings.Contains(body, p.Value)) ||
 			(signal == "http_trace_xst" && probeStatus == 200 && strings.Contains(body, p.Value))
