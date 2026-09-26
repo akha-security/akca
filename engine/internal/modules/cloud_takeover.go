@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/verification"
 )
 
 type takeoverFingerprint struct {
@@ -15,6 +16,10 @@ type takeoverFingerprint struct {
 	errorMsg    string
 	severity    string
 }
+
+// lookupCNAME resolves a host's CNAME record. It is a package-level variable
+// so tests can substitute a fake resolver without touching real DNS.
+var lookupCNAME = net.DefaultResolver.LookupCNAME
 
 var takeoverFingerprints = []takeoverFingerprint{
 	{provider: "AWS S3 Bucket", cnameSubstr: "s3.amazonaws.com", errorMsg: "NoSuchBucket", severity: "high"},
@@ -59,7 +64,7 @@ func (r *Runner) runCloudTakeover(ctx context.Context, target ScanTarget) []Modu
 		return nil
 	}
 
-	cname, err := net.DefaultResolver.LookupCNAME(ctx, host)
+	cname, err := lookupCNAME(ctx, host)
 	if err != nil || cname == "" {
 		return nil
 	}
@@ -94,7 +99,13 @@ func (r *Runner) runCloudTakeover(ctx context.Context, target ScanTarget) []Modu
 	// Double verification: both CNAME pointer and provider error message match
 	signal := fmt.Sprintf("subdomain_takeover_%s", strings.ReplaceAll(strings.ToLower(matchedFP.provider), " ", "_"))
 	p := defaultPayload("cloud_takeover", matchedFP.provider, cname, signal)
-	f := r.verifyAndBuild(ctx, "cloud_takeover", target, p, baseline, rr, signal, false, false, "", "")
+	// The evidence here is a static CNAME+error-body fingerprint match, not a
+	// differential from a baseline request: baseline and probe target the same
+	// URL by design, so they are expected to be identical. Without this, the
+	// verifier's default differential-evidence requirement would suppress
+	// every candidate as "baseline indistinguishable".
+	f := r.verifyAndBuildWithCandidate(ctx, "cloud_takeover", target, p, baseline, rr, signal, false, false, "", "",
+		func(c *verification.Candidate) { c.ExpectedEquivalent = true })
 
 	var out []ModuleFinding
 	if f != nil {
