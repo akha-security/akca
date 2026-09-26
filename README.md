@@ -45,9 +45,9 @@ The goal is not to exhaust or overwhelm the target. It is to find real weaknesse
 AKCA does not claim feature or detection parity with mature commercial platforms such as Acunetix, Invicti/Netsparker, or Burp Suite Professional. Those products are built by experienced teams over many years. AKCA is independently maintained by one developer in available personal time, inspired by established security tools and shaped by original ideas and community feedback. The current priority is a simple, useful, and transparent scanner. A graphical interface is planned when the engine is sufficiently stable and dependable.
 
 <p align="center">
-  <img src="docs/assets/terminal-demo.png" alt="Captured AKCA findings from the local integration lab" width="760">
+  <img src="docs/assets/scanner.png" alt="AKCA scanner running against a local security testing lab" width="760">
   <br>
-  <sub>Actual AKCA finding output captured from the local integration lab and rendered for readability.</sub>
+  <sub>AKCA v0.2.4 scan session with live engine status, resource telemetry, and confirmed findings.</sub>
 </p>
 
 ## Installation
