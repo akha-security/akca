@@ -29,6 +29,44 @@ func (b *documentBrowser) FetchInstrumented(_ context.Context, rawURL string) (B
 	return BrowserSnapshot{URL: rawURL, DocumentStatus: b.status, DOM: `<a href="/browser-child">child</a>`}, nil
 }
 
+func TestBrowserBlockedResourcesAreSummarizedOnce(t *testing.T) {
+	var events int
+	var message string
+	var payload map[string]interface{}
+	c := &Crawler{
+		browserBlocked: make(map[string]struct{}),
+		emit: func(kind, eventMessage string, eventPayload map[string]interface{}) error {
+			if kind == "coverage_gap" {
+				events++
+				message = eventMessage
+				payload = eventPayload
+			}
+			return nil
+		},
+	}
+	c.recordBrowserBlocked([]string{
+		"https://cdn.example.test/app.js?token=secret",
+		"https://cdn.example.test/app.js?token=secret",
+		"https://fonts.example.test/font.woff2",
+	})
+	c.recordBrowserBlocked([]string{"https://cdn.example.test/theme.css"})
+	c.emitBrowserBlockedSummary()
+
+	if events != 1 {
+		t.Fatalf("browser policy gap should be emitted once, got %d", events)
+	}
+	if strings.Contains(message, "token=secret") {
+		t.Fatalf("blocked URL leaked into event message: %s", message)
+	}
+	if got := payload["blocked_requests"]; got != 3 {
+		t.Fatalf("blocked request count = %v, want 3", got)
+	}
+	hosts, ok := payload["blocked_hosts"].([]string)
+	if !ok || len(hosts) != 2 || hosts[0] != "cdn.example.test" || hosts[1] != "fonts.example.test" {
+		t.Fatalf("blocked hosts = %#v", payload["blocked_hosts"])
+	}
+}
+
 func TestDeniedDocumentBrowserRecovery(t *testing.T) {
 	for _, status := range []int{200, 403, 0} {
 		cfg := config.DefaultScanConfig()

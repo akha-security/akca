@@ -8,6 +8,8 @@ import (
 	"github.com/akha-security/akca/engine/internal/modules"
 )
 
+var errVulnModuleCoverageIncomplete = errors.New("one or more vulnerability modules had incomplete coverage")
+
 type vulnModulePhase struct {
 	name     string
 	title    string
@@ -146,6 +148,7 @@ func (e *Engine) vulnModuleRunner() *modules.Runner {
 func (e *Engine) runVulnModulesSequential(ctx context.Context) error {
 	runner := e.vulnModuleRunner()
 	hasError := false
+	hasCoverageGap := false
 
 	lastModuleForCategory := make(map[string]int)
 	for i, item := range fullScanModuleOrder {
@@ -171,8 +174,12 @@ func (e *Engine) runVulnModulesSequential(ctx context.Context) error {
 		})
 		findings, err := runner.RunModuleFromDB(ctx, item.name, e.moduleTargetLimit())
 		if err != nil {
-			hasError = true
-			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": phase, "module": item.name})
+			if errors.Is(err, modules.ErrModuleCoverageIncomplete) {
+				hasCoverageGap = true
+			} else {
+				hasError = true
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": phase, "module": item.name})
+			}
 		}
 		_ = e.Emit("phase_finished", item.title, map[string]interface{}{
 			"phase": phase, "module": item.name, "findings": len(findings),
@@ -188,6 +195,9 @@ func (e *Engine) runVulnModulesSequential(ctx context.Context) error {
 	}
 	if hasError {
 		return errors.New("one or more vulnerability modules failed")
+	}
+	if hasCoverageGap {
+		return errVulnModuleCoverageIncomplete
 	}
 	return nil
 }

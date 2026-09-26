@@ -154,6 +154,8 @@ func TestHTMLUsesComprehensiveScannerLayout(t *testing.T) {
 		"AKCA threat assessment", "Scan details", "Severity distribution", "Vulnerability statistics",
 		"Vulnerability Description", "Recommendation", `data-evidence-tab="request"`,
 		`data-evidence-tab="response"`, "OUTBOUND", "INBOUND", "Captured transaction", "Print / PDF",
+		"SQLSTATE[42000]", "Content-Type: text/plain", "HTTP/1.1 200 OK",
+		`data-evidence-tab="both"`, "Show full content", `alt="AKCA logo"`, "data:image/png;base64,",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("comprehensive scanner layout omitted %q", want)
@@ -438,6 +440,22 @@ func TestModuleSpecificPayloadInResponseIsHighlighted(t *testing.T) {
 	})
 	if !strings.Contains(html, `<span class="vuln-hit">MATCH-7319</span>`) {
 		t.Fatalf("module-specific response match was not highlighted: %s", html)
+	}
+}
+
+func TestHTTPEvidencePreservesLongContentAndExplainsMissingCapture(t *testing.T) {
+	body := strings.Repeat("long response line\n", 9000) + "<script>alert('proof')</script>\nEND-OF-CAPTURE\n\n"
+	html := httpEvidenceHTML(HTTPEvidence{RawResponse: "HTTP/1.1 200 OK\r\n\r\n" + body, BodyTruncated: true})
+	for _, want := range []string{"END-OF-CAPTURE\n\n</pre>", "&lt;script&gt;", "uncaptured remainder is unavailable", "Request: no HTTP request was stored"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("HTTP evidence omitted %q", want)
+		}
+	}
+	if strings.Contains(html, "<script>") || strings.Count(html, "long response line\n") != 9000 {
+		t.Fatal("HTTP evidence was truncated or rendered as executable HTML")
+	}
+	if !strings.Contains(httpEvidenceHTML(HTTPEvidence{}), "No HTTP request or response was stored") {
+		t.Fatal("missing evidence must be explained, not silently hidden")
 	}
 }
 

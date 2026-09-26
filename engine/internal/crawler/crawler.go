@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +48,7 @@ type Crawler struct {
 	secretsSeen      map[string]struct{}
 	queryVariants    map[string]map[string]struct{}
 	linkedHostsSeen  map[string]struct{}
+	browserBlocked   map[string]struct{}
 	seeds            []string
 	emit             EventSink
 	browser          BrowserFetcher
@@ -93,6 +95,7 @@ func New(scanID string, cfg config.ScanConfig, client HTTPDoer, scopeEngine *sco
 		secretsSeen:     make(map[string]struct{}),
 		queryVariants:   make(map[string]map[string]struct{}),
 		linkedHostsSeen: linked,
+		browserBlocked:  make(map[string]struct{}),
 		emit:            emit,
 		stateGraph:      stategraph.New(db),
 	}
@@ -100,6 +103,66 @@ func New(scanID string, cfg config.ScanConfig, client HTTPDoer, scopeEngine *sco
 
 func (c *Crawler) SetBrowser(browser BrowserFetcher) {
 	c.browser = browser
+}
+
+func (c *Crawler) recordBrowserBlocked(resources []string) {
+	if len(resources) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.browserBlocked == nil {
+		c.browserBlocked = make(map[string]struct{})
+	}
+	for _, resource := range resources {
+		if resource = strings.TrimSpace(resource); resource != "" {
+			c.browserBlocked[resource] = struct{}{}
+		}
+	}
+}
+
+// emitBrowserBlockedSummary keeps browser policy gaps useful without printing
+// the same warning once for every rendered page. Exact URLs remain internal;
+// the event exposes only hostnames so query strings cannot leak credentials.
+func (c *Crawler) emitBrowserBlockedSummary() {
+	c.mu.Lock()
+	resources := make([]string, 0, len(c.browserBlocked))
+	for resource := range c.browserBlocked {
+		resources = append(resources, resource)
+	}
+	c.mu.Unlock()
+	if len(resources) == 0 {
+		return
+	}
+
+	hostSet := make(map[string]struct{})
+	for _, resource := range resources {
+		if parsed, err := url.Parse(resource); err == nil && parsed.Hostname() != "" {
+			hostSet[strings.ToLower(parsed.Hostname())] = struct{}{}
+		}
+	}
+	hosts := make([]string, 0, len(hostSet))
+	for host := range hostSet {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+
+	message := fmt.Sprintf("Browser coverage was limited: %d unique request(s) were blocked by scope or request budget", len(resources))
+	if len(hosts) > 0 {
+		displayedHosts := hosts
+		if len(displayedHosts) > 5 {
+			displayedHosts = displayedHosts[:5]
+		}
+		message += fmt.Sprintf(" across %d host(s) (%s", len(hosts), strings.Join(displayedHosts, ", "))
+		if len(displayedHosts) < len(hosts) {
+			message += fmt.Sprintf(", and %d more", len(hosts)-len(displayedHosts))
+		}
+		message += ")"
+	}
+	message += "; allow only required passive dependency hosts with browser_resource_domains, or increase request_budget if those hosts are already allowed"
+	_ = c.emit("coverage_gap", message, map[string]interface{}{
+		"phase": "crawling", "reason": "browser_request_policy", "blocked_requests": len(resources), "blocked_hosts": hosts,
+	})
 }
 
 // IngestSeeds adds explicit in-scope URLs for later crawl phases.
@@ -144,6 +207,7 @@ func (c *Crawler) Crawl(ctx context.Context, seeds []string) error {
 	c.browserRecovered = 0
 	c.failures = 0
 	c.eventBatch = nil
+	c.browserBlocked = make(map[string]struct{})
 	c.mu.Unlock()
 
 	_ = c.emit("crawler_started", "crawler started", map[string]interface{}{"scan_id": c.scanID})
@@ -187,6 +251,7 @@ func (c *Crawler) Crawl(ctx context.Context, seeds []string) error {
 	})
 
 	c.runWorkers(ctx, budget)
+	c.emitBrowserBlockedSummary()
 	c.mu.Lock()
 	contentPages, rejectedPages, networkErrors := c.contentPages, c.rejectedPages, c.networkErrors
 	c.mu.Unlock()
@@ -539,9 +604,7 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 		c.mu.Unlock()
 		if instrumented, ok := c.browser.(InstrumentedBrowserFetcher); ok {
 			snapshot, browserErr := instrumented.FetchInstrumented(ctx, rawURL)
-			if len(snapshot.BlockedResources) > 0 {
-				_ = c.emit("coverage_gap", "Browser requests were blocked by scope or budget; explicitly configure browser_resource_domains for required passive CDN dependencies", map[string]interface{}{"phase": "crawling", "url": rawURL, "blocked_requests": len(snapshot.BlockedResources)})
-			}
+			c.recordBrowserBlocked(snapshot.BlockedResources)
 			if deniedDocument && browserErr == nil {
 				if snapshot.DocumentStatus < 200 || snapshot.DocumentStatus >= 300 ||
 					strings.TrimSpace(snapshot.DOM) == "" || !c.scope.IsInScope(snapshot.URL) {
@@ -1101,7 +1164,7 @@ func (c *Crawler) scanSupplyChain(sourceURL, body string) {
 				"module": "supply_chain", "signal": "compromised_supply_chain_domain",
 				"payload": map[string]string{"value": bad.domain}, "location": "response_body",
 				"request":          map[string]string{"method": "GET", "url": sourceURL},
-				"resp_body":        secretscan.ResponseSnippet(body, bad.domain),
+				"resp_body":        body,
 				"response_markers": []string{bad.domain}, "cwe": "CWE-829",
 			})
 			evidence := string(evidenceBytes)
@@ -1164,7 +1227,7 @@ func (c *Crawler) scanThirdPartyScriptIntegrity(sourceURL, body string) {
 			"module": "supply_chain", "signal": "third_party_script_missing_sri",
 			"payload": map[string]string{"value": marker}, "location": "response_body",
 			"request":          map[string]string{"method": "GET", "url": sourceURL},
-			"resp_body":        secretscan.ResponseSnippet(body, marker),
+			"resp_body":        body,
 			"response_markers": []string{marker}, "script_url": scriptURL.String(),
 			"control": "subresource_integrity", "cwe": "CWE-353",
 		})

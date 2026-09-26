@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
@@ -111,6 +112,7 @@ type EvidenceBody struct {
 	// Burp-style raw request/response text and a concise attack summary.
 	RawRequest       string                        `json:"raw_request,omitempty"`
 	RawResponse      string                        `json:"raw_response,omitempty"`
+	BodyTruncated    bool                          `json:"body_truncated,omitempty"`
 	Module           string                        `json:"module,omitempty"`
 	Signal           string                        `json:"signal,omitempty"`
 	Payload          string                        `json:"payload,omitempty"`
@@ -568,6 +570,14 @@ func parseEvidenceBody(raw string) EvidenceBody {
 	body := EvidenceBody{EvidenceJSON: raw}
 	var parsed map[string]interface{}
 	_ = json.Unmarshal([]byte(raw), &parsed)
+	body.RawRequest, _ = parsed["raw_request"].(string)
+	body.RawResponse, _ = parsed["raw_response"].(string)
+	body.Method, _ = parsed["method"].(string)
+	body.URL, _ = parsed["url"].(string)
+	if code, ok := parsed["status_code"].(float64); ok {
+		body.StatusCode = int(code)
+	}
+	body.BodyTruncated, _ = parsed["body_truncated"].(bool)
 
 	// Legacy flat keys (kept for backward compatibility).
 	if v, ok := parsed["req_body"].(string); ok {
@@ -655,8 +665,12 @@ func parseEvidenceBody(raw string) EvidenceBody {
 		}
 	}
 	if req, ok := parsed["request"].(map[string]interface{}); ok {
-		body.Method, _ = req["method"].(string)
-		body.URL, _ = req["url"].(string)
+		if method, _ := req["method"].(string); method != "" {
+			body.Method = method
+		}
+		if rawURL, _ := req["url"].(string); rawURL != "" {
+			body.URL = rawURL
+		}
 		reqHeaders := headerLines(req["headers"])
 		reqBody, _ := req["body"].(string)
 		if body.ReqHeaders == "" {
@@ -665,7 +679,12 @@ func parseEvidenceBody(raw string) EvidenceBody {
 		if body.ReqBody == "" {
 			body.ReqBody = reqBody
 		}
-		body.RawRequest = buildRawRequest(body.Method, body.URL, reqHeaders, reqBody)
+		if captured, _ := req["raw"].(string); captured != "" {
+			body.RawRequest = captured
+		}
+		if body.RawRequest == "" {
+			body.RawRequest = buildRawRequest(body.Method, body.URL, body.ReqHeaders, body.ReqBody)
+		}
 	}
 	if resp, ok := parsed["response"].(map[string]interface{}); ok {
 		if code, ok := resp["status_code"].(float64); ok {
@@ -682,7 +701,15 @@ func parseEvidenceBody(raw string) EvidenceBody {
 		if body.RespBody == "" {
 			body.RespBody = respBody
 		}
-		body.RawResponse = buildRawResponse(body.StatusCode, respHeaders, respBody)
+		if truncated, _ := resp["body_truncated"].(bool); truncated {
+			body.BodyTruncated = true
+		}
+		if captured, _ := resp["raw"].(string); captured != "" {
+			body.RawResponse = captured
+		}
+		if body.RawResponse == "" {
+			body.RawResponse = buildRawResponse(body.StatusCode, body.RespHeaders, body.RespBody)
+		}
 	}
 	body.CurlCommand = buildCurlCommand(body.Method, body.URL, body.ReqHeaders, body.ReqBody)
 	applyTypedEvidenceFallback(raw, &body)
@@ -832,11 +859,21 @@ func headerLines(v interface{}) string {
 	sort.Strings(keys)
 	var b strings.Builder
 	for _, k := range keys {
-		if s, ok := m[k].(string); ok {
+		writeHeader := func(s string) {
 			b.WriteString(k)
 			b.WriteString(": ")
 			b.WriteString(s)
 			b.WriteByte('\n')
+		}
+		switch value := m[k].(type) {
+		case string:
+			writeHeader(value)
+		case []interface{}:
+			for _, item := range value {
+				if s, ok := item.(string); ok {
+					writeHeader(s)
+				}
+			}
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
@@ -851,29 +888,178 @@ func buildRawRequest(method, rawURL, headers, reqBody string) string {
 	if u, err := url.Parse(rawURL); err == nil && u.Host != "" {
 		host = u.Host
 		path = u.RequestURI()
+		if path == "" {
+			path = "/"
+		}
+	} else if path == "" {
+		path = "/"
 	}
-	var b strings.Builder
 	if method == "" {
 		method = "GET"
 	}
+
+	type headerEntry struct {
+		key   string
+		value string
+	}
+	var customHeaders []headerEntry
+	hasHeader := make(map[string]bool)
+
+	for _, line := range strings.Split(headers, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		key, val, ok := strings.Cut(line, ":")
+		if ok {
+			k := strings.TrimSpace(key)
+			v := strings.TrimSpace(val)
+			hasHeader[strings.ToLower(k)] = true
+			customHeaders = append(customHeaders, headerEntry{key: k, value: v})
+		}
+	}
+
+	var b strings.Builder
 	b.WriteString(method)
 	b.WriteByte(' ')
 	b.WriteString(path)
 	b.WriteString(" HTTP/1.1\n")
-	if host != "" {
-		b.WriteString("Host: ")
-		b.WriteString(host)
-		b.WriteByte('\n')
+
+	// 1. Host
+	if hasHeader["host"] {
+		for _, h := range customHeaders {
+			if strings.EqualFold(h.key, "host") {
+				b.WriteString(h.key + ": " + h.value + "\n")
+				break
+			}
+		}
+	} else if host != "" {
+		b.WriteString("Host: " + host + "\n")
 	}
-	if headers != "" {
-		b.WriteString(headers)
-		b.WriteByte('\n')
+
+	// 2. User-Agent
+	if hasHeader["user-agent"] {
+		for _, h := range customHeaders {
+			if strings.EqualFold(h.key, "user-agent") {
+				b.WriteString(h.key + ": " + h.value + "\n")
+				break
+			}
+		}
+	} else {
+		b.WriteString("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36\n")
 	}
+
+	// 3. Accept
+	if hasHeader["accept"] {
+		for _, h := range customHeaders {
+			if strings.EqualFold(h.key, "accept") {
+				b.WriteString(h.key + ": " + h.value + "\n")
+				break
+			}
+		}
+	} else {
+		b.WriteString("Accept: */*\n")
+	}
+
+	// 4. Accept-Language
+	if hasHeader["accept-language"] {
+		for _, h := range customHeaders {
+			if strings.EqualFold(h.key, "accept-language") {
+				b.WriteString(h.key + ": " + h.value + "\n")
+				break
+			}
+		}
+	} else {
+		b.WriteString("Accept-Language: en-US,en;q=0.9\n")
+	}
+
+	// 5. Accept-Encoding
+	if hasHeader["accept-encoding"] {
+		for _, h := range customHeaders {
+			if strings.EqualFold(h.key, "accept-encoding") {
+				b.WriteString(h.key + ": " + h.value + "\n")
+				break
+			}
+		}
+	} else {
+		b.WriteString("Accept-Encoding: gzip, deflate\n")
+	}
+
+	// 6. Content-Type (if body present)
 	if reqBody != "" {
-		b.WriteByte('\n')
-		b.WriteString(reqBody)
+		if hasHeader["content-type"] {
+			for _, h := range customHeaders {
+				if strings.EqualFold(h.key, "content-type") {
+					b.WriteString(h.key + ": " + h.value + "\n")
+					break
+				}
+			}
+		} else {
+			trimmed := strings.TrimSpace(reqBody)
+			if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+				b.WriteString("Content-Type: application/json\n")
+			} else if strings.HasPrefix(trimmed, "<?xml") || strings.HasPrefix(trimmed, "<") {
+				b.WriteString("Content-Type: application/xml\n")
+			} else {
+				b.WriteString("Content-Type: application/x-www-form-urlencoded\n")
+			}
+		}
+
+		// 7. Content-Length (if body present)
+		if hasHeader["content-length"] {
+			for _, h := range customHeaders {
+				if strings.EqualFold(h.key, "content-length") {
+					b.WriteString(h.key + ": " + h.value + "\n")
+					break
+				}
+			}
+		} else {
+			b.WriteString(fmt.Sprintf("Content-Length: %d\n", len(reqBody)))
+		}
 	}
-	return strings.TrimRight(b.String(), "\n")
+
+	// 8. Connection
+	if hasHeader["connection"] {
+		for _, h := range customHeaders {
+			if strings.EqualFold(h.key, "connection") {
+				b.WriteString(h.key + ": " + h.value + "\n")
+				break
+			}
+		}
+	} else {
+		b.WriteString("Connection: close\n")
+	}
+
+	// 9. All remaining custom headers (Cookie, Authorization, Referer, X-*, etc.)
+	standardHeaders := map[string]bool{
+		"host":            true,
+		"user-agent":      true,
+		"accept":          true,
+		"accept-language": true,
+		"accept-encoding": true,
+		"connection":      true,
+		"content-type":    true,
+		"content-length":  true,
+	}
+	for _, h := range customHeaders {
+		if !standardHeaders[strings.ToLower(h.key)] {
+			b.WriteString(h.key + ": " + h.value + "\n")
+		}
+	}
+
+	b.WriteByte('\n')
+	b.WriteString(reqBody)
+	return b.String()
+}
+
+func hasHeaderLine(headers, name string) bool {
+	for _, line := range strings.Split(headers, "\n") {
+		key, _, ok := strings.Cut(line, ":")
+		if ok && strings.EqualFold(strings.TrimSpace(key), name) {
+			return true
+		}
+	}
+	return false
 }
 
 func buildCurlCommand(method, rawURL, headers, reqBody string) string {
@@ -925,16 +1111,19 @@ func buildRawResponse(status int, headers, respBody string) string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "HTTP/1.1 %d\n", status)
+	statusText := http.StatusText(status)
+	if statusText != "" {
+		fmt.Fprintf(&b, "HTTP/1.1 %d %s\n", status, statusText)
+	} else {
+		fmt.Fprintf(&b, "HTTP/1.1 %d\n", status)
+	}
 	if headers != "" {
 		b.WriteString(headers)
 		b.WriteByte('\n')
 	}
-	if respBody != "" {
-		b.WriteByte('\n')
-		b.WriteString(respBody)
-	}
-	return strings.TrimRight(b.String(), "\n")
+	b.WriteByte('\n')
+	b.WriteString(respBody)
+	return b.String()
 }
 
 func RawHTTPFromRecord(rec RequestResponseRecord) (string, string) {

@@ -76,6 +76,7 @@ type HTTPEvidence struct {
 	OASTURL          string                                  `json:"oast_url,omitempty"`
 	RawRequest       string                                  `json:"raw_request,omitempty"`
 	RawResponse      string                                  `json:"raw_response,omitempty"`
+	BodyTruncated    bool                                    `json:"body_truncated,omitempty"`
 	CurlCommand      string                                  `json:"curl_command,omitempty"`
 	RespBody         string                                  `json:"resp_body,omitempty"`
 	ConfidenceScore  float64                                 `json:"confidence_score,omitempty"`

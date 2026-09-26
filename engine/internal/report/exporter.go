@@ -209,7 +209,7 @@ func (e *Exporter) streamFindingsHTML(w io.Writer, opts Options, kind TemplateKi
 	filter := e.builder.Filter(opts)
 	total := e.builder.CountReportableFindings(opts)
 	if total == 0 {
-		_, err := io.WriteString(w, `<section class="report-section"><h2>Findings</h2><div class="card"><p class="meta-line">No findings matched the selected filters.</p></div></section>`)
+		_, err := io.WriteString(w, `<section id="findings" class="report-section"><h2>Findings</h2><div class="card"><p class="meta-line">No findings matched the selected filters.</p></div></section>`)
 		return err
 	}
 	filterControls := `<div class="filter-controls">
@@ -226,7 +226,7 @@ func (e *Exporter) streamFindingsHTML(w io.Writer, opts Options, kind TemplateKi
 			<button class="filter-btn" onclick="toggleAllDetails(false)">📁 Collapse All</button>
 		</div>
 	</div>`
-	if _, err := io.WriteString(w, `<section class="report-section"><h2>Findings</h2>`+filterControls+`<div class="findings-list">`); err != nil {
+	if _, err := io.WriteString(w, `<section id="findings" class="report-section"><h2>Findings</h2>`+filterControls+`<div class="findings-list">`); err != nil {
 		return err
 	}
 	written := 0

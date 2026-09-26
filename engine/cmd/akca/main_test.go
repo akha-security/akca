@@ -18,8 +18,8 @@ import (
 )
 
 func TestVersionIsStableReleaseString(t *testing.T) {
-	if version != "0.2.3" {
-		t.Fatalf("version=%q, want 0.2.3", version)
+	if version != "0.2.4" {
+		t.Fatalf("version=%q, want 0.2.4", version)
 	}
 }
 
@@ -48,7 +48,7 @@ func TestUsageHelpAndVersionPrintBrandBanner(t *testing.T) {
 			if !strings.Contains(combined, akcaASCII[0]) {
 				t.Fatalf("ASCII wordmark missing for %s: %q", tc.name, combined)
 			}
-			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.3") {
+			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.4") {
 				t.Fatalf("brand/version line missing for %s: %q", tc.name, combined)
 			}
 		})
@@ -194,34 +194,71 @@ func TestOASTCallbackPanelIsStructuredAndDeduplicated(t *testing.T) {
 
 func TestScanSessionPanelIsCompactAndUsesStringTargets(t *testing.T) {
 	panel := scanSessionPanel(map[string]interface{}{
-		"targets":                []string{"http://example.test"},
-		"global_rate_limit":      50.0,
-		"max_pages":              1000,
-		"max_endpoints":          1000,
-		"crawler_request_budget": 1000,
-		"payload_budget":         "unlimited",
-		"scan_profile":           "FullBugBounty",
-		"oast_enabled":           true,
+		"targets":                      []string{"http://example.test"},
+		"global_rate_limit":            50.0,
+		"max_pages":                    1000,
+		"max_endpoints":                1000,
+		"crawler_request_budget":       1000,
+		"payload_budget":               "unlimited",
+		"scan_profile":                 "FullBugBounty",
+		"oast_enabled":                 true,
+		"browser_enabled":              true,
+		"js_analysis_enabled":          true,
+		"auth_configured":              true,
+		"memory_limit_mb":              8192,
+		"memory_limit_source":          "automatic_windows",
+		"detected_available_memory_mb": 16384,
 	})
 	for _, want := range []string{
-		"SCAN CONTROL", "LIVE", "TARGET", "http://example.test", "PROFILE", "FullBugBounty",
-		"DISCOVERY", "1K URLs / 1K endpoints", "VERIFICATION", "OAST Ready",
-		"Traffic policy", "50 requests/sec maximum", "No total request cap",
+		"SCAN SESSION", "ACTIVE", "TARGET", "http://example.test", "PROFILE", "Full Scan",
+		"CRAWL", "1K URLs · 1K endpoints", "OAST", "OAST Ready",
+		"RATE", "50 req/s", "REQUESTS", "Uncapped", "RAM", "8.0G cap · 16.0G avail",
+		"ENGINE", "Browser + JS", "AUTH", "Authenticated", "TRANSPORT", "Direct · TLS on",
 	} {
 		if !strings.Contains(panel, want) {
 			t.Fatalf("session panel omitted %q: %q", want, panel)
 		}
 	}
-	if strings.Contains(panel, "[OAST ACTIVE]") || strings.Contains(panel, "domain=") {
+	if strings.Contains(panel, "[OAST ACTIVE]") || strings.Contains(panel, "domain=") || strings.Contains(panel, "SCAN CONTROL") {
 		t.Fatalf("legacy duplicate OAST banner leaked into session panel: %q", panel)
 	}
 	lines := strings.Split(strings.TrimSuffix(panel, "\n\n"), "\n")
-	if len(lines) != 9 {
+	if len(lines) != 11 {
 		t.Fatalf("session panel should remain compact, lines=%d: %q", len(lines), panel)
 	}
 	for _, line := range lines {
 		if visibleLen(line) > uiWidth+4 {
 			t.Fatalf("session panel line overflows (%d columns): %q", visibleLen(line), line)
+		}
+	}
+}
+
+func TestScanSessionPanelLongValuesPreserveAlignment(t *testing.T) {
+	longURL := "https://very-long-subdomain-name.example-corp-enterprise-infrastructure.internal/path/to/deeply/nested/api/v2/microservice/endpoint?param1=long_value&param2=another_very_long_string_value#section"
+	longProfile := "ExtremelyLongCustomSecurityTestingProfileName"
+	panel := scanSessionPanel(map[string]interface{}{
+		"targets":           []string{longURL},
+		"scan_profile":      longProfile,
+		"global_rate_limit": 100.0,
+		"max_pages":         50000,
+		"max_endpoints":     50000,
+		"oast_enabled":      true,
+		"auth_configured":   false,
+		"memory_limit_mb":   16384,
+		"resolved_info":     "HTTP/2 · Cloudflare CDN · TLS 1.3",
+	})
+
+	lines := strings.Split(strings.TrimSuffix(panel, "\n\n"), "\n")
+	// With resolved info, line count is 12 (hero has subline)
+	if len(lines) != 12 {
+		t.Fatalf("expected 12 lines with resolved info, got %d: %q", len(lines), panel)
+	}
+
+	expectedWidth := uiWidth + 4
+	for i, line := range lines {
+		vl := visibleLen(line)
+		if vl != expectedWidth {
+			t.Fatalf("line %d has width %d (expected exactly %d): %q", i+1, vl, expectedWidth, line)
 		}
 	}
 }
@@ -247,8 +284,11 @@ func TestUnlimitedDiscoveryLimitsAreNotDisplayedAsZero(t *testing.T) {
 	}
 	panel := scanSessionPanel(payload)
 	line := scanSessionLine(payload)
-	if want := "No crawl ceiling"; !strings.Contains(panel, want) {
+	if want := "Exhaustive"; !strings.Contains(panel, want) {
 		t.Fatalf("unlimited session panel omitted %q: %q", want, panel)
+	}
+	if strings.Contains(panel, "No crawl ceiling") {
+		t.Fatalf("legacy crawl wording leaked into session panel: %q", panel)
 	}
 	for _, want := range []string{"urls=unlimited", "endpoints=unlimited", "crawler_requests=unlimited"} {
 		if !strings.Contains(line, want) {
@@ -275,9 +315,9 @@ func TestRunningStatusPanelShowsScanHealth(t *testing.T) {
 	cw.progressPercent = 50
 	cw.processMemoryMB = 620
 	cw.memoryLimitMB = 12_284
-	cw.eta = "00:02:10"
+	cw.startTime = time.Now().Add(-130 * time.Second)
 	panel := cw.runningStatusPanel()
-	for _, want := range []string{"LIVE SCAN", "Running", "http://example.test/", "Full Scan", "42.5 requests/sec", "peak 52.0", "Ready and active", "50%", "00:02:10", "318 / 1,000 URLs", "620 MB / 12.0 GB"} {
+	for _, want := range []string{"LIVE SCAN", "Running", "http://example.test/", "Full Scan", "42.5 requests/sec", "peak 52.0", "Ready and active", "50%", "Elapsed", "00:02:", "318 / 1,000 URLs", "620 MB / 12.0 GB"} {
 		if !strings.Contains(panel, want) {
 			t.Fatalf("running panel omitted %q: %q", want, panel)
 		}
@@ -292,7 +332,7 @@ func TestRunningStatusPanelShowsScanHealth(t *testing.T) {
 	}
 }
 
-func TestBudgetCoverageGapVisibleWithoutVerbose(t *testing.T) {
+func TestCoverageGapHiddenInNormalMode(t *testing.T) {
 	var output bytes.Buffer
 	cw := NewConsoleWriter()
 	cw.out = &output
@@ -300,8 +340,22 @@ func TestBudgetCoverageGapVisibleWithoutVerbose(t *testing.T) {
 	if err := cw.WriteEvent(events.Event{Type: "coverage_gap", Message: "XSS incomplete: request limit reached", Payload: map[string]interface{}{"targets_budget_exhausted": 1}}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "XSS incomplete") {
-		t.Fatalf("budget gap hidden: %q", output.String())
+	if output.Len() != 0 {
+		t.Fatalf("coverage gap should be hidden in normal mode: %q", output.String())
+	}
+}
+
+func TestCoverageGapVisibleInVerboseMode(t *testing.T) {
+	var output bytes.Buffer
+	cw := NewConsoleWriter()
+	cw.out = &output
+	cw.mode = "verbose"
+	message := "Module cookie_security coverage incomplete: 29 failed target(s); request budget was not the cause"
+	if err := cw.WriteEvent(events.Event{Type: "coverage_gap", Message: message, Payload: map[string]interface{}{"targets_failed": 29}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "[COVERAGE]") || !strings.Contains(output.String(), "cookie_security coverage incomplete") {
+		t.Fatalf("failed-target coverage gap hidden in verbose mode: %q", output.String())
 	}
 }
 
@@ -381,14 +435,9 @@ func TestScanProgressUsesPipelineStagesInsteadOfEndpointGuess(t *testing.T) {
 	}
 }
 
-func TestETAUsesWholeScanProgress(t *testing.T) {
-	now := time.Now()
-	cw := NewConsoleWriter()
-	cw.startTime = now.Add(-2 * time.Minute)
-	cw.progressPercent = 20
-	cw.updateETALocked(now)
-	if cw.eta != "00:08:00" {
-		t.Fatalf("ETA=%q, want 00:08:00", cw.eta)
+func TestElapsedUsesClockDuration(t *testing.T) {
+	if got := clockDuration(2*time.Hour + time.Minute + 58*time.Second); got != "02:01:58" {
+		t.Fatalf("elapsed=%q, want 02:01:58", got)
 	}
 }
 
@@ -400,11 +449,15 @@ func TestRunningStatusUsesPortableSingleLine(t *testing.T) {
 	cw.scanActive = true
 	cw.target = "http://example.test/"
 	cw.urlLimit = 1000
+	cw.startTime = time.Now().Add(-130 * time.Second)
 
 	cw.writeRunningStatus()
 	got := output.String()
-	if !strings.Contains(got, "SCAN") || !strings.Contains(got, "0 / 1,000 URLs") {
+	if !strings.Contains(got, "SCAN") || !strings.Contains(got, "Elapsed 00:02:") {
 		t.Fatalf("single-line scan status was not rendered: %q", got)
+	}
+	if strings.Contains(got, "Elapsed 00:0…") {
+		t.Fatalf("elapsed time was truncated before its changing digits: %q", got)
 	}
 	if strings.Contains(got, "0.0 requests/sec") || strings.Contains(got, "0.0 req/s") {
 		t.Fatalf("idle request-rate noise leaked into scan status: %q", got)
@@ -445,11 +498,43 @@ func TestPanelsRespectNarrowTerminalWidth(t *testing.T) {
 	}
 }
 
-func TestNormalizeScanArgsSupportsFlagsAfterLeadingTarget(t *testing.T) {
-	got := normalizeScanArgs([]string{"https://example.test", "--mode", "sql"})
-	want := []string{"--url", "https://example.test", "--mode", "sql"}
-	if strings.Join(got, "|") != strings.Join(want, "|") {
-		t.Fatalf("normalized args=%v, want %v", got, want)
+func TestShortAndDetailedHelpHaveDifferentScopes(t *testing.T) {
+	_, short := captureCLIOutput(t, func() {
+		if code := runCLI([]string{"-h"}); code != 0 {
+			t.Fatalf("short help exit=%d", code)
+		}
+	})
+	_, detailed := captureCLIOutput(t, func() {
+		if code := runCLI([]string{"--help"}); code != 0 {
+			t.Fatalf("detailed help exit=%d", code)
+		}
+	})
+	for _, output := range []string{short, detailed} {
+		if strings.Contains(output, "akca -d <domain>") || strings.Contains(output, "akca <url>") {
+			t.Fatalf("unsupported invocation leaked into help: %q", output)
+		}
+	}
+	if strings.Contains(short, "TRAFFIC AND BUDGETS") || strings.Contains(short, "--request-budget") {
+		t.Fatalf("short help contains advanced options: %q", short)
+	}
+	if !strings.Contains(detailed, "TRAFFIC AND BUDGETS") || !strings.Contains(detailed, "--request-budget") {
+		t.Fatalf("detailed help omitted advanced options: %q", detailed)
+	}
+	if len(detailed) <= len(short) {
+		t.Fatalf("detailed help must be longer than short help: short=%d detailed=%d", len(short), len(detailed))
+	}
+}
+
+func TestUnsupportedLegacyTargetFormsAreRejected(t *testing.T) {
+	for _, args := range [][]string{{"-d", "example.test"}, {"https://example.test"}} {
+		_, stderr := captureCLIOutput(t, func() {
+			if code := runCLI(args); code != 2 {
+				t.Fatalf("runCLI(%v) exit=%d, want 2", args, code)
+			}
+		})
+		if !strings.Contains(stderr, "ERROR") {
+			t.Fatalf("runCLI(%v) omitted error: %q", args, stderr)
+		}
 	}
 }
 
@@ -605,5 +690,63 @@ func TestCLIEndToEndPassiveScanWritesReport(t *testing.T) {
 	}
 	if _, ok := document["scope"]; !ok {
 		t.Fatal("generated report omitted scan scope metadata")
+	}
+}
+
+func TestPhaseLabelVulnModuleFriendlyNames(t *testing.T) {
+	tests := []struct {
+		phase string
+		want  string
+	}{
+		{"vuln_module_rate_limit", "Rate Limit"},
+		{"vuln_module_sqli", "SQL Injection"},
+		{"vuln_module_xss", "Cross-Site Scripting (XSS)"},
+		{"vuln_module_backup_archives", "Backup Archives"},
+		{"vuln_module_cors", "CORS Security"},
+		{"vuln_module_custom_test_probe", "Custom Test Probe"},
+	}
+	for _, tt := range tests {
+		got := phaseLabel(tt.phase)
+		if got != tt.want {
+			t.Errorf("phaseLabel(%q) = %q, want %q", tt.phase, got, tt.want)
+		}
+	}
+}
+
+func TestPhaseLifecycleTransitionsRunningToCompleted(t *testing.T) {
+	var output bytes.Buffer
+	cw := NewConsoleWriter()
+	cw.out = &output
+	cw.interactive = true
+	cw.scanActive = true
+
+	if err := cw.WriteEvent(events.Event{
+		Type:    "phase_started",
+		Payload: map[string]interface{}{"phase": "vuln_module_rate_limit"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	startOutput := output.String()
+	if !strings.Contains(startOutput, "Rate Limit") {
+		t.Fatalf("phase start omitted friendly name: %q", startOutput)
+	}
+	if !strings.Contains(startOutput, "RUNNING") {
+		t.Fatalf("phase start omitted RUNNING: %q", startOutput)
+	}
+
+	if err := cw.WriteEvent(events.Event{
+		Type:    "phase_finished",
+		Payload: map[string]interface{}{"phase": "vuln_module_rate_limit"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	fullOutput := output.String()
+	if !strings.Contains(fullOutput, "COMPLETED") {
+		t.Fatalf("phase finished omitted COMPLETED: %q", fullOutput)
+	}
+	if !strings.Contains(fullOutput, "\033[1A") {
+		t.Fatalf("phase finished did not replace RUNNING line in-place: %q", fullOutput)
 	}
 }

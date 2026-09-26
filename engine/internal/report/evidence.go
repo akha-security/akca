@@ -44,6 +44,7 @@ func httpEvidenceFromRecord(rec storage.FindingRecord) HTTPEvidence {
 		OASTURL:          body.OASTURL,
 		RawRequest:       body.RawRequest,
 		RawResponse:      body.RawResponse,
+		BodyTruncated:    body.BodyTruncated,
 		CurlCommand:      body.CurlCommand,
 		RespBody:         body.RespBody,
 		ConfidenceScore:  body.ConfidenceScore,

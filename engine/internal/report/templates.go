@@ -45,16 +45,13 @@ func vulnerabilityOverviewHTML(metrics storage.DashboardMetrics) string {
 	if len(items) == 0 {
 		b.WriteString(`<div class="empty-state"><strong>No reportable vulnerabilities found.</strong><span>The assessment did not produce a confirmed or high-confidence finding.</span></div>`)
 	} else {
-		b.WriteString(`<div class="vulnerability-grid">`)
+		b.WriteString(`<table class="data vulnerability-index"><thead><tr><th>#</th><th>Vulnerability</th><th>Instances</th></tr></thead><tbody>`)
 		for index, item := range items {
-			b.WriteString(`<button type="button" class="vulnerability-tile" data-vclass="` +
+			b.WriteString(`<tr><td>` + fmt.Sprintf("%02d", index+1) + `</td><td><button type="button" class="vulnerability-link" data-vclass="` +
 				template.HTMLEscapeString(item.Class) + `" onclick="setClassFilter(this.dataset.vclass)">`)
-			b.WriteString(`<span class="tile-rank">` + fmt.Sprintf("%02d", index+1) + `</span>`)
-			b.WriteString(`<span class="tile-copy"><strong>` + template.HTMLEscapeString(item.Label) +
-				`</strong><small>` + template.HTMLEscapeString(item.Class) + `</small></span>`)
-			b.WriteString(`<span class="tile-count">` + fmt.Sprintf("%d", item.Count) + `</span></button>`)
+			b.WriteString(template.HTMLEscapeString(item.Label) + `</button></td><td>` + fmt.Sprintf("%d", item.Count) + `</td></tr>`)
 		}
-		b.WriteString(`</div>`)
+		b.WriteString(`</tbody></table>`)
 	}
 	b.WriteString(`</section>`)
 	return b.String()
@@ -157,10 +154,10 @@ func htmlDocStart(meta Document) string {
 	--panel-soft: #f1f5f9;
 	--code-bg: #f1f5f9;
 	--code-ink: #0f172a;
-	--http-bg: #0f172a;
-	--http-ink: #f8fafc;
-	--http-border: #1e293b;
-	--http-header-bg: #1e293b;
+	--http-bg: #ffffff;
+	--http-ink: #0f172a;
+	--http-border: #e2e8f0;
+	--http-header-bg: #f8fafc;
 	--shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
 	--shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
 	--shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.04);
@@ -230,7 +227,7 @@ body {
 }
 
 .wrap {
-	max-width: 1240px;
+	max-width: 1160px;
 	margin: 0 auto;
 	padding: 2rem 1.5rem 4rem;
 }
@@ -306,7 +303,7 @@ body {
 	border: 1px solid var(--line);
 	border-radius: var(--radius-lg);
 	margin-bottom: 1.5rem;
-	box-shadow: var(--shadow-md);
+	box-shadow: none;
 	position: relative;
 	overflow: hidden;
 }
@@ -326,7 +323,15 @@ body {
 	gap: 2rem;
 	flex-wrap: wrap;
 }
-.hero-main { max-width: 800px; }
+.hero-main { flex: 1; min-width: 0; }
+.report-logo { width: 108px; height: 108px; object-fit: contain; flex: 0 0 auto; }
+.report-hero .hero-flex { flex-wrap: nowrap; }
+@media (max-width: 720px) {
+	.report-hero { padding: 1.25rem; }
+	.report-hero .hero-flex { flex-wrap: wrap; gap: 1rem; }
+	.report-logo { width: 72px; height: 72px; }
+	.hero-total { display: none; }
+}
 .hero-kicker {
 	color: var(--accent);
 	font-size: 0.75rem;
@@ -897,73 +902,153 @@ section.report-section > h2 {
 .traffic-detail {
 	margin-top: 1.2rem;
 	border: 1px solid var(--http-border);
-	border-radius: 11px;
+	border-radius: var(--radius);
 	overflow: hidden;
 	background: var(--http-bg);
-	box-shadow: 0 12px 28px rgba(2, 6, 23, 0.18);
+	box-shadow: var(--shadow-sm);
 }
 .traffic-tabs {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
 	gap: 0.35rem;
-	padding: 0.48rem;
+	padding: 0.5rem 0.65rem 0;
 	background: var(--http-header-bg);
 	border-bottom: 1px solid var(--http-border);
 }
 .traffic-tab {
 	position: relative;
 	min-width: 108px;
-	padding: 0.58rem 1rem 0.58rem 2rem;
+	padding: 0.58rem 1.15rem 0.58rem 2.1rem;
 	border: 1px solid transparent;
-	border-radius: 7px;
+	border-bottom: 0;
+	border-radius: 8px 8px 0 0;
 	background: transparent;
-	color: #94a3b8;
-	font: 700 0.76rem 'Segoe UI', sans-serif;
+	color: var(--muted);
+	font: 700 0.8rem 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
 	letter-spacing: 0.02em;
 	cursor: pointer;
-	transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+	transition: all 0.15s ease;
+	margin-bottom: -1px;
 }
 .traffic-tab::before {
 	content: '';
 	position: absolute;
-	left: 0.85rem;
+	left: 0.95rem;
 	top: 50%%;
-	width: 7px;
-	height: 7px;
+	width: 8px;
+	height: 8px;
 	transform: translateY(-50%%);
 	border-radius: 50%%;
-	background: #475569;
+	background: var(--muted);
+	transition: all 0.15s ease;
 }
-.traffic-tab:hover { color: #e2e8f0; background: rgba(255, 255, 255, 0.04); }
-.traffic-tab.active { color: #fff; background: rgba(255, 255, 255, 0.08); border-color: #334155; }
-.traffic-tab.active::before { background: #22d3ee; box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.13); }
-.traffic-tab-panel { display: none; }
+.traffic-tab:hover {
+	color: var(--ink);
+	background: var(--panel-soft);
+}
+.traffic-tab.active {
+	color: var(--accent);
+	background: var(--http-bg);
+	border: 1px solid var(--http-border);
+	border-bottom-color: var(--http-bg);
+	font-weight: 800;
+	box-shadow: 0 -2px 6px rgba(0, 0, 0, 0.03);
+}
+.traffic-tab.active::before {
+	background: var(--accent);
+	box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.traffic-tab-panel { display: block; }
+.js-ready .traffic-tab-panel { display: none; }
 .traffic-tab-panel.active { display: block; }
+.js-ready .traffic-tab-panel.active { display: block; }
+.evidence-actions { display: flex; gap: 0.4rem; flex-shrink: 0; }
+.evidence-notice { padding: 0.85rem 1rem; border-left: 3px solid var(--med); background: var(--bg-subtle); color: var(--ink); }
 .evidence-toolbar {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
 	gap: 1rem;
-	padding: 0.68rem 0.9rem;
-	background: #0b1220;
+	padding: 0.7rem 1.1rem;
+	background: var(--http-header-bg);
 	border-bottom: 1px solid var(--http-border);
 }
-.evidence-context { display: flex; align-items: center; gap: 0.55rem; min-width: 0; color: #94a3b8; font-size: 0.72rem; }
+.evidence-context {
+	display: flex;
+	align-items: center;
+	gap: 0.6rem;
+	min-width: 0;
+	color: var(--muted);
+	font-size: 0.76rem;
+	font-weight: 600;
+}
 .evidence-direction {
 	display: inline-flex;
 	align-items: center;
-	padding: 0.18rem 0.48rem;
-	border: 1px solid #334155;
+	padding: 0.2rem 0.55rem;
+	border: 1px solid var(--line);
 	border-radius: 999px;
-	color: #cbd5e1;
-	font: 800 0.63rem 'Segoe UI', sans-serif;
+	background: var(--card);
+	color: var(--ink);
+	font: 800 0.65rem 'Segoe UI', sans-serif;
 	letter-spacing: 0.08em;
 }
-.evidence-method, .evidence-status { color: #67e8f9; font: 700 0.72rem 'JetBrains Mono', Consolas, monospace; }
-.traffic-detail .copy-btn { color: #cbd5e1; background: #111827; border-color: #334155; }
-.traffic-detail .copy-btn:hover { color: #fff; background: #1e293b; border-color: #475569; }
-.traffic-tab-panel pre.http { margin: 0; border: 0; border-radius: 0; max-height: 520px; padding: 1.15rem 1.25rem; }
+.evidence-method {
+	color: var(--accent);
+	font: 800 0.78rem 'JetBrains Mono', Consolas, monospace;
+}
+.evidence-status {
+	color: var(--low);
+	font: 800 0.78rem 'JetBrains Mono', Consolas, monospace;
+}
+.traffic-detail .copy-btn {
+	color: var(--ink);
+	background: var(--card);
+	border: 1px solid var(--line);
+	box-shadow: var(--shadow-sm);
+	font-weight: 600;
+	padding: 0.35rem 0.75rem;
+	font-size: 0.76rem;
+}
+.traffic-detail .copy-btn:hover {
+	color: var(--accent);
+	border-color: var(--accent);
+	background: var(--card-hover);
+}
+.traffic-tab-panel pre.http {
+	margin: 0;
+	border: 0;
+	border-radius: 0;
+	max-height: none;
+	padding: 1.25rem 1.4rem;
+}
+.traffic-tab-panel.compact pre.http {
+	max-height: 520px;
+	overflow-y: auto;
+}
+html[data-theme="dark"] .traffic-tab.active {
+	background: var(--http-bg);
+	border-color: var(--http-border);
+	border-bottom-color: var(--http-bg);
+}
+html[data-theme="dark"] .evidence-direction {
+	background: #1e293b;
+	border-color: #334155;
+	color: #cbd5e1;
+}
+html[data-theme="dark"] .traffic-detail .copy-btn {
+	color: #cbd5e1;
+	background: #1e293b;
+	border-color: #334155;
+}
+html[data-theme="dark"] .traffic-detail .copy-btn:hover {
+	color: #ffffff;
+	background: #27354f;
+	border-color: var(--accent);
+}
 @media (max-width: 720px) {
+	.evidence-toolbar, .evidence-context { flex-wrap: wrap; }
 	.finding-section-grid { grid-template-columns: 1fr; }
 	.finding-header { flex-direction: column; }
 }
@@ -1201,6 +1286,14 @@ ul.scope li {
 }
 
 /* Print Friendly Styles */
+.vulnerability-link { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; text-align: left; cursor: pointer; }
+.vulnerability-link:hover { text-decoration: underline; }
+.vulnerability-index td:first-child { width: 4rem; color: var(--muted); }
+.vulnerability-index th:last-child, .vulnerability-index td:last-child { text-align: right; width: 6rem; }
+.vulnerability-index tbody tr:nth-child(even) { background: var(--bg-subtle); }
+.scan-detail-panel, .threat-panel, .severity-panel, .vulnerability-overview { box-shadow: none; border-radius: 8px; }
+.finding { box-shadow: none; border-radius: 8px; }
+.report-hero h1 { font-size: clamp(1.4rem, 3vw, 2rem); }
 @media print {
 	body {
 		background: #ffffff !important;
@@ -1226,9 +1319,14 @@ ul.scope li {
 		background: #f8fafc !important;
 		color: #000000 !important;
 		border: 1px solid #cbd5e1 !important;
+		max-height: none !important;
+		overflow: visible !important;
+		white-space: pre-wrap !important;
+		overflow-wrap: anywhere;
 	}
-	.traffic-tabs { display: none !important; }
-	.traffic-tab-panel { display: block !important; break-inside: avoid; }
+	.traffic-tabs, .evidence-actions { display: none !important; }
+	.js-ready .traffic-tab-panel, .traffic-tab-panel { display: block !important; break-inside: auto; }
+	.traffic-detail, .card, .finding { overflow: visible !important; break-inside: auto !important; page-break-inside: auto !important; }
 	.vuln-hit { background: #fef08a !important; color: #000000 !important; }
 }
 </style></head><body><div class="wrap">
@@ -1247,6 +1345,7 @@ ul.scope li {
 </div>
 <header class="report-hero">
   <div class="hero-flex">
+    <img class="report-logo" src="%s" alt="AKCA logo" width="108" height="108">
     <div class="hero-main">
       <span class="hero-kicker">%s</span>
       <h1>%s</h1>
@@ -1295,6 +1394,7 @@ ul.scope li {
 </div>
 %s`,
 		template.HTMLEscapeString(meta.Title),
+		reportLogoURL,
 		template.HTMLEscapeString(ProductName),
 		template.HTMLEscapeString(meta.Title),
 		template.HTMLEscapeString(meta.Summary),
@@ -1414,11 +1514,21 @@ function selectEvidenceTab(button, panelName) {
     const detail = button ? button.closest('.traffic-detail') : null;
     if (!detail) return;
     detail.querySelectorAll('.traffic-tab').forEach(tab => {
-        tab.classList.toggle('active', tab.getAttribute('data-evidence-tab') === panelName);
+        const selected = tab.getAttribute('data-evidence-tab') === panelName;
+        tab.classList.toggle('active', selected);
+        tab.setAttribute('aria-pressed', String(selected));
     });
     detail.querySelectorAll('.traffic-tab-panel').forEach(panel => {
-        panel.classList.toggle('active', panel.getAttribute('data-evidence-panel') === panelName);
+        panel.classList.toggle('active', panelName === 'both' || panel.getAttribute('data-evidence-panel') === panelName);
     });
+}
+
+function toggleEvidenceSize(button) {
+    const panel = button.closest('.traffic-tab-panel');
+    if (!panel) return;
+    const isCompact = panel.classList.toggle('compact');
+    button.setAttribute('aria-expanded', String(!isCompact));
+    button.textContent = isCompact ? 'Show full content' : 'Compact view';
 }
 
 function showToast(msg) {
@@ -1476,7 +1586,17 @@ function copyToClipboard(btn, text) {
 }
 
 document.addEventListener('DOMContentLoaded', initTheme);
+document.documentElement.classList.add('js-ready');
 initTheme();
+let printClosedDetails = [];
+window.addEventListener('beforeprint', () => {
+    printClosedDetails = Array.from(document.querySelectorAll('details:not([open])'));
+    printClosedDetails.forEach(detail => { detail.open = true; });
+});
+window.addEventListener('afterprint', () => {
+    printClosedDetails.forEach(detail => { detail.open = false; });
+    printClosedDetails = [];
+});
 </script>
 <div id="akca-toast">✓ Copied to clipboard!</div>
 </body></html>`
@@ -1632,7 +1752,7 @@ func findingMetaHTML(f FindingEntry) string {
 
 func httpEvidenceHTML(ev HTTPEvidence) string {
 	if ev.RawRequest == "" && ev.RawResponse == "" && ev.RespBody == "" && ev.CurlCommand == "" && ev.Payload == "" {
-		return ""
+		return `<h4>HTTP Evidence</h4><p class="evidence-notice">No HTTP request or response was stored for this finding.</p>`
 	}
 	markers := evidencemarkers.ForReport(ev.Payload, ev.Signal, ev.RespBody, ev.ResponseMarkers)
 	var b strings.Builder
@@ -1677,10 +1797,19 @@ func httpEvidenceHTML(ev HTTPEvidence) string {
 			template.HTMLEscapeString(ev.DOMSnapshotRef) + `</code></p>`)
 	}
 	responseEvidence := ev.RawResponse
-	responseLabel := "Proof markers highlighted"
+	responseLabel := "Stored headers and body"
 	if responseEvidence == "" {
 		responseEvidence = ev.RespBody
-		responseLabel = "Response excerpt"
+		responseLabel = "Response excerpt (full transaction not stored)"
+	}
+	if ev.BodyTruncated {
+		b.WriteString(`<p class="evidence-notice">The response exceeded the capture limit. All stored content is shown below; the uncaptured remainder is unavailable.</p>`)
+	}
+	if ev.RawRequest == "" {
+		b.WriteString(`<p class="evidence-notice">Request: no HTTP request was stored for this finding.</p>`)
+	}
+	if responseEvidence == "" {
+		b.WriteString(`<p class="evidence-notice">Response: no HTTP response was stored for this finding.</p>`)
 	}
 	if ev.RawRequest != "" || responseEvidence != "" {
 		defaultTab := "response"
@@ -1693,14 +1822,17 @@ func httpEvidenceHTML(ev HTTPEvidence) string {
 			if defaultTab == "request" {
 				active = " active"
 			}
-			b.WriteString(`<button type="button" class="traffic-tab` + active + `" data-evidence-tab="request" onclick="selectEvidenceTab(this,'request')">Request</button>`)
+			b.WriteString(`<button type="button" class="traffic-tab` + active + `" aria-pressed="` + fmt.Sprint(defaultTab == "request") + `" data-evidence-tab="request" onclick="selectEvidenceTab(this,'request')">Request</button>`)
 		}
 		if responseEvidence != "" {
 			active := ""
 			if defaultTab == "response" {
 				active = " active"
 			}
-			b.WriteString(`<button type="button" class="traffic-tab` + active + `" data-evidence-tab="response" onclick="selectEvidenceTab(this,'response')">Response</button>`)
+			b.WriteString(`<button type="button" class="traffic-tab` + active + `" aria-pressed="` + fmt.Sprint(defaultTab == "response") + `" data-evidence-tab="response" onclick="selectEvidenceTab(this,'response')">Response</button>`)
+		}
+		if ev.RawRequest != "" && responseEvidence != "" {
+			b.WriteString(`<button type="button" class="traffic-tab" aria-pressed="false" data-evidence-tab="both" onclick="selectEvidenceTab(this,'both')">Both</button>`)
 		}
 		b.WriteString(`</div>`)
 		if ev.RawRequest != "" {
@@ -1712,7 +1844,7 @@ func httpEvidenceHTML(ev HTTPEvidence) string {
 			if method == "" {
 				method = "HTTP"
 			}
-			b.WriteString(`<div class="traffic-tab-panel` + active + `" data-evidence-panel="request"><div class="evidence-toolbar"><div class="evidence-context"><span class="evidence-direction">OUTBOUND</span><span class="evidence-method">` + template.HTMLEscapeString(method) + `</span><span>Captured transaction</span></div><button type="button" class="copy-btn" onclick="copyToClipboard(this)">Copy</button></div><pre class="http">` +
+			b.WriteString(`<div class="traffic-tab-panel` + active + `" data-evidence-panel="request"><div class="evidence-toolbar"><div class="evidence-context"><span class="evidence-direction">OUTBOUND</span><span class="evidence-method">` + template.HTMLEscapeString(method) + `</span><span>Captured transaction · Request</span></div>` + evidenceActionsHTML() + `</div><pre class="http">` +
 				highlightEvidence(template.HTMLEscapeString(ev.RawRequest), []string{ev.Payload}) + `</pre></div>`)
 		}
 		if responseEvidence != "" {
@@ -1724,7 +1856,7 @@ func httpEvidenceHTML(ev HTTPEvidence) string {
 			if ev.StatusCode > 0 {
 				status = fmt.Sprintf("Status %d", ev.StatusCode)
 			}
-			b.WriteString(`<div class="traffic-tab-panel` + active + `" data-evidence-panel="response"><div class="evidence-toolbar"><div class="evidence-context"><span class="evidence-direction">INBOUND</span><span class="evidence-status">` + template.HTMLEscapeString(status) + `</span><span>` + template.HTMLEscapeString(responseLabel) + `</span></div><button type="button" class="copy-btn" onclick="copyToClipboard(this)">Copy</button></div><pre class="http">` +
+			b.WriteString(`<div class="traffic-tab-panel` + active + `" data-evidence-panel="response"><div class="evidence-toolbar"><div class="evidence-context"><span class="evidence-direction">INBOUND</span><span class="evidence-status">` + template.HTMLEscapeString(status) + `</span><span>` + template.HTMLEscapeString(responseLabel) + `</span></div>` + evidenceActionsHTML() + `</div><pre class="http">` +
 				highlightEvidence(template.HTMLEscapeString(responseEvidence), markers) + `</pre></div>`)
 		}
 		b.WriteString(`</div>`)
@@ -1733,6 +1865,10 @@ func httpEvidenceHTML(ev HTTPEvidence) string {
 		b.WriteString(`<details><summary>▼ Show cURL Command (Reproduce)</summary><div class="code-header"><span>cURL Reproduction Command</span><button type="button" class="copy-btn" onclick="copyToClipboard(this)">📋 Copy cURL</button></div><pre class="http">` + template.HTMLEscapeString(ev.CurlCommand) + `</pre></details>`)
 	}
 	return b.String()
+}
+
+func evidenceActionsHTML() string {
+	return `<div class="evidence-actions"><button type="button" class="copy-btn" aria-expanded="true" onclick="toggleEvidenceSize(this)">Compact view</button><button type="button" class="copy-btn" onclick="copyToClipboard(this)">Copy</button></div>`
 }
 
 func shortReportHash(value string) string {

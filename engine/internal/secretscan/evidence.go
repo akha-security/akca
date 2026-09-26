@@ -33,6 +33,12 @@ func evidenceJSON(kind, value, sourceURL string, line int, responseBody string) 
 	if line > 0 {
 		payload["line"] = line
 	}
+	if sourceURL != "" {
+		payload["request"] = map[string]string{
+			"method": "GET",
+			"url":    sourceURL,
+		}
+	}
 	if excerpt := ResponseSnippet(responseBody, value); excerpt != "" {
 		payload["resp_body"] = excerpt
 		payload["response_markers"] = []string{value}

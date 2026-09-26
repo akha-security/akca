@@ -2,9 +2,31 @@ package modules
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 )
+
+var ErrModuleCoverageIncomplete = errors.New("module coverage incomplete")
+
+func moduleCoverageMessage(module string, failed, exhausted, unfinished int) string {
+	parts := make([]string, 0, 3)
+	if failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed target(s)", failed))
+	}
+	if exhausted > 0 {
+		parts = append(parts, fmt.Sprintf("%d budget-limited target(s)", exhausted))
+	}
+	if unfinished > 0 {
+		parts = append(parts, fmt.Sprintf("%d unfinished target(s)", unfinished))
+	}
+	message := fmt.Sprintf("Module %s coverage incomplete: %s", module, strings.Join(parts, ", "))
+	if failed > 0 && exhausted == 0 {
+		message += "; request budget was not the cause"
+	}
+	return message
+}
 
 func (r *Runner) RunModuleFromDB(ctx context.Context, module string, limit int) ([]ModuleFinding, error) {
 	targets, err := r.LoadTargetsWithEndpointsFromDB(limit)
@@ -168,13 +190,13 @@ feed:
 	}
 	_ = r.emit("vuln_module_finished", module+" scanning finished", data)
 	if exhausted > 0 || unprocessed > 0 || failed > 0 {
-		_ = r.emit("coverage_gap", fmt.Sprintf("Module %s incomplete: %d failed, %d budget-limited and %d unfinished targets", module, failed, exhausted, unprocessed), data)
+		_ = r.emit("coverage_gap", moduleCoverageMessage(module, failed, exhausted, unprocessed), data)
 	}
 	if ctx.Err() != nil {
 		return findings, ctx.Err()
 	}
 	if failed > 0 || exhausted > 0 || unprocessed > 0 {
-		return findings, fmt.Errorf("module %s incomplete: %d failed, %d budget-limited, %d unfinished targets", module, failed, exhausted, unprocessed)
+		return findings, fmt.Errorf("%w: %s", ErrModuleCoverageIncomplete, moduleCoverageMessage(module, failed, exhausted, unprocessed))
 	}
 	if count := r.executionErrors.Load() - errorsBefore; count > 0 {
 		return findings, fmt.Errorf("module %s completed with %d execution or persistence errors", module, count)

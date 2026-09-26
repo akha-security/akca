@@ -27,7 +27,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/findingtext"
 	"github.com/akha-security/akca/engine/internal/report"
 	"github.com/akha-security/akca/engine/internal/storage"
-	"github.com/akha-security/akca/engine/internal/subdomain"
+	"github.com/charmbracelet/lipgloss"
 )
 
 const (
@@ -517,12 +517,11 @@ func printShortUsage() {
 	printCompactBanner()
 	fmt.Fprintf(os.Stderr, "\n%sUSAGE%s\n", bLavender, rst)
 	fmt.Fprintf(os.Stderr, "  %sakca -u <url> [options]%s\n", bCloud, rst)
-	fmt.Fprintf(os.Stderr, "  %sakca -d <domain> [options]%s\n", bCloud, rst)
-	fmt.Fprintf(os.Stderr, "  %sakca <url> [options]%s\n\n", bCloud, rst)
+	fmt.Fprintf(os.Stderr, "  %sakca replay --finding <id>%s\n", bCloud, rst)
+	fmt.Fprintf(os.Stderr, "  %sakca benchmark [--strict]%s\n\n", bCloud, rst)
 
 	printHelpSection("Core options", []helpEntry{
 		{"-u, --url <url>", "Target base URL (e.g. https://target.com)"},
-		{"-d, --domain <domain>", "Scan root domain and discover live subdomains"},
 		{"-m, --mode <mode>", "Scan mode: sql, xss, api, graphql, rce, ssrf, auth, passive, full"},
 		{"-o, --output <file>", "Report output file path"},
 		{"-f, --format <type>", "html, json, markdown, csv or sarif (default: html)"},
@@ -532,12 +531,12 @@ func printShortUsage() {
 		{"-k, --insecure", "Skip TLS/SSL certificate verification"},
 		{"-v, --verbose", "Show detailed diagnostic logs and skipped checks"},
 		{"-q, --quiet", "Machine-friendly lifecycle and finding lines"},
-		{"-h, --help", "Show the complete command reference"},
+		{"-h", "Show this concise help"},
+		{"--help", "Show the complete command reference"},
 	})
 
 	fmt.Fprintf(os.Stderr, "%sExamples%s\n", bLavender, rst)
 	fmt.Fprintf(os.Stderr, "  %sakca -u https://example.com -m sql,xss%s\n", cSilver, rst)
-	fmt.Fprintf(os.Stderr, "  %sakca -d example.com -m passive -v%s\n", cSilver, rst)
 	fmt.Fprintf(os.Stderr, "  %sakca replay --finding 42%s\n\n", cSilver, rst)
 	fmt.Fprintf(os.Stderr, "%sUse 'akca --help' for every scan budget and advanced option.%s\n\n", cSlate, rst)
 }
@@ -551,12 +550,11 @@ func printDetailedUsage() {
 
 	fmt.Fprintf(os.Stderr, "%sUSAGE%s\n", bLavender, rst)
 	fmt.Fprintf(os.Stderr, "  %sakca -u <url> [options]%s\n", bCloud, rst)
-	fmt.Fprintf(os.Stderr, "  %sakca -d <domain> [options]%s\n", bCloud, rst)
-	fmt.Fprintf(os.Stderr, "  %sakca <url> [options]%s\n\n", bCloud, rst)
+	fmt.Fprintf(os.Stderr, "  %sakca replay --finding <id>%s\n", bCloud, rst)
+	fmt.Fprintf(os.Stderr, "  %sakca benchmark [--strict]%s\n\n", bCloud, rst)
 
 	printHelpSection("Target and authentication", []helpEntry{
 		{"-u, --url <url>", "Scan one target URL"},
-		{"-d, --domain <domain>", "Discover live subdomains and scan the root scope"},
 		{"-r, --resume <id>", "Resume an interrupted scan from its checkpoint"},
 		{"-c, --cookie <value>", "Session Cookie header"},
 		{"-H, --header <value>", "Custom Name: Value request header; repeatable"},
@@ -613,7 +611,8 @@ func printDetailedUsage() {
 		{"-q, --quiet", "Stable machine-friendly lifecycle and finding output"},
 		{"NO_COLOR=1", "Disable ANSI styling"},
 		{"--version", "Print the version"},
-		{"-h, --help", "Print this reference"},
+		{"-h", "Print concise help"},
+		{"--help", "Print this complete reference"},
 	})
 
 	printHelpSection("Commands", []helpEntry{
@@ -626,7 +625,6 @@ func printDetailedUsage() {
 	printHelpSection("Examples", []helpEntry{
 		{"akca -u https://target.test", "Full assessment"},
 		{"akca -u https://target.test -m sql,xss", "Combined injection modes"},
-		{"akca -d example.com -m passive -v", "Verbose passive domain reconnaissance"},
 		{"akca -u target.test -p http://127.0.0.1:8080 -k", "Proxy-routed test"},
 	})
 }
@@ -787,14 +785,49 @@ func payloadTargets(payload map[string]interface{}) string {
 	return "unknown target"
 }
 
+var (
+	sessionBorder = lipgloss.Border{
+		Top:         "─",
+		Bottom:      "─",
+		Left:        "│",
+		Right:       "│",
+		TopLeft:     "╭",
+		TopRight:    "╮",
+		BottomLeft:  "╰",
+		BottomRight: "╯",
+		MiddleLeft:  "├",
+		MiddleRight: "┤",
+		Middle:      "─",
+	}
+
+	sessionColorBorder  = lipgloss.Color("#28333f")
+	sessionColorLabel   = lipgloss.Color("#5c6f80")
+	sessionColorFact    = lipgloss.Color("#d9e2ea")
+	sessionColorConfig  = lipgloss.Color("#2dd4bf")
+	sessionColorSuccess = lipgloss.Color("#4ade80")
+)
+
+func sessionGridCell(style lipgloss.Style, text string, width int) string {
+	text = truncateText(safeTerminalText(text), width)
+	return style.Width(width).Render(text)
+}
+
+func sessionFramedRow(content string, innerWidth int) string {
+	borderStyle := lipgloss.NewStyle().Foreground(sessionColorBorder)
+	padded := lipgloss.NewStyle().Width(innerWidth).Render(content)
+	return borderStyle.Render(sessionBorder.Left) + " " + padded + " " + borderStyle.Render(sessionBorder.Right)
+}
+
 func scanSessionPanel(payload map[string]interface{}) string {
 	w := currentUIWidth()
-	targets := truncateText(payloadTargets(payload), w-2)
+	innerWidth := w
+
 	rate := payloadFloat(payload, "global_rate_limit")
 	maxPages := payloadInt(payload, "max_pages")
 	maxEndpoints := payloadInt(payload, "max_endpoints")
+	maxDepth := payloadInt(payload, "max_depth")
 	requestBudget := payloadInt(payload, "request_budget")
-	oastStatus, oastColor := sessionOASTStatus(payload)
+	oastStatus, _ := sessionOASTStatus(payload)
 	profile := safeTerminalText(fmt.Sprint(payload["scan_profile"]))
 	if profile == "" || profile == "<nil>" {
 		profile = safeTerminalText(fmt.Sprint(payload["scan_intensity"]))
@@ -802,56 +835,230 @@ func scanSessionPanel(payload map[string]interface{}) string {
 	if profile == "" || profile == "<nil>" {
 		profile = "Full Scan"
 	}
-	profile = truncateText(profile, 20)
+	if strings.EqualFold(profile, "FullBugBounty") {
+		profile = "Full Scan"
+	}
 
-	discovery := sessionDiscoverySummary(maxPages, maxEndpoints)
-	traffic := "Adaptive pacing"
+	discovery := sessionDiscoverySummary(maxPages, maxEndpoints, maxDepth)
+	traffic := "Adaptive"
 	if rate > 0 {
-		traffic = fmt.Sprintf("%.0f requests/sec maximum", rate)
+		traffic = fmt.Sprintf("%.0f req/s", rate)
 	}
+	requests := "Uncapped"
 	if requestBudget > 0 {
-		traffic += fmt.Sprintf(" — %s total request cap", formattedCount(requestBudget))
-	} else {
-		traffic += " — No total request cap"
+		requests = shortSessionCount(requestBudget) + " cap"
+	}
+	memory := sessionMemorySummary(payload)
+	engine := sessionEngineSummary(payload)
+	auth := "Anonymous"
+	if payloadBool(payload, "auth_configured") {
+		auth = "Authenticated"
+	}
+	transport := sessionTransportSummary(payload)
+
+	borderStyle := lipgloss.NewStyle().Foreground(sessionColorBorder)
+	labelStyle := lipgloss.NewStyle().Foreground(sessionColorLabel).Bold(true)
+	factStyle := lipgloss.NewStyle().Foreground(sessionColorFact)
+	configStyle := lipgloss.NewStyle().Foreground(sessionColorConfig)
+	successStyle := lipgloss.NewStyle().Foreground(sessionColorSuccess)
+
+	// 1. Top border with inset title on the left and status chip on the right
+	title := "SCAN SESSION"
+	status := "● ACTIVE"
+	if elapsed, ok := payload["elapsed"].(string); ok && strings.TrimSpace(elapsed) != "" {
+		status = "● ACTIVE " + strings.TrimSpace(elapsed)
+	} else if elSec := payloadInt(payload, "elapsed_seconds"); elSec > 0 {
+		status = fmt.Sprintf("● ACTIVE %02d:%02d", elSec/60, elSec%60)
+	}
+	titleRendered := lipgloss.NewStyle().Foreground(sessionColorFact).Bold(true).Render(title)
+	statusRendered := successStyle.Bold(true).Render(status)
+
+	topInner := innerWidth + 2
+	leftFixed := "─ " + title + " "
+	rightFixed := " " + status + " ─"
+	fillLen := topInner - lipgloss.Width(leftFixed) - lipgloss.Width(rightFixed)
+	if fillLen < 0 {
+		fillLen = 0
+	}
+	topLine := borderStyle.Render(sessionBorder.TopLeft+sessionBorder.Top+" ") +
+		titleRendered +
+		borderStyle.Render(" "+strings.Repeat(sessionBorder.Top, fillLen)+" ") +
+		statusRendered +
+		borderStyle.Render(" "+sessionBorder.Top+sessionBorder.TopRight)
+
+	// 2. Hero row: 3px-wide accent bar next to TARGET label and URL
+	heroBar := configStyle.Render("▌")
+	heroLabel := heroBar + " " + labelStyle.Render("TARGET")
+	heroLabelLine := sessionFramedRow(heroLabel, innerWidth)
+
+	maxTargetWidth := innerWidth - 3
+	safeTarget := truncateText(safeTerminalText(payloadTargets(payload)), maxTargetWidth)
+	heroURL := heroBar + " " + factStyle.Bold(true).Render(safeTarget)
+	heroValueLine := sessionFramedRow(heroURL, innerWidth)
+
+	var resolvedLine string
+	if resolved, ok := payload["resolved_info"].(string); ok && strings.TrimSpace(resolved) != "" {
+		safeResolved := truncateText(safeTerminalText(resolved), maxTargetWidth)
+		resolvedContent := "  " + lipgloss.NewStyle().Foreground(sessionColorLabel).Render(safeResolved)
+		resolvedLine = sessionFramedRow(resolvedContent, innerWidth)
 	}
 
-	var b strings.Builder
-	b.WriteString(panelTitle("SCAN CONTROL", "LIVE", w, cLavender) + "\n")
-	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %s%sTARGET%s", cSlate, bld, rst), w, cLavender) + "\n")
-	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %s%s%s", cIce, targets, rst), w, cLavender) + "\n")
-	b.WriteString(panelDivider(w, cLavender) + "\n")
-	b.WriteString(sessionColumnRow([3]string{"PROFILE", "DISCOVERY", "VERIFICATION"}, [3]string{cSlate, cSlate, cSlate}, w) + "\n")
-	b.WriteString(sessionColumnRow([3]string{profile, discovery, "OAST " + oastStatus}, [3]string{cFrost, cSilver, oastColor}, w) + "\n")
-	b.WriteString(panelDivider(w, cLavender) + "\n")
-	b.WriteString(boxTextWithBorder(fmt.Sprintf(" %sTraffic policy%s  %s%s%s", cSlate, rst, cSilver, traffic, rst), w, cLavender) + "\n")
-	b.WriteString(panelBottom(w, cLavender) + "\n\n")
-	return b.String()
-}
+	// 3. Divider
+	divider := borderStyle.Render(sessionBorder.MiddleLeft + strings.Repeat(sessionBorder.Middle, innerWidth+2) + sessionBorder.MiddleRight)
 
-func sessionColumnRow(values [3]string, colors [3]string, width int) string {
+	// 4. 3x3 Grid
 	const gap = 2
-	available := max(3, width-gap*2)
-	columnWidth := available / 3
-	widths := [3]int{columnWidth, columnWidth, available - columnWidth*2}
-	parts := make([]string, 0, len(values))
-	for i, value := range values {
-		value = truncateText(safeTerminalText(value), widths[i])
-		parts = append(parts, colors[i]+padToWidth(value, widths[i])+rst)
+	avail := max(3, innerWidth-gap*2)
+	col1Width := avail / 3
+	col2Width := avail / 3
+	col3Width := avail - col1Width - col2Width
+	spacer := strings.Repeat(" ", gap)
+
+	gridRow := func(c1, c2, c3 string) string {
+		return lipgloss.JoinHorizontal(lipgloss.Top, c1, spacer, c2, spacer, c3)
 	}
-	return boxTextWithBorder(strings.Join(parts, strings.Repeat(" ", gap)), width, cLavender)
+
+	// Row 1: Profile | Crawl | OAST
+	row1Labels := gridRow(
+		sessionGridCell(labelStyle, "PROFILE", col1Width),
+		sessionGridCell(labelStyle, "CRAWL", col2Width),
+		sessionGridCell(labelStyle, "OAST", col3Width),
+	)
+	row1LabelLine := sessionFramedRow(row1Labels, innerWidth)
+
+	oastValStyle := successStyle
+	oastDisplay := "● OAST " + oastStatus
+	if oastStatus != "Ready" {
+		oastValStyle = lipgloss.NewStyle().Foreground(sessionColorLabel)
+		oastDisplay = "○ OAST " + oastStatus
+	}
+	row1Values := gridRow(
+		sessionGridCell(configStyle, profile, col1Width),
+		sessionGridCell(configStyle, discovery, col2Width),
+		sessionGridCell(oastValStyle, oastDisplay, col3Width),
+	)
+	row1ValueLine := sessionFramedRow(row1Values, innerWidth)
+
+	// Row 2: Rate | Requests | RAM
+	row2Labels := gridRow(
+		sessionGridCell(labelStyle, "RATE", col1Width),
+		sessionGridCell(labelStyle, "REQUESTS", col2Width),
+		sessionGridCell(labelStyle, "RAM", col3Width),
+	)
+	row2LabelLine := sessionFramedRow(row2Labels, innerWidth)
+
+	row2Values := gridRow(
+		sessionGridCell(factStyle, traffic, col1Width),
+		sessionGridCell(factStyle, requests, col2Width),
+		sessionGridCell(successStyle, memory, col3Width),
+	)
+	row2ValueLine := sessionFramedRow(row2Values, innerWidth)
+
+	// Row 3: Engine | Auth | Transport
+	row3Labels := gridRow(
+		sessionGridCell(labelStyle, "ENGINE", col1Width),
+		sessionGridCell(labelStyle, "AUTH", col2Width),
+		sessionGridCell(labelStyle, "TRANSPORT", col3Width),
+	)
+	row3LabelLine := sessionFramedRow(row3Labels, innerWidth)
+
+	row3Values := gridRow(
+		sessionGridCell(configStyle, engine, col1Width),
+		sessionGridCell(factStyle, auth, col2Width),
+		sessionGridCell(factStyle, transport, col3Width),
+	)
+	row3ValueLine := sessionFramedRow(row3Values, innerWidth)
+
+	// 5. Bottom border
+	bottomLine := borderStyle.Render(sessionBorder.BottomLeft + strings.Repeat(sessionBorder.Bottom, innerWidth+2) + sessionBorder.BottomRight)
+
+	lines := []string{
+		topLine,
+		heroLabelLine,
+		heroValueLine,
+	}
+	if resolvedLine != "" {
+		lines = append(lines, resolvedLine)
+	}
+	lines = append(lines,
+		divider,
+		row1LabelLine,
+		row1ValueLine,
+		row2LabelLine,
+		row2ValueLine,
+		row3LabelLine,
+		row3ValueLine,
+		bottomLine,
+	)
+
+	return lipgloss.JoinVertical(lipgloss.Left, lines...) + "\n\n"
 }
 
-func sessionDiscoverySummary(maxPages, maxEndpoints int) string {
+func sessionDiscoverySummary(maxPages, maxEndpoints, maxDepth int) string {
 	switch {
+	case maxPages <= 0 && maxEndpoints <= 0 && maxDepth <= 0:
+		return "Exhaustive"
 	case maxPages <= 0 && maxEndpoints <= 0:
-		return "No crawl ceiling"
+		return fmt.Sprintf("Depth %d", maxDepth)
 	case maxPages > 0 && maxEndpoints > 0:
-		return fmt.Sprintf("%s URLs / %s endpoints", shortSessionCount(maxPages), shortSessionCount(maxEndpoints))
+		return fmt.Sprintf("%s URLs · %s endpoints", shortSessionCount(maxPages), shortSessionCount(maxEndpoints))
 	case maxPages > 0:
-		return fmt.Sprintf("%s URL limit", shortSessionCount(maxPages))
+		return fmt.Sprintf("%s URL cap", shortSessionCount(maxPages))
 	default:
-		return fmt.Sprintf("%s endpoint limit", shortSessionCount(maxEndpoints))
+		return fmt.Sprintf("%s endpoint cap", shortSessionCount(maxEndpoints))
 	}
+}
+
+func sessionMemorySummary(payload map[string]interface{}) string {
+	limit := payloadInt(payload, "memory_limit_mb")
+	available := payloadInt(payload, "detected_available_memory_mb")
+	if limit <= 0 {
+		return "System managed"
+	}
+	if available > 0 {
+		return fmt.Sprintf("%s cap · %s avail", shortMemory(limit), shortMemory(available))
+	}
+	if safeTerminalText(fmt.Sprint(payload["memory_limit_source"])) == "manual" {
+		return shortMemory(limit) + " manual"
+	}
+	return shortMemory(limit) + " limit"
+}
+
+func shortMemory(mb int) string {
+	if mb >= 1024 {
+		return fmt.Sprintf("%.1fG", float64(mb)/1024)
+	}
+	return fmt.Sprintf("%dM", mb)
+}
+
+func sessionEngineSummary(payload map[string]interface{}) string {
+	if payloadBool(payload, "passive_mode") {
+		return "Passive"
+	}
+	browser := payloadBool(payload, "browser_enabled")
+	js := payloadBool(payload, "js_analysis_enabled")
+	switch {
+	case browser && js:
+		return "Browser + JS"
+	case browser:
+		return "Browser"
+	case js:
+		return "HTTP + JS"
+	default:
+		return "HTTP"
+	}
+}
+
+func sessionTransportSummary(payload map[string]interface{}) string {
+	connection := "Direct"
+	if payloadBool(payload, "proxy_enabled") {
+		connection = "Proxy"
+	}
+	tls := "TLS on"
+	if payloadBool(payload, "insecure_tls") {
+		tls = "TLS off"
+	}
+	return connection + " · " + tls
 }
 
 func shortSessionCount(value int) string {
@@ -905,6 +1112,108 @@ func trafficAdjustmentText(payload map[string]interface{}) string {
 //  PHASE DISPLAY — Icons & Labels
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+func moduleFriendlyName(name string) string {
+	known := map[string]string{
+		"rate_limit":               "Rate Limit",
+		"sqli":                     "SQL Injection",
+		"xss":                      "Cross-Site Scripting (XSS)",
+		"blind_xss":                "Blind XSS",
+		"nosql":                    "NoSQL Injection",
+		"ssrf":                     "SSRF",
+		"xxe":                      "XXE Injection",
+		"lfi":                      "LFI / Path Traversal",
+		"ssti":                     "Server-Side Template Injection (SSTI)",
+		"client_ssti":              "Client-Side Template Injection",
+		"csti_detection":           "Client-Side Template Injection",
+		"command_injection":        "Command Injection / RCE",
+		"react_rsc_rce":            "React RSC RCE",
+		"server_side_js_injection": "Server-Side JS Injection",
+		"pdf_injection":            "PDF Generation SSRF & Injection",
+		"open_redirect":            "Open Redirect",
+		"cors":                     "CORS Security",
+		"csrf":                     "CSRF Protection",
+		"crlf":                     "CRLF Injection",
+		"idor":                     "IDOR / Access Control",
+		"bfla":                     "Broken Function Level Auth (BFLA)",
+		"jwt":                      "JWT Security",
+		"oauth":                    "OAuth Security",
+		"oauth_flow_audit":         "OAuth & OIDC Flow Audit",
+		"route_auth_bypass":        "Route Auth Bypass",
+		"broken_auth":              "Broken Authentication",
+		"improper_auth":            "Improper Authentication",
+		"account_recovery":         "Account Recovery",
+		"account_enum":             "Account Enumeration",
+		"tenant_isolation":         "Tenant Isolation",
+		"webhook_security":         "Webhook Security",
+		"parser_differential":      "Parser Differential",
+		"mass_assignment":          "Mass Assignment",
+		"prototype_pollution":      "Prototype Pollution",
+		"hpp":                      "HTTP Parameter Pollution",
+		"host_header":              "Host Header Injection",
+		"host_poisoning":           "Host Header Poisoning",
+		"graphql":                  "GraphQL Security",
+		"grpc_scan":                "gRPC Protocol Security",
+		"websocket":                "WebSocket Security",
+		"ws_cswsh":                 "WebSocket Hijacking (CSWSH)",
+		"http_smuggling":           "HTTP Request Smuggling",
+		"cpdos":                    "Cache-Poisoned DoS (CPDoS)",
+		"proxy_path_confusion":     "Reverse Proxy Path Confusion",
+		"race_condition":           "Race Condition",
+		"race_condition_sync":      "Synchronized Race Condition",
+		"second_order":             "Second-Order Vulnerabilities",
+		"cache_poisoning":          "Cache Poisoning",
+		"business_logic":           "Business Logic",
+		"insecure_deserialization": "Insecure Deserialization",
+		"file_upload":              "File Upload Security",
+		"ldap":                     "LDAP Injection",
+		"xpath":                    "XPath Injection",
+		"ldap_xpath_injection":     "LDAP / XPath Injection",
+		"security_headers":         "Security Headers",
+		"cookie_security":          "Cookie Security",
+		"tls_misconfig":            "TLS Misconfiguration",
+		"sensitive_data":           "Sensitive Data Exposure",
+		"secret_exposure":          "Secret Exposure",
+		"vulnerable_components":    "Vulnerable Components",
+		"known_cve":                "Known CVEs",
+		"script_source":            "Script Source Analysis",
+		"debug_admin":              "Debug & Admin Exposure",
+		"actuator":                 "Spring Actuator Exposure",
+		"devops_exposure":          "DevOps Exposure",
+		"cicd_exposure":            "CI/CD Exposure",
+		"git_recovery":             "Git Recovery Exposure",
+		"source_code_disclosure":   "Source Code Disclosure",
+		"backup_archives":          "Backup Archives",
+		"cloud_storage":            "Cloud Storage Exposure",
+		"cloud_takeover":           "Cloud Subdomain Takeover",
+		"cloud_posture":            "Cloud Posture",
+		"cloud_native_exposure":    "Cloud Native & Container APIs",
+		"http_methods":             "HTTP Methods & Verbs",
+		"api_versioning":           "API Versioning",
+		"api_exposure":             "API Exposure",
+		"wordpress_fuzz":           "WordPress Exposure",
+		"nginx_alias":              "Nginx Alias Traversal",
+		"nextjs_bypass":            "Next.js Middleware & SSRF",
+		"framework_debug":          "Framework Debug & DevTools",
+		"iis_discovery":            "IIS Shortname Confusion",
+		"firebase_misconfig":       "Firebase RTDB & Storage",
+		"spring_cloud_jolokia":     "Spring Cloud & Jolokia",
+		"saas_exposure":            "SaaS Exposure",
+		"jsonp_callback":           "JSONP Callback & XSSI",
+		"swagger_exposure":         "Swagger & OpenAPI Exposure",
+		"sensitive_file_discovery": "Sensitive Files & Config",
+	}
+	if title, ok := known[strings.ToLower(name)]; ok {
+		return title
+	}
+	words := strings.Split(name, "_")
+	for i, w := range words {
+		if len(w) > 0 {
+			words[i] = strings.ToUpper(w[:1]) + w[1:]
+		}
+	}
+	return strings.Join(words, " ")
+}
+
 func phaseLabel(phase string) string {
 	labels := map[string]string{
 		"bootstrap":           "Initializing Scan Engine",
@@ -928,6 +1237,9 @@ func phaseLabel(phase string) string {
 	}
 	if l, ok := labels[phase]; ok {
 		return l
+	}
+	if strings.HasPrefix(phase, "vuln_module_") {
+		return moduleFriendlyName(strings.TrimPrefix(phase, "vuln_module_"))
 	}
 	return safeTerminalText(phase)
 }
@@ -955,6 +1267,9 @@ func phaseIcon(phase string) string {
 	}
 	if i, ok := icons[phase]; ok {
 		return i
+	}
+	if strings.HasPrefix(phase, "vuln_module_") {
+		return "⚔"
 	}
 	return "▸"
 }
@@ -990,16 +1305,6 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 		}
 	})
 	return wasSet
-}
-
-func normalizeScanArgs(args []string) []string {
-	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		return args
-	}
-	normalized := make([]string, 0, len(args)+1)
-	normalized = append(normalized, "--url", args[0])
-	normalized = append(normalized, args[1:]...)
-	return normalized
 }
 
 func (s *sliceFlag) String() string { return strings.Join(*s, ", ") }
@@ -1047,8 +1352,6 @@ type ConsoleWriter struct {
 	progressPercent    int
 	payloadProbes      int
 	processMemoryMB    int
-	etaEstimate        time.Duration
-	eta                string
 	requests           int
 	oastProbes         int
 	oastCallbacks      int
@@ -1059,6 +1362,7 @@ type ConsoleWriter struct {
 	reportDone         bool
 	phaseIndex         int
 	phaseStarted       map[string]time.Time
+	phaseInterrupted   bool
 	oastSeen           map[string]struct{}
 }
 
@@ -1295,21 +1599,6 @@ func (cw *ConsoleWriter) updateProgressLocked() {
 	}
 }
 
-func (cw *ConsoleWriter) updateETALocked(now time.Time) {
-	percent := cw.progressPercent
-	elapsed := now.Sub(cw.startTime)
-	if percent < 2 || percent >= 100 || elapsed < 15*time.Second {
-		cw.eta = "Calculating"
-		return
-	}
-	estimate := time.Duration(float64(elapsed) * float64(100-percent) / float64(percent))
-	if cw.etaEstimate > 0 {
-		estimate = time.Duration(0.75*float64(cw.etaEstimate) + 0.25*float64(estimate))
-	}
-	cw.etaEstimate = estimate
-	cw.eta = clockDuration(estimate)
-}
-
 func formattedCount(value int) string {
 	digits := fmt.Sprint(value)
 	for i := len(digits) - 3; i > 0; i -= 3 {
@@ -1390,7 +1679,7 @@ func (cw *ConsoleWriter) runningStatusPanel() string {
 	percent := cw.progressPercent
 	processMemoryMB := cw.processMemoryMB
 	memoryLimitMB := cw.memoryLimitMB
-	eta := cw.eta
+	started := cw.startTime
 	cw.mu.Unlock()
 
 	if target == "" {
@@ -1406,9 +1695,7 @@ func (cw *ConsoleWriter) runningStatusPanel() string {
 	if oastEnabled {
 		oast = "Ready and active"
 	}
-	if eta == "" {
-		eta = "Calculating"
-	}
+	elapsed := clockDuration(time.Since(started))
 	crawled := urlProgress(urlsCrawled, urlLimit)
 	memory := memoryUsage(processMemoryMB, memoryLimitMB)
 
@@ -1418,7 +1705,7 @@ func (cw *ConsoleWriter) runningStatusPanel() string {
 	b.WriteString(boxText(statusPair("Activity", requestActivity(rate, peakRate), 30, "OAST", oast), w) + "\n")
 	progress := fmt.Sprintf(" %s%-9s%s: [%s] %s%3d%%%s  %s%-8s%s: %s%s%s",
 		cSlate, "Progress", rst, progressBar(percent, 18), bCloud, percent, rst,
-		cSlate, "ETA", rst, cCloud, eta, rst)
+		cSlate, "Elapsed", rst, cCloud, elapsed, rst)
 	b.WriteString(boxText(progress, w) + "\n")
 	b.WriteString(boxText(statusPair("Crawled", crawled, 30, "Memory", memory), w) + "\n")
 	b.WriteString(panelBottom(w, cLavender))
@@ -1429,35 +1716,33 @@ func (cw *ConsoleWriter) runningStatusLine() string {
 	cw.mu.Lock()
 	percent := cw.progressPercent
 	phase := phaseLabel(cw.lastPhase)
-	rate := cw.requestRate
 	urls := cw.urlsCrawled
 	urlLimit := cw.urlLimit
-	eta := cw.eta
+	started := cw.startTime
 	cw.mu.Unlock()
 	if phase == "" {
 		phase = "Preparing scan"
 	}
-	if eta == "" {
-		eta = "Calculating"
-	}
+	elapsed := clockDuration(time.Since(started))
 	w := currentUIWidth() + 4
 	barWidth := 12
 	if w < 68 {
 		barWidth = 8
 	}
-	line := fmt.Sprintf("%sSCAN%s  [%s] %s%3d%%%s  %s%s%s",
+	prefix := fmt.Sprintf("%sSCAN%s  [%s] %s%3d%%%s  %sElapsed %s%s",
 		bLavender, rst, progressBar(percent, barWidth), bCloud, percent, rst,
-		cSilver, truncateText(phase, max(12, w/3)), rst)
-	if w >= 68 {
-		line += fmt.Sprintf("  %s│%s  %s", cGhost, rst, urlProgress(urls, urlLimit))
+		cCloud, elapsed, rst)
+	separator := fmt.Sprintf("  %s│%s  ", cGhost, rst)
+	suffix := ""
+	urlSuffix := separator + urlProgress(urls, urlLimit)
+	if w-visibleLen(prefix)-visibleLen(separator)-visibleLen(urlSuffix) >= 12 {
+		suffix = urlSuffix
 	}
-	if w >= 84 {
-		if eta != "Calculating" {
-			line += fmt.Sprintf("  %s│%s  ETA %s", cGhost, rst, eta)
-		} else if rate > 0 {
-			line += fmt.Sprintf("  %s│%s  %.1f requests/sec", cGhost, rst, rate)
-		}
+	phaseWidth := w - visibleLen(prefix) - visibleLen(separator) - visibleLen(suffix)
+	if phaseWidth < 1 {
+		phaseWidth = 1
 	}
+	line := prefix + separator + cSilver + truncateText(phase, phaseWidth) + rst + suffix
 	return truncateANSI(line, w)
 }
 
@@ -1510,7 +1795,7 @@ func (cw *ConsoleWriter) eventNeedsProgressClose(e events.Event) bool {
 	switch e.Type {
 	case "health_snapshot", "parameter_discovery_progress", "report_generation_progress", "finding_verified":
 		return false
-	case "plugin_skipped":
+	case "plugin_skipped", "coverage_gap":
 		return cw.mode == "verbose"
 	case "crawler_started", "crawler_finished", "oast_started", "oast_probe_sent":
 		return cw.mode == "verbose"
@@ -1613,6 +1898,9 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 			cAmber, rst, bAmber, rst)
 
 	case "scan_error":
+		cw.mu.Lock()
+		cw.phaseInterrupted = true
+		cw.mu.Unlock()
 		if !cw.interactive {
 			fmt.Fprintf(cw.outputWriter(), "SCAN ERROR message=%s\n", safeTerminalText(e.Message))
 			return nil
@@ -1621,6 +1909,9 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 			cRose, rst, cRose, safeTerminalText(e.Message), rst)
 
 	case "resource_limit_reached":
+		cw.mu.Lock()
+		cw.phaseInterrupted = true
+		cw.mu.Unlock()
 		resource := safeTerminalText(fmt.Sprint(e.Payload["resource"]))
 		if !cw.interactive {
 			fmt.Fprintf(cw.outputWriter(), "RESOURCE LIMIT resource=%s message=%s recoverable=%t\n",
@@ -1653,6 +1944,7 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		cw.phaseIndex++
 		phaseIndex := cw.phaseIndex
 		cw.phaseStarted[phase] = time.Now()
+		cw.phaseInterrupted = false
 		cw.mu.Unlock()
 
 		label := phaseLabel(phase)
@@ -1688,6 +1980,8 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		}
 		cw.updateProgressLocked()
 		started := cw.phaseStarted[phase]
+		phaseIndex := cw.phaseIndex
+		interrupted := cw.phaseInterrupted
 		cw.mu.Unlock()
 
 		duration := ""
@@ -1700,8 +1994,14 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 			fmt.Fprintf(cw.outputWriter(), "PHASE COMPLETE name=%s duration=%s\n", safeTerminalText(phaseLabel(phase)), shortDuration(elapsed))
 			return nil
 		}
-		fmt.Fprintf(cw.outputWriter(), "    %s╰─%s %s✓ COMPLETE%s%s\n",
-			cGhost, rst, cMint, rst, duration)
+		label := phaseLabel(phase)
+		if !interrupted {
+			fmt.Fprintf(cw.outputWriter(), "\033[1A\r\033[2K%s%02d%s  %s✓%s  %s%s%s  %sCOMPLETED%s%s\n",
+				cGhost, phaseIndex, rst, cMint, rst, bCloud, label, rst, bMint, rst, duration)
+		} else {
+			fmt.Fprintf(cw.outputWriter(), "    %s╰─%s %s✓ COMPLETED%s%s\n",
+				cGhost, rst, bMint, rst, duration)
+		}
 
 	// ── Progress messages ───────────────────────────────────────────────
 	case "scan_progress":
@@ -1765,6 +2065,7 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 
 		cw.mu.Lock()
 		cw.detected++
+		cw.phaseInterrupted = true
 		sev := strings.ToLower(severity)
 		cw.severityMap[sev]++
 		if confirmed {
@@ -1925,6 +2226,9 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		if !cw.acceptOASTCallback(e.Payload) {
 			return nil
 		}
+		cw.mu.Lock()
+		cw.phaseInterrupted = true
+		cw.mu.Unlock()
 		if !cw.interactive {
 			fmt.Fprintf(cw.outputWriter(), "OAST CALLBACK protocol=%s class=%s url=%s parameter=%s\n",
 				safeTerminalText(fmt.Sprint(e.Payload["protocol"])),
@@ -1937,6 +2241,9 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		return nil
 
 	case "waf_detected":
+		cw.mu.Lock()
+		cw.phaseInterrupted = true
+		cw.mu.Unlock()
 		fmt.Fprintf(cw.outputWriter(), "%s[WAF]%s  %s%s%s\n",
 			bAmber, rst, cSilver, safeTerminalText(e.Message), rst)
 
@@ -1945,6 +2252,9 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		if !cw.acceptTrafficUpdate(trafficText) {
 			return nil
 		}
+		cw.mu.Lock()
+		cw.phaseInterrupted = true
+		cw.mu.Unlock()
 		fmt.Fprintf(cw.outputWriter(), "%s[TRAFFIC]%s  %s%s%s\n",
 			bAmber, rst, cAmber, trafficText, rst)
 
@@ -1952,7 +2262,7 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		cw.mu.Lock()
 		cw.coverageGaps++
 		cw.mu.Unlock()
-		if cw.mode == "verbose" || e.Payload["phase"] == "crawling" || payloadInt(e.Payload, "targets_budget_exhausted") > 0 || payloadInt(e.Payload, "targets_unprocessed") > 0 {
+		if cw.mode == "verbose" {
 			fmt.Fprintf(cw.outputWriter(), "%s[COVERAGE]%s  %s%s%s\n", bAmber, rst, cAmber, safeTerminalText(e.Message), rst)
 		}
 
@@ -2039,7 +2349,6 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		}
 		cw.lastSnapshot = now
 		cw.updateProgressLocked()
-		cw.updateETALocked(now)
 		cw.mu.Unlock()
 		cw.writeRunningStatus()
 
@@ -2324,9 +2633,7 @@ func runCLI(args []string) (exitCode int) {
 }
 
 func runScanCommand(args []string) int {
-	args = normalizeScanArgs(args)
 	var targetURL string
-	var targetDomain string
 	var proxyURL string
 	var insecureTLS bool
 	var cookieVal string
@@ -2366,8 +2673,6 @@ func runScanCommand(args []string) int {
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&targetURL, "url", "", "")
 	fs.StringVar(&targetURL, "u", "", "")
-	fs.StringVar(&targetDomain, "domain", "", "")
-	fs.StringVar(&targetDomain, "d", "", "")
 	fs.StringVar(&proxyURL, "proxy", "", "")
 	fs.StringVar(&proxyURL, "p", "", "")
 	fs.BoolVar(&insecureTLS, "insecure", false, "")
@@ -2442,42 +2747,34 @@ func runScanCommand(args []string) int {
 	}
 
 	if flagWasSet(fs, "h") {
-		printDetailedUsage()
-		return 0
-	}
-
-	if targetURL == "" && targetDomain == "" && resumeID == "" && fs.NArg() == 0 {
 		printShortUsage()
 		return 0
 	}
 
-	// Allow positional argument: akca domain.com
-	if targetURL == "" && targetDomain == "" && resumeID == "" && fs.NArg() > 0 {
-		targetURL = fs.Arg(0)
-		if fs.NArg() > 1 {
-			printCLIError(fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args()[1:], " ")))
-			return 2
-		}
-	} else if fs.NArg() > 0 {
-		printCLIError(fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " ")))
+	if targetURL == "" && resumeID == "" && fs.NArg() == 0 {
+		printShortUsage()
+		return 0
+	}
+
+	if fs.NArg() > 0 {
+		printCLIError(fmt.Errorf("unexpected argument %q; specify the target with -u <url>", fs.Arg(0)))
 		return 2
 	}
 	targetURL = strings.TrimSpace(targetURL)
-	targetDomain = strings.TrimSpace(targetDomain)
 	resumeID = strings.TrimSpace(resumeID)
 
 	providedSources := 0
-	for _, value := range []string{targetURL, targetDomain, resumeID} {
+	for _, value := range []string{targetURL, resumeID} {
 		if value != "" {
 			providedSources++
 		}
 	}
 	if providedSources > 1 {
-		printCLIError(fmt.Errorf("choose exactly one of --url, --domain, or --resume"))
+		printCLIError(fmt.Errorf("choose exactly one of --url or --resume"))
 		return 2
 	}
-	if targetURL == "" && targetDomain == "" && resumeID == "" {
-		printCLIError(fmt.Errorf("either target URL (-u), target domain (-d), or --resume (-r) is required"))
+	if targetURL == "" && resumeID == "" {
+		printCLIError(fmt.Errorf("either target URL (-u) or --resume (-r) is required"))
 		return 1
 	}
 	wafEvasionSet := flagWasSet(fs, "waf-evasion")
@@ -2598,41 +2895,8 @@ func runScanCommand(args []string) int {
 		cfg.ScanID = fmt.Sprintf("scan-%d", time.Now().Unix())
 	}
 
-	var initialTargets []string
-	if targetDomain != "" {
-		if !quiet {
-			printCLIStatus("info", "Discovering passive subdomains for "+targetDomain)
-		}
-		subEng := subdomain.New()
-		ctxSub, cancelSub := context.WithTimeout(context.Background(), 120*time.Second)
-		_, liveURLs, err := subEng.DiscoverAndProbe(ctxSub, targetDomain)
-		cancelSub()
-
-		if err != nil || len(liveURLs) == 0 {
-			if !quiet {
-				printCLIStatus("warn", "No live subdomains found; probing the root domain")
-			}
-			initialTargets = []string{"https://" + targetDomain, "http://" + targetDomain}
-		} else {
-			if !quiet {
-				printCLIStatus("ready", fmt.Sprintf("Found %d live subdomain target(s)", len(liveURLs)))
-			}
-			for _, u := range liveURLs {
-				if verbose {
-					fmt.Fprintf(os.Stderr, "       %s%s%s\n", cIce, safeTerminalText(u), rst)
-				}
-			}
-			initialTargets = liveURLs
-		}
-	} else {
-		initialTargets = []string{targetURL}
-	}
+	initialTargets := []string{targetURL}
 	cfg.Targets = initialTargets
-	// In domain mode, record subdomain count so EffectiveMaxPages can scale
-	// the crawl budget proportionally across all live subdomains.
-	if targetDomain != "" && len(initialTargets) > 1 {
-		cfg.SubdomainCount = len(initialTargets)
-	}
 	cfg.APIImportFiles = append([]string(nil), apiSpecs...)
 	if err := config.ApplyScanModes(&cfg, scanMode); err != nil {
 		printCLIError(err)

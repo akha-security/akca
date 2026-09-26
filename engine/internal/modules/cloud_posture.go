@@ -107,7 +107,7 @@ func (r *Runner) recordCloudPostureFinding(ctx context.Context, target ScanTarge
 			Method: probe.Method, URL: probe.URL, Headers: probe.Headers, Body: probe.Body,
 		},
 		Response: httpclient.ResponseRecord{
-			StatusCode: status, Body: truncateCloud(body, 4000),
+			StatusCode: status, Body: body,
 		},
 	}
 	f := r.verifyAndBuild(ctx, "cloud_posture", target, p, baseline, probeRR, signal, false, false, "", "")

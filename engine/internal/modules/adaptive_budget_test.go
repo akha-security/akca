@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -282,5 +283,20 @@ func TestExhaustedExplicitBudgetIsNotUnlimited(t *testing.T) {
 	}
 	if len(client.calls) != 0 {
 		t.Fatalf("exhausted explicit budget sent requests: %v", client.calls)
+	}
+}
+
+func TestModuleCoverageMessageDistinguishesFailuresFromBudget(t *testing.T) {
+	message := moduleCoverageMessage("cookie_security", 29, 0, 0)
+	if !strings.Contains(message, "29 failed target(s)") || !strings.Contains(message, "request budget was not the cause") {
+		t.Fatalf("failure-only message is ambiguous: %q", message)
+	}
+	if strings.Contains(message, "0 budget-limited") {
+		t.Fatalf("zero budget count should be omitted: %q", message)
+	}
+
+	message = moduleCoverageMessage("xss", 0, 3, 2)
+	if !strings.Contains(message, "3 budget-limited target(s)") || !strings.Contains(message, "2 unfinished target(s)") {
+		t.Fatalf("bounded coverage message omitted counts: %q", message)
 	}
 }

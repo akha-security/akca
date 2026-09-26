@@ -18,6 +18,7 @@
 *.cover
 /engine/coverage
 /dist/
+/release/
 
 # Scan output and local state
 /output/
@@ -57,3 +58,5 @@ Desktop.ini
 # Local research/reference material and unrelated artwork
 /acunetix-netsparker.txt
 /banner.png
+/1.png
+/new-cli.png

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -488,6 +489,9 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 		"memory_limit_source":          cfg.MemoryLimitSource,
 		"detected_available_memory_mb": cfg.DetectedAvailableMemoryMB,
 		"oast_enabled":                 cfg.EnableOAST,
+		"browser_enabled":              cfg.EnableHeadlessCrawler,
+		"js_analysis_enabled":          cfg.EnableJSAnalysis,
+		"auth_configured":              scanHasConfiguredAuth(cfg),
 		"proxy_enabled":                cfg.ProxyURL != "",
 		"proxy_endpoint":               config.SafeProxyURL(cfg.ProxyURL),
 		"insecure_tls":                 cfg.InsecureSkipVerify,
@@ -741,7 +745,9 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 	}
 	if !done("vuln_modules") {
 		if err := e.runVulnModulesSequential(ctx); err != nil {
-			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "vuln_modules"})
+			if !errors.Is(err, errVulnModuleCoverageIncomplete) {
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "vuln_modules"})
+			}
 			markFailed("vuln_modules")
 		} else {
 			markSuccess("vuln_modules")

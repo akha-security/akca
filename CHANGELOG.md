@@ -5,6 +5,39 @@ All notable changes to AKCA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [v0.2.4] - 2026-09-26
+
+### Added
+
+- Add a self-contained AKCA-branded HTML report with an embedded logo, vulnerability summary table, detailed finding sections, and print-safe styling.
+- Add Request, Response, and combined HTTP evidence views with full-content expansion and clipboard controls.
+- Add a Lipgloss-based Scan Session panel with target emphasis, active-state display, crawl policy, engine, authentication, transport, OAST, request-rate, and RAM summaries.
+- Add friendly terminal labels for vulnerability modules and in-place transitions from Running to Completed.
+- Add an English workflow and security-testing capability guide plus Turkish and international community-support messages.
+
+### Changed
+
+- Render structured-only request evidence in a conventional Burp-style layout with ordered request headers, content type and length, connection policy, and a clear header/body boundary.
+- Include standard HTTP reason phrases in reconstructed responses while preserving captured raw transactions verbatim when available.
+- Replace estimated completion time with a continuously updating elapsed timer in live scan status.
+- Split `-h` into concise help and `--help` into the complete command reference; remove unsupported domain and positional-target forms from usage and parsing.
+- Aggregate browser dependency blocks and keep repetitive coverage diagnostics in verbose CLI output while retaining coverage events for reports and machine-readable consumers.
+- Replace the previous README image with reproducible output captured from the local integration lab.
+
+### Fixed
+
+- Preserve nested and flat raw request/response fields instead of rebuilding and shortening them during report generation.
+- Preserve long response bodies, repeated response headers, request/response trailing whitespace, and explicit transport truncation state.
+- Distinguish module coverage gaps from execution failures so incomplete targets do not produce misleading scan-error output.
+- Improve adaptive module accounting and crawler coverage summaries for failed, unfinished, and browser-blocked work.
+
+### Validation
+
+- Full Go package tests pass with `go test ./... -count=1`.
+- Static analysis passes with `go vet ./...`.
+- Report regressions cover raw transaction preservation, long and escaped response bodies, missing or truncated evidence, tab controls, print output, and clipboard paths.
+- Windows executable reports `AKCA ADVANCED WEB SECURITY SCANNER v0.2.4`.
+
 ## [v0.2.3] - 2026-09-25
 
 ### Added
@@ -250,7 +283,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - HTML, JSON, Markdown, CSV and SARIF reporting.
 - CWE and OWASP Top 10:2025 report classification.
 
-[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.4...HEAD
+[v0.2.4]: https://github.com/akha-security/akca/compare/v0.2.3...v0.2.4
 [v0.2.3]: https://github.com/akha-security/akca/compare/v0.2.2...v0.2.3
 [v0.2.2]: https://github.com/akha-security/akca/compare/v0.2.1...v0.2.2
 [v0.2.1]: https://github.com/akha-security/akca/releases/tag/v0.2.1
