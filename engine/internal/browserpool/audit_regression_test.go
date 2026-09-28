@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,9 @@ func TestPassiveResourcePolicyStripsCredentials(t *testing.T) {
 func TestBrowserLoadsAllowedCDNWithoutCredentials(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real browser integration")
+	}
+	if os.Getenv("CI") == "true" && os.Getenv("AKCA_RUN_REAL_BROWSER_TESTS") != "1" {
+		t.Skip("real browser integration test is opt-in on CI")
 	}
 	requests := make(chan http.Header, 4)
 	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +86,9 @@ func TestBrowserLoadsAllowedCDNWithoutCredentials(t *testing.T) {
 func TestCrawlerBrowserRetainsSessionAndDiscoversTab(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real browser integration")
+	}
+	if os.Getenv("CI") == "true" && os.Getenv("AKCA_RUN_REAL_BROWSER_TESTS") != "1" {
+		t.Skip("real browser integration test is opt-in on CI")
 	}
 	b := NewCrawlerBrowser(nil, nil)
 	defer b.Close()

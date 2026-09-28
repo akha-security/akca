@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -135,7 +136,7 @@ func runPipeline(ctx context.Context, db *storage.DB, opts Options, collector *E
 		"auth": opts.EnableAuth, "auth_parity": opts.EnableAuthParity, "oast": oastListener != nil,
 	}
 	var runnerOpts []modules.RunnerOption
-	if opts.EnableBrowser {
+	if realBrowserCapabilityAllowed(opts.EnableBrowser) {
 		renderer := browserpool.NewHeadlessRenderer()
 		if renderer.Available() {
 			smokeCtx, smokeCancel := context.WithTimeout(runCtx, 5*time.Second)
@@ -187,6 +188,17 @@ func runPipeline(ctx context.Context, db *storage.DB, opts Options, collector *E
 		Capabilities:           capabilities,
 		ReportSchemaCompatible: reportSchemaCompatible,
 	}, nil
+}
+
+// realBrowserCapabilityAllowed keeps the observed benchmark hermetic on CI.
+// A runner's incidental Chrome installation must not change findings or request
+// counts between the primary and deterministic replay scans. Browser-backed
+// coverage remains available through an explicit integration-test opt-in.
+func realBrowserCapabilityAllowed(requested bool) bool {
+	if !requested {
+		return false
+	}
+	return os.Getenv("CI") != "true" || os.Getenv("AKCA_RUN_REAL_BROWSER_TESTS") == "1"
 }
 
 func (p *pipeline) run(ctx context.Context) error {
