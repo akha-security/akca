@@ -467,6 +467,11 @@ The operational benchmark measures its observed corpus. The complete-corpus gate
 
 Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md) before opening a pull request. Report vulnerabilities in AKCA through [SECURITY.md](SECURITY.md).
 
+## Important note:
+I am constantly running live tests and pushing updates whenever I encounter false positives or missed vulnerabilities.
+There are a lot of modules, and frankly, I never expected you to like the tool this much—which motivates me even more and drives me to work harder.
+Thank you for your support.
+
 ## License
 
 [Apache License 2.0](LICENSE) · Copyright 2026 AKHA Security contributors.
