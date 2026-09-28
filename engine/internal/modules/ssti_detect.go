@@ -40,6 +40,8 @@ func sstiSignalConfirmed(p payloadgen.Payload, body, baseline, signal string) bo
 		return false
 	case "string_multiply_eval":
 		return false
+	case "string_transform_eval":
+		return strings.Contains(body, "AKCA_SSTI_MARKER") && !strings.Contains(baseline, "AKCA_SSTI_MARKER")
 	default:
 		return false
 	}

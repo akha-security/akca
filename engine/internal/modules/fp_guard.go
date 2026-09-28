@@ -75,7 +75,7 @@ func moduleSignalConfirmed(
 		}
 		return sqliSignalConfirmed(p, body, baseBody, signal)
 	case "xss":
-		if signal == "dom_execution" && domExecuted {
+		if (signal == "dom_execution" || signal == "reflected_browser_execution") && domExecuted {
 			return !sqliErrorRe.MatchString(body)
 		}
 		return xssSignalConfirmed(p, body, baseBody, signal)
@@ -246,8 +246,8 @@ func moduleSignalConfirmed(
 		}
 		return differentialWithStatusGuard(body, baseBody, p.Value, probeStatus, baseStatus)
 	case "git_recovery":
-		return probeStatus == 200 && body != baseBody && len(strings.TrimSpace(body)) > 4 &&
-			(isGitContent(body) || strings.Contains(body, "Exposed .git") || strings.Contains(body, "partial_git_exposure"))
+		return probeStatus == 200 && !probe.Redirected && body != baseBody && len(strings.TrimSpace(body)) > 4 &&
+			isGitContent(body)
 	case "mass_assignment":
 		return (strings.HasPrefix(signal, "mass_assignment_") || signal == "role_escalation" || signal == "hidden_admin_flag" || signal == "permission_injection") &&
 			probeStatus >= 200 && probeStatus < 300 &&
@@ -577,8 +577,13 @@ func shouldSuppressLowConfidence(module string, signal string, score float64, co
 }
 
 func isGitContent(body string) bool {
+	lower := strings.ToLower(body)
+	if strings.Contains(lower, "<html") || strings.Contains(lower, "<!doctype") || strings.Contains(lower, "<head") {
+		return false
+	}
 	return strings.HasPrefix(body, "ref:") ||
-		strings.Contains(body, "PACK") ||
+		strings.HasPrefix(body, "PACK") ||
+		strings.HasPrefix(body, "DIRC") ||
 		strings.Contains(body, "HEAD\x00") ||
 		strings.Contains(body, "[core]")
 }

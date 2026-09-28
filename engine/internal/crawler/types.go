@@ -16,6 +16,7 @@ const (
 	SourceDataAttr    DiscoverySource = "data_attribute"
 	SourceSrcset      DiscoverySource = "srcset"
 	SourceImage       DiscoverySource = "image"
+	SourceStaticRoot  DiscoverySource = "static_parent"
 	SourceMedia       DiscoverySource = "media"
 	SourceIframe      DiscoverySource = "iframe"
 	SourceLinkHeader  DiscoverySource = "link_header"

@@ -66,7 +66,10 @@ func (e *Engine) generateReportToWriter(ctx context.Context, w io.Writer, opts r
 			"template":     string(p.Template),
 		})
 	})
-	if err := exporter.Export(w, opts); err != nil {
+	if err := exporter.ExportContext(ctx, w, opts); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	doc, _ := builder.BuildMeta(opts)

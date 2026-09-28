@@ -132,7 +132,7 @@ func TestXSSReflectedAndDOM(t *testing.T) {
 	client := &mockClient{responses: map[string]string{
 		"akca-xss-base":              "results:",
 		`"><svg/onload=alert(1)>`:    `results: "><svg/onload=alert(1)>`,
-		verification.DOMXSSPayload(): `<html><script>window.__akca_xss_confirmed=true</script></html>`,
+		verification.DOMXSSPayload(): `<html>` + verification.DOMXSSPayload() + `</html>`,
 	}}
 	payloads := []payloadgen.Payload{{Value: `"><svg/onload=alert(1)>`, VulnClass: "xss", Variant: "html_breakout"}}
 	cfg := config.DefaultScanConfig()
@@ -141,6 +141,32 @@ func TestXSSReflectedAndDOM(t *testing.T) {
 	findings := r.runXSS(context.Background(), testTarget(payloads))
 	if len(findings) == 0 {
 		t.Fatal("expected xss finding")
+	}
+	if findings[0].Evidence.Signal != "reflected_browser_execution" {
+		t.Fatalf("server-reflected browser execution was misclassified as %q", findings[0].Evidence.Signal)
+	}
+	if findings[0].Evidence.Verification.ProofType != verification.ProofDOMExecution {
+		t.Fatalf("browser execution proof was not retained: %+v", findings[0].Evidence.Verification)
+	}
+}
+
+func TestXSSDOMExecutionRequiresNoServerReflection(t *testing.T) {
+	payload := `"><svg/onload=alert(1)>`
+	client := &mockClient{responses: map[string]string{
+		"akca-xss-base":              "results:",
+		payload:                      "results: " + payload,
+		verification.DOMXSSPayload(): "<html><body>application shell</body></html>",
+	}}
+	payloads := []payloadgen.Payload{{Value: payload, VulnClass: "xss", Variant: "html_breakout"}}
+	cfg := config.DefaultScanConfig()
+	r := NewRunner("scan-m", client, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+		func(string, string, map[string]interface{}) error { return nil }, cfg, WithBrowserRenderer(executedDOMRenderer{}))
+	findings := r.runXSS(context.Background(), testTarget(payloads))
+	if len(findings) == 0 {
+		t.Fatal("expected DOM-based XSS finding")
+	}
+	if findings[0].Evidence.Signal != "dom_execution" {
+		t.Fatalf("non-reflected client-side execution was classified as %q", findings[0].Evidence.Signal)
 	}
 }
 

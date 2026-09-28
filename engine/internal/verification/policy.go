@@ -65,6 +65,27 @@ func validBooleanPairProof(proof *BooleanPairProof) bool {
 		proof.FirstTrueHash != proof.BaselineHash
 }
 
+func validArithmeticOracleProof(proof *ArithmeticOracleProof) bool {
+	if proof == nil || !proof.SameSurface || !proof.StableOrientation {
+		return false
+	}
+	for _, hash := range []string{
+		proof.BaselineHash, proof.FirstIdentityHash, proof.FirstContrastHash,
+		proof.ReplayIdentityHash, proof.ReplayContrastHash,
+		proof.SecondIdentityHash, proof.SecondContrastHash,
+	} {
+		if strings.TrimSpace(hash) == "" {
+			return false
+		}
+	}
+	return proof.FirstIdentityHash == proof.BaselineHash &&
+		proof.ReplayIdentityHash == proof.BaselineHash &&
+		proof.SecondIdentityHash == proof.BaselineHash &&
+		proof.FirstContrastHash == proof.ReplayContrastHash &&
+		proof.FirstContrastHash == proof.SecondContrastHash &&
+		proof.FirstContrastHash != proof.BaselineHash
+}
+
 func validOASTCorrelation(candidate Candidate) bool {
 	cor := candidate.OAST
 	if cor == nil || strings.TrimSpace(cor.PayloadID) == "" || strings.TrimSpace(cor.ScanID) == "" {

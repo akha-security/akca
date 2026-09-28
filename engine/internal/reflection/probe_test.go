@@ -100,6 +100,30 @@ func TestMutateRequestQueryAndCookieKeepOriginalBody(t *testing.T) {
 	}
 }
 
+func TestMutateRequestPreservesRepeatedQueryAndFormValues(t *testing.T) {
+	queryReq, err := MutateRequest(RequestTemplate{
+		Method: "GET", URL: "https://api.test/search?q=first&q=second&lang=en",
+	}, "q", "query", "probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(queryReq.URL, "q=probe") || !strings.Contains(queryReq.URL, "q=second") || !strings.Contains(queryReq.URL, "lang=en") {
+		t.Fatalf("repeated query values were collapsed: %s", queryReq.URL)
+	}
+
+	formReq, err := MutateRequest(RequestTemplate{
+		Method: "POST", URL: "https://api.test/login",
+		Body: "role=user&role=auditor&csrf=kept", ContentType: "application/x-www-form-urlencoded",
+	}, "role", "form", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(formReq.Body)
+	if !strings.Contains(body, "role=admin") || !strings.Contains(body, "role=auditor") || !strings.Contains(body, "csrf=kept") {
+		t.Fatalf("repeated form values were collapsed: %s", body)
+	}
+}
+
 func TestMutateRequestNestedArrayJSON(t *testing.T) {
 	template := RequestTemplate{
 		Method:      "POST",
@@ -140,5 +164,32 @@ func TestMutateRequestNestedArrayJSON(t *testing.T) {
 	// Must not overwrite array container with string!
 	if err4 == nil {
 		// BuildProbeRequest fallback might be called, but setJSONPath should not turn users into string
+	}
+}
+
+func TestMutateRequestPreservesXMLMultipartGraphQLAndPathPosition(t *testing.T) {
+	xmlReq, err := MutateRequest(RequestTemplate{Method: "POST", URL: "https://api.test/orders", Body: `<order id="7"><name>old</name><kept>yes</kept></order>`, ContentType: "application/xml"}, "order.name", "xml", "new")
+	if err != nil || !strings.Contains(string(xmlReq.Body), "<name>new</name>") || !strings.Contains(string(xmlReq.Body), "<kept>yes</kept>") {
+		t.Fatalf("XML mutation failed: err=%v body=%s", err, xmlReq.Body)
+	}
+	xmlAttr, err := MutateRequest(RequestTemplate{Method: "POST", URL: "https://api.test/orders", Body: `<order id="7"><name>old</name></order>`, ContentType: "application/xml"}, "order@id", "xml", "9")
+	if err != nil || !strings.Contains(string(xmlAttr.Body), `id="9"`) {
+		t.Fatalf("XML attribute mutation failed: err=%v body=%s", err, xmlAttr.Body)
+	}
+
+	multipartBody := "--akca\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nold\r\n--akca\r\nContent-Disposition: form-data; name=\"kept\"\r\n\r\nyes\r\n--akca--\r\n"
+	multipartReq, err := MutateRequest(RequestTemplate{Method: "POST", URL: "https://api.test/upload", Body: multipartBody, ContentType: "multipart/form-data; boundary=akca"}, "title", "multipart", "new")
+	if err != nil || !strings.Contains(string(multipartReq.Body), "new") || !strings.Contains(string(multipartReq.Body), "yes") {
+		t.Fatalf("multipart mutation failed: err=%v body=%s", err, multipartReq.Body)
+	}
+
+	graphqlReq, err := MutateRequest(RequestTemplate{Method: "POST", URL: "https://api.test/graphql", Body: `query Q($limit: Int = 10){users(limit:$limit){id}}`, ContentType: "application/graphql"}, "limit", "graphql_query", "25")
+	if err != nil || !strings.Contains(string(graphqlReq.Body), `$limit: Int = 25`) {
+		t.Fatalf("GraphQL mutation failed: err=%v body=%s", err, graphqlReq.Body)
+	}
+
+	pathReq, err := MutateRequest(RequestTemplate{Method: "GET", URL: "https://api.test/tenants/acme/orders/01J8YV4F6M8Q2N7K3P5R9T1WXY"}, "path_segment_3", "path", "replacement")
+	if err != nil || pathReq.URL != "https://api.test/tenants/acme/orders/replacement" {
+		t.Fatalf("position-aware path mutation failed: err=%v url=%s", err, pathReq.URL)
 	}
 }

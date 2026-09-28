@@ -228,11 +228,14 @@ func (r *Runner) runSQLi(ctx context.Context, target ScanTarget) []ModuleFinding
 		}
 	}
 
-	if findings := r.numericArithmeticSQLiProbe(ctx, target, baseline); len(findings) > 0 {
+	if findings := r.booleanBlindSQLiProbe(ctx, target, baseline); len(findings) > 0 {
 		out = append(out, findings...)
 		return out
 	}
-	if findings := r.booleanBlindSQLiProbe(ctx, target, baseline); len(findings) > 0 {
+	// Prefer SQL-specific predicates. A stable arithmetic oracle is retained as
+	// a Potential fallback when the endpoint accepts expressions but not AND/OR
+	// predicate syntax.
+	if findings := r.numericArithmeticSQLiProbe(ctx, target, baseline); len(findings) > 0 {
 		out = append(out, findings...)
 		return out
 	}
@@ -273,6 +276,7 @@ func (r *Runner) buildSQLiRuntimeFinding(target ScanTarget, p payloadgen.Payload
 	)
 	result := r.verifier.Verify(candidate)
 	if result.Suppressed || !result.ProofSatisfied {
+		r.recordVerificationOutcome(target, "sqli", "runtime_unsafe_sql_sink", result)
 		return nil
 	}
 	return &ModuleFinding{
@@ -353,7 +357,8 @@ func (r *Runner) buildSQLiFinding(ctx context.Context, target ScanTarget, p payl
 		}
 	}
 	result := r.verifier.Verify(candidate)
-	if result.Suppressed {
+	if result.Suppressed || !result.ProofSatisfied {
+		r.recordVerificationOutcome(target, "sqli", signal, result)
 		return nil
 	}
 	if signal == "error_based" && result.Confidence == verification.Confirmed {
@@ -456,6 +461,9 @@ func sqliDynamicTimingPayloads(sleepSec int, dbHint string) []payloadgen.Payload
 		add(timingblind.SQLiSleepPayload(sleepSec, "mysql"))
 	case strings.Contains(db, "mssql") || strings.Contains(db, "sql server"):
 		add(timingblind.SQLiSleepPayload(sleepSec, "mssql"))
+		add(payloadgen.Payload{Value: fmt.Sprintf("'; WAITFOR DELAY '0:0:%d'--", sleepSec), VulnClass: "sqli", Variant: "mssql_waitfor_delay", ExpectedSignal: "time_delay"})
+		add(payloadgen.Payload{Value: fmt.Sprintf("' AND 1=1; WAITFOR DELAY '0:0:%d'--", sleepSec), VulnClass: "sqli", Variant: "mssql_waitfor_delay_and", ExpectedSignal: "time_delay"})
+		add(payloadgen.Payload{Value: fmt.Sprintf("1; WAITFOR DELAY '0:0:%d'--", sleepSec), VulnClass: "sqli", Variant: "mssql_waitfor_delay_numeric", ExpectedSignal: "time_delay"})
 	case strings.Contains(db, "postgres"):
 		add(timingblind.SQLiPgSleepPayload(sleepSec))
 	case strings.Contains(db, "oracle"):
@@ -465,6 +473,9 @@ func sqliDynamicTimingPayloads(sleepSec int, dbHint string) []payloadgen.Payload
 		add(timingblind.SQLiSleepPayload(sleepSec, "mysql"))
 		add(timingblind.SQLiPgSleepPayload(sleepSec))
 		add(timingblind.SQLiSleepPayload(sleepSec, "mssql"))
+		add(payloadgen.Payload{Value: fmt.Sprintf("'; WAITFOR DELAY '0:0:%d'--", sleepSec), VulnClass: "sqli", Variant: "mssql_waitfor_delay", ExpectedSignal: "time_delay"})
+		add(payloadgen.Payload{Value: fmt.Sprintf("' AND 1=1; WAITFOR DELAY '0:0:%d'--", sleepSec), VulnClass: "sqli", Variant: "mssql_waitfor_delay_and", ExpectedSignal: "time_delay"})
+		add(payloadgen.Payload{Value: fmt.Sprintf("1; WAITFOR DELAY '0:0:%d'--", sleepSec), VulnClass: "sqli", Variant: "mssql_waitfor_delay_numeric", ExpectedSignal: "time_delay"})
 	}
 	return out
 }
@@ -501,7 +512,20 @@ func prioritizeSQLiPayloads(payloads []payloadgen.Payload, dbHint string, isNume
 			defaultPayload("sqli", "numeric_arithmetic_subzero", nativeVal+"-0", "sql_error"),
 		}
 	}
-	combined := append(numericProbes, payloads...)
+	var contextProbes []payloadgen.Payload
+	if !isNumeric && nativeVal != "" {
+		// Some handlers validate the original search/login prefix before reaching
+		// the query. Exercise append-mode boundaries in addition to replacing the
+		// entire parameter with a quote.
+		contextProbes = []payloadgen.Payload{
+			defaultPayload("sqli", "native_append_single_quote", nativeVal+`'`, "sql_error"),
+			defaultPayload("sqli", "native_append_double_quote", nativeVal+`"`, "sql_error_dquote"),
+			defaultPayload("sqli", "native_append_mixed_quotes", nativeVal+`'"`, "sql_error"),
+			defaultPayload("sqli", "native_append_quote_paren", nativeVal+`')`, "sql_error"),
+		}
+	}
+	combined := append(append(numericProbes, contextProbes...), payloads...)
+	combined = dedupeSQLiPayloads(combined)
 	if dbHint != "" {
 		hint := strings.ToLower(strings.TrimSpace(dbHint))
 		var hinted []payloadgen.Payload
@@ -517,6 +541,20 @@ func prioritizeSQLiPayloads(payloads []payloadgen.Payload, dbHint string, isNume
 		combined = append(hinted, rest...)
 	}
 	return combined
+}
+
+func dedupeSQLiPayloads(payloads []payloadgen.Payload) []payloadgen.Payload {
+	seen := make(map[string]struct{}, len(payloads))
+	out := make([]payloadgen.Payload, 0, len(payloads))
+	for _, payload := range payloads {
+		key := payload.Value + "\x00" + payload.ExpectedSignal
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, payload)
+	}
+	return out
 }
 
 var sqliFallbackPayloadSet = []payloadgen.Payload{

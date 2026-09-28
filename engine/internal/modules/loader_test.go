@@ -2,6 +2,7 @@ package modules
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/akha-security/akca/engine/internal/config"
@@ -18,6 +19,54 @@ func TestParamsFromURL(t *testing.T) {
 	}
 	if paramsFromURL("http://example.com/no-params") != nil {
 		t.Fatal("expected nil for URL without query string")
+	}
+}
+
+func TestBodyParameterDiscoveryCoversStructuredTransports(t *testing.T) {
+	tests := []struct {
+		body, contentType, location string
+		want                        []string
+	}{
+		{`<order id="7"><customer><name>Caner</name></customer></order>`, "application/xml", "xml", []string{"order@id", "order.customer.name"}},
+		{`{"query":"query Q($id: ID!){user(id:$id){name}}","variables":{"id":"7"}}`, "application/json", "graphql", []string{"query", "variables.id"}},
+		{`query Q($id: ID!, $limit: Int = 10){users(id:$id,limit:$limit){id}}`, "application/graphql", "graphql_query", []string{"id", "limit"}},
+	}
+	for _, tc := range tests {
+		got, location := paramsFromBody(tc.body, tc.contentType)
+		if location != tc.location {
+			t.Fatalf("%s location=%q want=%q", tc.contentType, location, tc.location)
+		}
+		for _, want := range tc.want {
+			found := false
+			for _, value := range got {
+				found = found || value == want
+			}
+			if !found {
+				t.Fatalf("%s missing %q in %v", tc.contentType, want, got)
+			}
+		}
+	}
+
+	multipartBody := "--akca\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nhello\r\n--akca\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nfile\r\n--akca--\r\n"
+	got, location := paramsFromBody(multipartBody, "multipart/form-data; boundary=akca")
+	if location != "multipart" || !reflect.DeepEqual(got, []string{"title", "upload"}) {
+		t.Fatalf("multipart discovery=%v location=%q", got, location)
+	}
+}
+
+func TestPathAndObservedHeaderDiscovery(t *testing.T) {
+	for _, rawURL := range []string{
+		"https://api.test/orders/01J8YV4F6M8Q2N7K3P5R9T1WXY",
+		"https://api.test/assets/7f83b1657ff1fc53b92dc18148a1d65dfa13514f",
+		"https://api.test/object/AbCdEf0123456789_-",
+	} {
+		if got := pathParamsFromURL(rawURL); len(got) != 1 || got[0] != "path_segment_1" {
+			t.Fatalf("identifier path not discovered for %s: %v", rawURL, got)
+		}
+	}
+	got := mutableObservedHeaders(map[string]string{"Content-Type": "application/grpc", "Authorization": "Bearer x", "X-Tenant-ID": "acme", "Grpc-Timeout": "2S"})
+	if !reflect.DeepEqual(got, []string{"Grpc-Timeout", "X-Tenant-ID"}) {
+		t.Fatalf("observed headers=%v", got)
 	}
 }
 

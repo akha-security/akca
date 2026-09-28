@@ -72,6 +72,13 @@ var sqliGenericPageKeywords = []string{
 
 var sqliWeakErrorGrammarRE = regexp.MustCompile(`(?i)(exception|stack trace|warning:|query (?:failed|error)|database error|at line \d+|in /[^ ]+ on line \d+)`)
 
+var (
+	sqliHTMLCommentRE = regexp.MustCompile(`(?is)<!--.*?-->`)
+	sqliScriptStyleRE = regexp.MustCompile(`(?is)<(?:script|style)\b[^>]*>.*?</(?:script|style)>`)
+	sqliHTMLTagRE     = regexp.MustCompile(`(?s)<[^>]+>`)
+	sqliSpaceRE       = regexp.MustCompile(`\s+`)
+)
+
 func sqliErrorInBody(body, baseline string) bool {
 	lower := strings.ToLower(body)
 	base := strings.ToLower(baseline)
@@ -173,14 +180,14 @@ func booleanSQLiConfirmed(trueBody, falseBody, baseline string) bool {
 			return false
 		}
 		// True and false bodies must differ significantly from each other.
-		if bodyDiffRatio(normFalse, normTrue) < 0.03 {
+		if sqliSemanticDiffRatio(normFalse, normTrue) < 0.03 {
 			return false
 		}
 		// Either branch may match the normal response depending on how the
 		// application embeds the predicate. Requiring only the false branch to
 		// match loses valid numeric and existing-WHERE-clause cases.
-		trueToBase := bodyDiffRatio(normBase, normTrue)
-		falseToBase := bodyDiffRatio(normBase, normFalse)
+		trueToBase := sqliSemanticDiffRatio(normBase, normTrue)
+		falseToBase := sqliSemanticDiffRatio(normBase, normFalse)
 		if trueToBase > 0.20 && falseToBase > 0.20 {
 			return false
 		}
@@ -189,7 +196,30 @@ func booleanSQLiConfirmed(trueBody, falseBody, baseline string) bool {
 	if normTrue == normBase {
 		return false
 	}
-	return bodyDiffRatio(normBase, normTrue) >= 0.04
+	return sqliSemanticDiffRatio(normBase, normTrue) >= 0.04
+}
+
+// sqliSemanticDiffRatio prevents large blocks of HTML comments, scripts and
+// formatting whitespace from hiding a small security-relevant result change.
+// The raw-body ratio is retained so non-HTML/API responses keep their original
+// sensitivity; the larger of raw and visible-text deltas wins.
+func sqliSemanticDiffRatio(left, right string) float64 {
+	raw := bodyDiffRatio(left, right)
+	visibleLeft := sqliVisibleText(left)
+	visibleRight := sqliVisibleText(right)
+	visible := bodyDiffRatio(visibleLeft, visibleRight)
+	if visible > raw {
+		return visible
+	}
+	return raw
+}
+
+func sqliVisibleText(body string) string {
+	body = sqliHTMLCommentRE.ReplaceAllString(body, " ")
+	body = sqliScriptStyleRE.ReplaceAllString(body, " ")
+	body = sqliHTMLTagRE.ReplaceAllString(body, " ")
+	body = html.UnescapeString(body)
+	return strings.TrimSpace(sqliSpaceRE.ReplaceAllString(body, " "))
 }
 
 func booleanPairConfirmed(baseline, trueRR, falseRR httpclient.ResponseRecord, truePayload, falsePayload string) bool {

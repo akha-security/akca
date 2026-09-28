@@ -44,6 +44,12 @@ func (r *Runner) runSaaSExposure(ctx context.Context, target ScanTarget) []Modul
 
 		rr, err := r.client.Do(ctx, "GET", snURL, nil, nil)
 		if err == nil && rr.Response.StatusCode == 200 {
+			if rr.Response.Redirected && isRedirectedAway(rr, snURL) {
+				continue
+			}
+			if isHTMLResponse(rr.Response) {
+				continue
+			}
 			body := rr.Response.Body
 			if strings.Contains(body, `"result"`) && (strings.Contains(body, `"sys_id"`) || strings.Contains(body, `"user_name"`)) {
 				signal := "servicenow_table_exposure"

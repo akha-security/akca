@@ -2,6 +2,7 @@ package cve_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/akha-security/akca/engine/internal/modules/cve"
 )
@@ -13,6 +14,35 @@ func TestMatchComponentLog4j(t *testing.T) {
 	}
 	if matches[0].CVEID != "CVE-2021-44228" {
 		t.Fatalf("unexpected cve: %s", matches[0].CVEID)
+	}
+}
+
+func TestEmbeddedCatalogIntegrity(t *testing.T) {
+	if err := cve.ValidateCatalog(cve.EmbeddedSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range cve.EmbeddedSnapshot {
+		if entry.CVEID == "CVE-2026-49975" && (entry.Vendor != "apache" || entry.Product != "http_server") {
+			t.Fatalf("CVE-2026-49975 must not be bound to an unrelated product: %+v", entry)
+		}
+	}
+	if age := cve.SnapshotAge(time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)); age < 24*time.Hour {
+		t.Fatalf("unexpected snapshot age: %s", age)
+	}
+}
+
+func TestProductAliasesAreExactAndSafe(t *testing.T) {
+	if matches := cve.MatchComponent("", "", "2.4.67"); len(matches) != 0 {
+		t.Fatalf("empty component identity must fail closed: %+v", matches)
+	}
+	if matches := cve.MatchComponent("Apache", "Apache", "2.4.67"); len(matches) != 1 || matches[0].CVEID != "CVE-2026-49975" {
+		t.Fatalf("Apache alias did not resolve to http_server: %+v", matches)
+	}
+	if matches := cve.MatchComponent("nginx", "nginx", "1.20.0"); len(matches) != 0 {
+		t.Fatalf("Apache CVE leaked into nginx identity: %+v", matches)
+	}
+	if matches := cve.MatchComponent("facebook", "react-server-dom-webpack", "19.1.1"); len(matches) != 1 || matches[0].CVEID != "CVE-2025-55182" {
+		t.Fatalf("RSC alias did not match curated record: %+v", matches)
 	}
 }
 

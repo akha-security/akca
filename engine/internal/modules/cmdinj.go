@@ -46,9 +46,18 @@ func (r *Runner) runCommandInjection(ctx context.Context, target ScanTarget) []M
 			{Value: `|id`, VulnClass: "command_injection", Variant: "pipe", ExpectedSignal: "command_output"},
 			{Value: `;id`, VulnClass: "command_injection", Variant: "semicolon", ExpectedSignal: "command_output"},
 			{Value: `&&id`, VulnClass: "command_injection", Variant: "and", ExpectedSignal: "command_output"},
+			{Value: `||id`, VulnClass: "command_injection", Variant: "or", ExpectedSignal: "command_output"},
 			{Value: `\nid`, VulnClass: "command_injection", Variant: "newline", ExpectedSignal: "command_output"},
 			{Value: `$(id)`, VulnClass: "command_injection", Variant: "subshell", ExpectedSignal: "command_output"},
 			{Value: "`id`", VulnClass: "command_injection", Variant: "backtick", ExpectedSignal: "command_output"},
+		}...)
+	}
+	if windows {
+		probes = append(probes, []payloadgen.Payload{
+			{Value: `& powershell -c "echo akca_ps_test"`, VulnClass: "command_injection", Variant: "powershell_ampersand", ExpectedSignal: "command_output"},
+			{Value: `| powershell -c "echo akca_ps_test"`, VulnClass: "command_injection", Variant: "powershell_pipe", ExpectedSignal: "command_output"},
+			{Value: `& cmd /c echo akca_cmd_test`, VulnClass: "command_injection", Variant: "cmd_ampersand", ExpectedSignal: "command_output"},
+			{Value: `| cmd /c echo akca_cmd_test`, VulnClass: "command_injection", Variant: "cmd_pipe", ExpectedSignal: "command_output"},
 		}...)
 	}
 	isNumeric := isNumericTargetValue(target)

@@ -18,8 +18,8 @@ import (
 )
 
 func TestVersionIsStableReleaseString(t *testing.T) {
-	if version != "0.2.4" {
-		t.Fatalf("version=%q, want 0.2.4", version)
+	if version != "0.2.5" {
+		t.Fatalf("version=%q, want 0.2.5", version)
 	}
 }
 
@@ -48,7 +48,7 @@ func TestUsageHelpAndVersionPrintBrandBanner(t *testing.T) {
 			if !strings.Contains(combined, akcaASCII[0]) {
 				t.Fatalf("ASCII wordmark missing for %s: %q", tc.name, combined)
 			}
-			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.4") {
+			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.5") {
 				t.Fatalf("brand/version line missing for %s: %q", tc.name, combined)
 			}
 		})
@@ -148,6 +148,15 @@ func TestFindingProofExplainsTimingState(t *testing.T) {
 	}
 }
 
+func TestXSSVulnerabilityTypeDistinguishesReflectedAndDOMBased(t *testing.T) {
+	if got := formatVulnType("xss", "reflected"); got != "XSS (Reflected)" {
+		t.Fatalf("reflected XSS label = %q", got)
+	}
+	if got := formatVulnType("xss", "dom_execution"); got != "XSS (DOM-Based)" {
+		t.Fatalf("DOM XSS label = %q", got)
+	}
+}
+
 func TestSessionOASTStatus(t *testing.T) {
 	status, _ := sessionOASTStatus(map[string]interface{}{"oast_enabled": true})
 	if status != "Ready" {
@@ -189,6 +198,31 @@ func TestOASTCallbackPanelIsStructuredAndDeduplicated(t *testing.T) {
 	httpUpgrade["protocol"] = "http"
 	if !cw.acceptOASTCallback(httpUpgrade) {
 		t.Fatal("stronger HTTP callback must remain visible after DNS evidence")
+	}
+}
+
+func TestOASTHealthCallbacksStayHiddenAndUncounted(t *testing.T) {
+	for _, protocol := range []string{"dns", "http"} {
+		var output bytes.Buffer
+		cw := NewConsoleWriter()
+		cw.out = &output
+		cw.interactive = true
+		cw.scanActive = true
+		cw.progressLineOpen = true
+		payload := map[string]interface{}{
+			"protocol": protocol, "vuln_class": "oast_health",
+			"endpoint": "oast://health-check", "parameter": "preflight",
+		}
+		if cw.acceptOASTCallback(payload) {
+			t.Fatalf("%s health callback was accepted as a target callback", protocol)
+		}
+		if err := cw.WriteEvent(events.Event{Type: "oast_callback_received", Payload: payload}); err != nil {
+			t.Fatal(err)
+		}
+		if output.Len() != 0 || cw.oastCallbacks != 0 || !cw.progressLineOpen {
+			t.Fatalf("%s health callback affected UI state: output=%q callbacks=%d progress_open=%v",
+				protocol, output.String(), cw.oastCallbacks, cw.progressLineOpen)
+		}
 	}
 }
 

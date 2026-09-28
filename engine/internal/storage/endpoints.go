@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 const maxTrailResponseBytes = 4096
@@ -80,16 +81,17 @@ func mergeDiscoveryTrail(existingJSON, incomingJSON string) string {
 		if !incHasTmpl || len(incomingTmpl) == 0 {
 			incomingDoc["request_template"] = existingTmpl
 		} else {
-			if existBody, _ := existingTmpl["body"].(string); existBody != "" {
-				if incBody, _ := incomingTmpl["body"].(string); incBody == "" {
-					incomingTmpl["body"] = existBody
+			existingSource, _ := existingDoc["source"].(string)
+			incomingSource, _ := incomingDoc["source"].(string)
+			existingWins := requestTemplateSourceRank(existingSource) > requestTemplateSourceRank(incomingSource)
+			for _, field := range []string{"method", "url", "body", "content_type"} {
+				existingValue, _ := existingTmpl[field].(string)
+				incomingValue, _ := incomingTmpl[field].(string)
+				if existingValue != "" && (incomingValue == "" || existingWins) {
+					incomingTmpl[field] = existingValue
 				}
 			}
-			if existCT, _ := existingTmpl["content_type"].(string); existCT != "" {
-				if incCT, _ := incomingTmpl["content_type"].(string); incCT == "" {
-					incomingTmpl["content_type"] = existCT
-				}
-			}
+			incomingTmpl["headers"] = mergeTemplateHeaders(existingTmpl["headers"], incomingTmpl["headers"], existingWins)
 			incomingDoc["request_template"] = incomingTmpl
 		}
 		if merged, err := json.Marshal(incomingDoc); err == nil {
@@ -97,6 +99,49 @@ func mergeDiscoveryTrail(existingJSON, incomingJSON string) string {
 		}
 	}
 	return incomingJSON
+}
+
+func requestTemplateSourceRank(source string) int {
+	switch source {
+	case "browser_xhr":
+		return 4
+	case "api_import", "graphql", "websocket":
+		return 3
+	case "js_ast", "js_bundle", "inline_js":
+		return 2
+	case "form":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func mergeTemplateHeaders(existingRaw, incomingRaw interface{}, existingWins bool) map[string]interface{} {
+	existing, _ := existingRaw.(map[string]interface{})
+	incoming, _ := incomingRaw.(map[string]interface{})
+	out := make(map[string]interface{}, len(existing)+len(incoming))
+	canonicalKeys := make(map[string]string, len(existing)+len(incoming))
+	for key, value := range existing {
+		out[key] = value
+		canonicalKeys[strings.ToLower(strings.TrimSpace(key))] = key
+	}
+	for key, value := range incoming {
+		canonical := strings.ToLower(strings.TrimSpace(key))
+		storedKey, exists := canonicalKeys[canonical]
+		if !exists {
+			out[key] = value
+			canonicalKeys[canonical] = key
+			continue
+		}
+		if !existingWins {
+			// HTTP field names are case-insensitive. Replace the earlier spelling
+			// as well as its value so a replay never emits duplicate logical fields.
+			delete(out, storedKey)
+			out[key] = value
+			canonicalKeys[canonical] = key
+		}
+	}
+	return out
 }
 
 func compactDiscoveryTrail(raw []byte) []byte {

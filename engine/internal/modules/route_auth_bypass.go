@@ -37,12 +37,8 @@ func (r *Runner) runRouteAuthBypass(ctx context.Context, target ScanTarget) []Mo
 	}
 
 	method := strings.ToUpper(strings.TrimSpace(target.Method))
-	if method == "" {
+	if method == "" || (method != "GET" && method != "HEAD" && method != "OPTIONS") {
 		method = http.MethodGet
-	}
-	if method != "GET" && method != "HEAD" && method != "OPTIONS" {
-		r.emitSkip("route_auth_bypass", target, "route proof requires a read-only endpoint")
-		return nil
 	}
 	// Route auth bypass is evaluated with anonymous/sessionless requests to observe
 	// reverse-proxy vs backend normalization discrepancy.
@@ -267,7 +263,7 @@ func generateRouteBypassVariants(u *url.URL) []routeVariant {
 		technique: "extension_json_suffix",
 	})
 
-	// 5. Header Overrides (X-Original-URL / X-Rewrite-URL)
+	// 5. Header Overrides (X-Original-URL / X-Rewrite-URL / Method Override)
 	rootURL := u.Scheme + "://" + u.Host + "/"
 	out = append(out, routeVariant{
 		url:       rootURL,
@@ -279,6 +275,32 @@ func generateRouteBypassVariants(u *url.URL) []routeVariant {
 		headers:   map[string]string{"X-Rewrite-URL": path},
 		technique: "x_rewrite_url_header",
 	})
+	out = append(out, routeVariant{
+		url:       u.String(),
+		headers:   map[string]string{"X-HTTP-Method-Override": "GET"},
+		technique: "http_method_override_header",
+	})
+
+	// 6. URL-Encoded Slash Variant (/admin%2Fusers)
+	if lastSlash := strings.LastIndex(trimmedPath, "/"); lastSlash > 0 {
+		encPath := trimmedPath[:lastSlash] + "%2F" + trimmedPath[lastSlash+1:]
+		out = append(out, routeVariant{
+			url:       buildMutatedURL(u, encPath),
+			technique: "url_encoded_slash",
+		})
+	}
+
+	// 7. Case Variation (e.g. /Admin/users)
+	if len(path) > 1 {
+		firstLetter := strings.ToUpper(string(path[1]))
+		casedPath := "/" + firstLetter + path[2:]
+		if casedPath != path {
+			out = append(out, routeVariant{
+				url:       buildMutatedURL(u, casedPath),
+				technique: "case_variation",
+			})
+		}
+	}
 
 	return out
 }

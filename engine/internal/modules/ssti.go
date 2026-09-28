@@ -15,14 +15,19 @@ var sstiMathRe = regexp.MustCompile(`(\d{1,7})\s*\*\s*(\d{1,7})`)
 func baseSSTIProbes() []payloadgen.Payload {
 	// Use uncommon products (143, 221) to avoid false positives from "49" in page content.
 	return []payloadgen.Payload{
-		{Value: `{{11*13}}`, VulnClass: "ssti", Variant: "twig", ExpectedSignal: "template_evaluation"},
-		{Value: `${13*17}`, VulnClass: "ssti", Variant: "jinja", ExpectedSignal: "template_evaluation"},
+		{Value: `{{11*13}}`, VulnClass: "ssti", Variant: "twig_jinja", ExpectedSignal: "template_evaluation"},
+		{Value: `${13*17}`, VulnClass: "ssti", Variant: "jinja_freemarker", ExpectedSignal: "template_evaluation"},
 		{Value: `<%= 11*13 %>`, VulnClass: "ssti", Variant: "erb", ExpectedSignal: "template_evaluation"},
 		{Value: `{{11*'13'}}`, VulnClass: "ssti", Variant: "jinja_string_multiply", ExpectedSignal: "template_evaluation"},
 		{Value: `#{11*13}`, VulnClass: "ssti", Variant: "pug_jade", ExpectedSignal: "template_evaluation"},
 		{Value: `*{11*13}`, VulnClass: "ssti", Variant: "thymeleaf", ExpectedSignal: "template_evaluation"},
 		{Value: `${{11*13}}`, VulnClass: "ssti", Variant: "angularjs_sandbox", ExpectedSignal: "template_evaluation"},
 		{Value: `[= 11*13]`, VulnClass: "ssti", Variant: "freemarker_alt", ExpectedSignal: "template_evaluation"},
+		{Value: `#set($x=11*13)${x}`, VulnClass: "ssti", Variant: "velocity", ExpectedSignal: "template_evaluation"},
+		{Value: `{math equation="11*13"}`, VulnClass: "ssti", Variant: "smarty", ExpectedSignal: "template_evaluation"},
+		{Value: `@(11*13)`, VulnClass: "ssti", Variant: "razor", ExpectedSignal: "template_evaluation"},
+		{Value: `{{'akca_ssti_marker'.toUpperCase()}}`, VulnClass: "ssti", Variant: "string_transform_js", ExpectedSignal: "string_transform_eval"},
+		{Value: `<%= "akca_ssti_marker".upcase %>`, VulnClass: "ssti", Variant: "string_transform_ruby", ExpectedSignal: "string_transform_eval"},
 	}
 }
 
@@ -191,6 +196,9 @@ func pairedSSTIPayload(p payloadgen.Payload) (payloadgen.Payload, bool) {
 func detectSSTISignal(p payloadgen.Payload, body, baseline string) string {
 	if strings.Contains(body, p.Value) && !strings.Contains(baseline, p.Value) {
 		return ""
+	}
+	if p.ExpectedSignal == "string_transform_eval" && strings.Contains(body, "AKCA_SSTI_MARKER") && !strings.Contains(baseline, "AKCA_SSTI_MARKER") {
+		return "string_transform_eval"
 	}
 	if m := sstiMathRe.FindStringSubmatch(p.Value); m != nil {
 		a, errA := strconv.Atoi(m[1])

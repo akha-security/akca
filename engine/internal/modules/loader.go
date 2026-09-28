@@ -1,8 +1,13 @@
 package modules
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -153,6 +158,18 @@ func (r *Runner) LoadTargetsWithEndpointsFromDB(limit int) ([]ScanTarget, error)
 					})
 				}
 			}
+		}
+		for _, hName := range mutableObservedHeaders(endpoint.RequestTemplate.Headers) {
+			paramKey := endpoint.URL + "::" + method + "::" + hName + "::header"
+			if _, exists := seenParameters[paramKey]; exists {
+				continue
+			}
+			seenParameters[paramKey] = struct{}{}
+			targets = append(targets, ScanTarget{
+				EndpointURL: endpoint.URL, Method: method, Parameter: hName, Location: "header",
+				Profile:         reflection.ReflectionProfile{ScanID: r.scanID, EndpointURL: endpoint.URL, Method: method, Parameter: hName, ParameterLocation: "header"},
+				RequestTemplate: reflection.RequestTemplate{Method: method, URL: endpoint.URL, Headers: endpoint.RequestTemplate.Headers, Body: endpoint.RequestTemplate.Body, ContentType: endpoint.RequestTemplate.ContentType},
+			})
 		}
 		key := targetSurfaceKey(endpoint.URL, method)
 		if _, exists := seenEndpoints[key]; !exists {
@@ -440,7 +457,8 @@ func (r *Runner) fallbackTargetsFromEndpoints(limit int) ([]ScanTarget, error) {
 		names := paramsFromURL(ep.URL)
 		pathNames := pathParamsFromURL(ep.URL)
 		bodyParams, bodyLoc := paramsFromBody(ep.RequestTemplate.Body, ep.RequestTemplate.ContentType)
-		if len(names) == 0 && len(pathNames) == 0 && len(bodyParams) == 0 {
+		observedHeaders := mutableObservedHeaders(ep.RequestTemplate.Headers)
+		if len(names) == 0 && len(pathNames) == 0 && len(bodyParams) == 0 && len(observedHeaders) == 0 && !includeHeaders {
 			continue
 		}
 		for _, name := range names {
@@ -515,29 +533,31 @@ func (r *Runner) fallbackTargetsFromEndpoints(limit int) ([]ScanTarget, error) {
 				},
 			})
 		}
+		headersToProbe := append([]string(nil), observedHeaders...)
 		if includeHeaders {
-			for _, hName := range headerParams {
-				key := ep.URL + "::" + method + "::header::" + hName
-				if _, ok := seen[key]; ok {
-					continue
-				}
-				seen[key] = struct{}{}
-				targets = append(targets, ScanTarget{
-					EndpointURL: ep.URL,
-					Method:      method,
-					Parameter:   hName,
-					Location:    "header",
-					Profile: reflection.ReflectionProfile{
-						ScanID: r.scanID, EndpointURL: ep.URL, Method: method,
-						Parameter: hName, ParameterLocation: "header",
-					},
-					RequestTemplate: reflection.RequestTemplate{
-						Method: ep.RequestTemplate.Method, URL: ep.RequestTemplate.URL,
-						Headers: ep.RequestTemplate.Headers, Body: ep.RequestTemplate.Body,
-						ContentType: ep.RequestTemplate.ContentType,
-					},
-				})
+			headersToProbe = append(headersToProbe, headerParams...)
+		}
+		for _, hName := range deduplicateStrings(headersToProbe) {
+			key := ep.URL + "::" + method + "::header::" + hName
+			if _, ok := seen[key]; ok {
+				continue
 			}
+			seen[key] = struct{}{}
+			targets = append(targets, ScanTarget{
+				EndpointURL: ep.URL,
+				Method:      method,
+				Parameter:   hName,
+				Location:    "header",
+				Profile: reflection.ReflectionProfile{
+					ScanID: r.scanID, EndpointURL: ep.URL, Method: method,
+					Parameter: hName, ParameterLocation: "header",
+				},
+				RequestTemplate: reflection.RequestTemplate{
+					Method: ep.RequestTemplate.Method, URL: ep.RequestTemplate.URL,
+					Headers: ep.RequestTemplate.Headers, Body: ep.RequestTemplate.Body,
+					ContentType: ep.RequestTemplate.ContentType,
+				},
+			})
 		}
 		if len(targets) >= limit {
 			return targets[:limit], nil
@@ -561,7 +581,12 @@ func paramsFromURL(rawURL string) []string {
 	return out
 }
 
-var loaderPathUUIDRe = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var (
+	loaderPathUUIDRe = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	loaderPathULIDRe = regexp.MustCompile(`(?i)^[0-9A-HJKMNP-TV-Z]{26}$`)
+	loaderPathHexRe  = regexp.MustCompile(`(?i)^[0-9a-f]{12,128}$`)
+	loaderPathB64Re  = regexp.MustCompile(`^[A-Za-z0-9_-]{16,256}={0,2}$`)
+)
 
 func pathParamsFromURL(rawURL string) []string {
 	u, err := url.Parse(rawURL)
@@ -574,16 +599,37 @@ func pathParamsFromURL(rawURL string) []string {
 		}
 	}
 	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
-	for _, seg := range segs {
+	for index, seg := range segs {
 		seg = strings.TrimSpace(seg)
 		if len(seg) == 0 {
 			continue
 		}
-		if (seg[0] >= '0' && seg[0] <= '9') || loaderPathUUIDRe.MatchString(seg) {
-			return []string{"path_segment"}
+		if pathSegmentLooksLikeIdentifier(seg) {
+			return []string{"path_segment_" + strconv.Itoa(index)}
 		}
 	}
 	return nil
+}
+
+func pathSegmentLooksLikeIdentifier(segment string) bool {
+	if segment == "" {
+		return false
+	}
+	if segment[0] >= '0' && segment[0] <= '9' {
+		return true
+	}
+	if loaderPathUUIDRe.MatchString(segment) || loaderPathULIDRe.MatchString(segment) || loaderPathHexRe.MatchString(segment) {
+		return true
+	}
+	if loaderPathB64Re.MatchString(segment) {
+		hasDigit, hasUpper := false, false
+		for _, char := range segment {
+			hasDigit = hasDigit || (char >= '0' && char <= '9')
+			hasUpper = hasUpper || (char >= 'A' && char <= 'Z')
+		}
+		return hasDigit || hasUpper || strings.ContainsAny(segment, "_-")
+	}
+	return false
 }
 
 func makeProfileKey(method, endpointURL, param, location string) string {
@@ -615,8 +661,30 @@ func paramsFromBody(body, contentType string) ([]string, string) {
 			var keys []string
 			collectJSONKeys(doc, "", &keys)
 			if len(keys) > 0 {
-				return deduplicateStrings(keys), "json"
+				location := "json"
+				if strings.Contains(ct, "graphql") || jsonLooksLikeGraphQL(doc) {
+					location = "graphql"
+				}
+				if strings.Contains(ct, "websocket") {
+					location = "websocket"
+				}
+				return deduplicateStrings(keys), location
 			}
+		}
+	}
+	if strings.Contains(ct, "xml") || strings.HasPrefix(trimmed, "<") {
+		if keys := xmlParameterPaths(trimmed); len(keys) > 0 {
+			return keys, "xml"
+		}
+	}
+	if strings.Contains(ct, "multipart/") {
+		if keys := multipartParameterNames([]byte(body), contentType); len(keys) > 0 {
+			return keys, "multipart"
+		}
+	}
+	if strings.Contains(ct, "application/graphql") {
+		if keys := graphqlVariableNames(trimmed); len(keys) > 0 {
+			return keys, "graphql_query"
 		}
 	}
 	// Default to form urlencoded
@@ -633,6 +701,106 @@ func paramsFromBody(body, contentType string) ([]string, string) {
 		}
 	}
 	return nil, "form"
+}
+
+func jsonLooksLikeGraphQL(doc interface{}) bool {
+	root, ok := doc.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	_, hasQuery := root["query"]
+	_, hasVariables := root["variables"]
+	_, hasOperation := root["operationName"]
+	return hasQuery && (hasVariables || hasOperation)
+}
+
+func xmlParameterPaths(body string) []string {
+	decoder := xml.NewDecoder(strings.NewReader(body))
+	stack := make([]string, 0, 8)
+	var keys []string
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil
+		}
+		switch value := token.(type) {
+		case xml.StartElement:
+			stack = append(stack, value.Name.Local)
+			path := strings.Join(stack, ".")
+			for _, attr := range value.Attr {
+				if attr.Name.Local != "" && !strings.HasPrefix(attr.Name.Local, "xmlns") {
+					keys = append(keys, path+"@"+attr.Name.Local)
+				}
+			}
+		case xml.CharData:
+			if strings.TrimSpace(string(value)) != "" && len(stack) > 0 {
+				keys = append(keys, strings.Join(stack, "."))
+			}
+		case xml.EndElement:
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		}
+	}
+	return deduplicateStrings(keys)
+}
+
+func multipartParameterNames(body []byte, contentType string) []string {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil || params["boundary"] == "" {
+		return nil
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+	var keys []string
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil
+		}
+		if name := strings.TrimSpace(part.FormName()); name != "" {
+			keys = append(keys, name)
+		}
+		_ = part.Close()
+	}
+	return deduplicateStrings(keys)
+}
+
+var graphQLVariableRe = regexp.MustCompile(`\$([_A-Za-z][_0-9A-Za-z]*)\s*:`)
+
+func graphqlVariableNames(query string) []string {
+	matches := graphQLVariableRe.FindAllStringSubmatch(query, -1)
+	keys := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) == 2 {
+			keys = append(keys, match[1])
+		}
+	}
+	return deduplicateStrings(keys)
+}
+
+func mutableObservedHeaders(headers map[string]string) []string {
+	standard := map[string]bool{
+		"accept": true, "accept-encoding": true, "accept-language": true, "authorization": true,
+		"connection": true, "content-length": true, "content-type": true, "cookie": true,
+		"host": true, "origin": true, "referer": true, "sec-fetch-dest": true,
+		"sec-fetch-mode": true, "sec-fetch-site": true, "user-agent": true,
+	}
+	var out []string
+	for name := range headers {
+		name = strings.TrimSpace(name)
+		if name == "" || standard[strings.ToLower(name)] || strings.HasPrefix(strings.ToLower(name), "sec-ch-") {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func deduplicateStrings(items []string) []string {

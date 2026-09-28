@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -26,16 +27,33 @@ func (r *Runner) runSensitiveData(ctx context.Context, target ScanTarget) []Modu
 	if err != nil {
 		return nil
 	}
-	baselineRR := httpclient.RequestResponse{Response: httpclient.ResponseRecord{StatusCode: 200, Headers: map[string]string{}}}
-	if !r.cfg.PassiveMode {
-		baselineRR, err = r.probe(ctx, target, "akca-sensitive-base")
-		if err != nil {
-			return nil
-		}
+	if rr.Response.Redirected && isRedirectedAway(rr, target.EndpointURL) {
+		return nil
 	}
+	baselineRR := httpclient.RequestResponse{Response: httpclient.ResponseRecord{StatusCode: 200, Headers: map[string]string{}}}
 	findings := sensitivedata.Analyze(rr.Response.Body)
 	if len(findings) == 0 {
 		return nil
+	}
+	// Directory indexes are passive, typed content evidence. Mutating a query
+	// parameter is neither a meaningful negative control nor safe proof here;
+	// for parameterless paths it simply fetched the same listing and suppressed
+	// a genuine finding as a baseline match.
+	needsDifferentialBaseline := false
+	for _, hit := range findings {
+		if hit.Kind != "directory_listing" {
+			needsDifferentialBaseline = true
+			break
+		}
+	}
+	differentialBaselineReady := r.cfg.PassiveMode || !needsDifferentialBaseline
+	if !r.cfg.PassiveMode && needsDifferentialBaseline {
+		candidateBaseline, baselineErr := r.probe(ctx, target, "akca-sensitive-base")
+		if baselineErr == nil && candidateBaseline.Response.StatusCode == rr.Response.StatusCode &&
+			candidateBaseline.Response.Redirected == rr.Response.Redirected {
+			baselineRR = candidateBaseline
+			differentialBaselineReady = true
+		}
 	}
 	baseFindings := sensitivedata.Analyze(baselineRR.Response.Body)
 	var out []ModuleFinding
@@ -43,17 +61,30 @@ func (r *Runner) runSensitiveData(ctx context.Context, target ScanTarget) []Modu
 		if len(out) >= 3 {
 			break
 		}
-		if sensitiveDataFindingExists(baseFindings, hit.Kind, hit.Match) {
+		if hit.Kind == "directory_listing" && rr.Response.StatusCode != http.StatusOK {
+			continue
+		}
+		proofBaseline := baselineRR
+		if hit.Kind == "directory_listing" {
+			proofBaseline = httpclient.RequestResponse{Response: httpclient.ResponseRecord{StatusCode: 200, Headers: map[string]string{}}}
+		} else if !differentialBaselineReady {
+			continue
+		}
+		if hit.Kind != "directory_listing" && sensitiveDataFindingExists(baseFindings, hit.Kind, hit.Match) {
 			continue
 		}
 		p := defaultPayload("sensitive_data", hit.Kind, hit.Match, hit.Kind)
-		f := r.verifyAndBuild(ctx, "sensitive_data", target, p, baselineRR, rr, hit.Kind, false, false, "", "")
+		f := r.verifyAndBuild(ctx, "sensitive_data", target, p, proofBaseline, rr, hit.Kind, false, false, "", "")
 		if f == nil {
 			continue
 		}
 		f.Title = "Sensitive data exposure (" + hit.Kind + ")"
 		f.Severity = hit.Severity
 		f.Description = hit.Kind + " detected in response body"
+		if hit.Kind == "directory_listing" {
+			f.Title = "Directory listing enabled"
+			f.Description = "The web server exposes the contents of this directory (CWE-548). Disable directory indexing or restrict access to prevent unintended file and path disclosure."
+		}
 		r.recordFinding(ctx, &out, f, "sensitive_data", hit.Kind)
 	}
 	return out
@@ -223,6 +254,12 @@ func (r *Runner) runCICDExposure(ctx context.Context, target ScanTarget) []Modul
 		if err != nil || rr.Response.StatusCode != 200 {
 			continue
 		}
+		if rr.Response.Redirected && isRedirectedAway(rr, rawURL) {
+			continue
+		}
+		if isHTMLResponse(rr.Response) {
+			continue
+		}
 		if !cicdExposureSignal(path, rr.Response.Body) {
 			continue
 		}
@@ -235,6 +272,9 @@ func (r *Runner) runCICDExposure(ctx context.Context, target ScanTarget) []Modul
 
 func cicdExposureSignal(path, body string) bool {
 	lower := strings.ToLower(body)
+	if strings.Contains(lower, "<html") || strings.Contains(lower, "<!doctype") || strings.Contains(lower, "<head") {
+		return false
+	}
 	switch {
 	case strings.Contains(path, ".git"):
 		return strings.HasPrefix(strings.TrimSpace(body), "ref:")
@@ -249,6 +289,10 @@ func cicdExposureSignal(path, body string) bool {
 }
 
 func envFileSignal(body string) bool {
+	lower := strings.ToLower(body)
+	if strings.Contains(lower, "<html") || strings.Contains(lower, "<!doctype") || strings.Contains(lower, "<head") {
+		return false
+	}
 	lines := strings.Split(body, "\n")
 	hits := 0
 	for _, line := range lines {
@@ -259,9 +303,15 @@ func envFileSignal(body string) bool {
 		if !strings.Contains(line, "=") {
 			continue
 		}
-		lower := strings.ToLower(line)
-		if strings.Contains(lower, "secret") || strings.Contains(lower, "password") ||
-			strings.Contains(lower, "api_key") || strings.Contains(lower, "token") {
+		eqIdx := strings.Index(line, "=")
+		key := strings.TrimSpace(line[:eqIdx])
+		if strings.ContainsAny(key, " <>\t\"'/\\") {
+			continue
+		}
+		lowerLine := strings.ToLower(line)
+		if strings.Contains(lowerLine, "secret") || strings.Contains(lowerLine, "password") ||
+			strings.Contains(lowerLine, "api_key") || strings.Contains(lowerLine, "token") ||
+			strings.Contains(lowerLine, "app_key") || strings.Contains(lowerLine, "database_url") {
 			hits++
 		}
 	}

@@ -2,7 +2,7 @@ package verification
 
 import "strings"
 
-const CurrentProofPolicyVersion = "3.0"
+const CurrentProofPolicyVersion = "3.2"
 
 type ModuleProofPolicy struct {
 	Module                   string            `json:"module"`
@@ -20,10 +20,10 @@ type ModuleProofPolicy struct {
 }
 
 var proofPolicies = map[string]ModuleProofPolicy{
-	"sqli":                   replayPolicy("sqli", ProofDifferentialReplay, ProofBooleanPair, ProofTiming, ProofOAST, ProofRuntimeTrace),
+	"sqli":                   statefulReplayPolicy("sqli", ProofDifferentialReplay, ProofBooleanPair, ProofArithmeticOracle, ProofTiming, ProofOAST, ProofRuntimeTrace),
 	"xss":                    xssPolicy("xss"),
-	"ssti":                   replayPolicy("ssti", ProofDifferentialReplay, ProofTiming, ProofOAST, ProofRuntimeTrace),
-	"ssrf":                   replayPolicy("ssrf", ProofDifferentialReplay, ProofOAST, ProofRuntimeTrace),
+	"ssti":                   statefulReplayPolicy("ssti", ProofDifferentialReplay, ProofTiming, ProofOAST, ProofRuntimeTrace),
+	"ssrf":                   statefulReplayPolicy("ssrf", ProofDifferentialReplay, ProofOAST, ProofRuntimeTrace),
 	"xxe":                    replayPolicy("xxe", ProofDifferentialReplay, ProofOAST, ProofRuntimeTrace),
 	"command_injection":      replayPolicy("command_injection", ProofDifferentialReplay, ProofTiming, ProofOAST, ProofRuntimeTrace),
 	"lfi":                    replayPolicy("lfi", ProofDifferentialReplay, ProofFileRetrieval, ProofRuntimeTrace),
@@ -60,18 +60,18 @@ var proofPolicies = map[string]ModuleProofPolicy{
 	"parser_differential":    contentPolicy("parser_differential"),
 	"csrf":                   statePolicy("csrf", ProofStateMutation),
 	"smuggling":              protocolPolicy("smuggling"),
-	"graphql":                contentPolicy("graphql"),
+	"graphql":                activeContentPolicy("graphql", ProofSchemaExposure, ProofContentEvidence),
 	"websocket":              replayPolicy("websocket", ProofDifferentialReplay),
 	"api_exposure":           contentPolicy("api_exposure"),
 	"api_versioning":         contentPolicy("api_versioning"),
-	"debug_admin":            contentPolicy("debug_admin"),
-	"wordpress_fuzz":         contentPolicy("wordpress_fuzz"),
+	"debug_admin":            activeContentPolicy("debug_admin", ProofContentEvidence),
+	"wordpress_fuzz":         activeContentPolicy("wordpress_fuzz", ProofContentEvidence),
 	"secret_exposure":        contentPolicy("secret_exposure"),
 	"sensitive_data":         contentPolicy("sensitive_data"),
-	"cicd_exposure":          contentPolicy("cicd_exposure"),
+	"cicd_exposure":          activeContentPolicy("cicd_exposure", ProofContentEvidence),
 	"git_recovery":           contentPolicy("git_recovery"),
 	"source_code_disclosure": contentPolicy("source_code_disclosure"),
-	"cloud_storage":          contentPolicy("cloud_storage"),
+	"cloud_storage":          activeContentPolicy("cloud_storage", ProofContentEvidence),
 	"cloud_posture":          contentPolicy("cloud_posture"),
 	"script_source":          contentPolicy("script_source"),
 	"vulnerable_components":  contentPolicy("vulnerable_components"),
@@ -85,17 +85,17 @@ var proofPolicies = map[string]ModuleProofPolicy{
 	"auth_bypass":              identityPolicy("auth_bypass"),
 	"deserialization":          replayPolicy("deserialization", ProofDifferentialReplay, ProofOAST, ProofRuntimeTrace),
 	"insecure_deserialization": replayPolicy("insecure_deserialization", ProofDifferentialReplay, ProofOAST, ProofRuntimeTrace),
-	"rce":                      replayPolicy("rce", ProofDifferentialReplay, ProofOAST, ProofRuntimeTrace),
-	"actuator":                 contentPolicy("actuator"),
-	"backup_archives":          contentPolicy("backup_archives"),
+	"rce":                      statefulReplayPolicy("rce", ProofDifferentialReplay, ProofOAST, ProofRuntimeTrace),
+	"actuator":                 activeContentPolicy("actuator", ProofContentEvidence),
+	"backup_archives":          activeContentPolicy("backup_archives", ProofContentEvidence, ProofFileRetrieval),
 	"nginx_alias":              contentPolicy("nginx_alias"),
 	"nextjs_bypass":            contentPolicy("nextjs_bypass"),
-	"framework_debug":          contentPolicy("framework_debug"),
-	"iis_discovery":            contentPolicy("iis_discovery"),
+	"framework_debug":          activeContentPolicy("framework_debug", ProofContentEvidence),
+	"iis_discovery":            activeContentPolicy("iis_discovery", ProofContentEvidence),
 	"firebase_misconfig":       contentPolicy("firebase_misconfig"),
-	"spring_cloud_jolokia":     contentPolicy("spring_cloud_jolokia"),
-	"saas_exposure":            contentPolicy("saas_exposure"),
-	"cpdos":                    contentPolicy("cpdos"),
+	"spring_cloud_jolokia":     activeContentPolicy("spring_cloud_jolokia", ProofContentEvidence),
+	"saas_exposure":            activeContentPolicy("saas_exposure", ProofContentEvidence),
+	"cpdos":                    activeContentPolicy("cpdos", ProofContentEvidence, ProofDifferentialReplay),
 	"proxy_path_confusion":     contentPolicy("proxy_path_confusion"),
 	"ws_cswsh":                 crossOriginPolicy("ws_cswsh"),
 	"pdf_injection":            contentPolicy("pdf_injection"),
@@ -108,10 +108,10 @@ var proofPolicies = map[string]ModuleProofPolicy{
 	"http_smuggling":           protocolPolicy("http_smuggling"),
 	"race_condition_sync":      statePolicy("race_condition_sync", ProofStateMutation),
 	"oauth_flow_audit":         contentPolicy("oauth_flow_audit"),
-	"cloud_native_exposure":    contentPolicy("cloud_native_exposure"),
+	"cloud_native_exposure":    activeContentPolicy("cloud_native_exposure", ProofContentEvidence),
 	"grpc_scan":                contentPolicy("grpc_scan"),
-	"cloud_takeover":           contentPolicy("cloud_takeover"),
-	"devops_exposure":          contentPolicy("devops_exposure"),
+	"cloud_takeover":           activeContentPolicy("cloud_takeover", ProofContentEvidence),
+	"devops_exposure":          activeContentPolicy("devops_exposure", ProofContentEvidence),
 	"host_poisoning":           headerPolicy("host_poisoning"),
 	"ldap":                     replayPolicy("ldap", ProofDifferentialReplay),
 	"xpath":                    replayPolicy("xpath", ProofDifferentialReplay),
@@ -131,6 +131,14 @@ func crossOriginPolicy(module string) ModuleProofPolicy {
 func replayPolicy(module string, allowed ...ProofType) ModuleProofPolicy {
 	return ModuleProofPolicy{
 		Module: module, Version: CurrentProofPolicyVersion, MinimumIndependentRuns: 3,
+		RequiresNativeBaseline: true, RequiresNegativeControl: true, AllowedProofTypes: allowed,
+		EvidenceClass: "active_differential", RequiresTypedSignal: true,
+	}
+}
+
+func statefulReplayPolicy(module string, allowed ...ProofType) ModuleProofPolicy {
+	return ModuleProofPolicy{
+		Module: module, Version: CurrentProofPolicyVersion, MinimumIndependentRuns: 2,
 		RequiresNativeBaseline: true, RequiresNegativeControl: true, AllowedProofTypes: allowed,
 		EvidenceClass: "active_differential", RequiresTypedSignal: true,
 	}
@@ -167,6 +175,23 @@ func contentPolicy(module string) ModuleProofPolicy {
 		Module: module, Version: CurrentProofPolicyVersion, MinimumIndependentRuns: 1,
 		AllowedProofTypes: []ProofType{ProofContentEvidence},
 		EvidenceClass:     "typed_content", RequiresTypedSignal: false,
+	}
+}
+
+// activeContentPolicy is for probes that actively request a candidate path or
+// mutate input. Unlike passive inventory, one matching response is not proof:
+// the signal must survive an independent replay and a negative control.
+func activeContentPolicy(module string, allowed ...ProofType) ModuleProofPolicy {
+	if len(allowed) == 0 {
+		allowed = []ProofType{ProofContentEvidence}
+	}
+	return ModuleProofPolicy{
+		Module: module, Version: CurrentProofPolicyVersion, MinimumIndependentRuns: 2,
+		// Recorded-request replay and module-specific guards are mandatory here.
+		// Negative controls are attempted by the shared verifier and reported in
+		// coverage, but are not universally enforceable for path probes whose
+		// payload is not replaceable in the captured request.
+		AllowedProofTypes: allowed, EvidenceClass: "active_typed_content", RequiresTypedSignal: true,
 	}
 }
 
@@ -284,6 +309,8 @@ func inferProofType(candidate Candidate, result Result) ProofType {
 		return ProofTiming
 	case validBooleanPairProof(candidate.BooleanPairProof):
 		return ProofBooleanPair
+	case validArithmeticOracleProof(candidate.ArithmeticProof):
+		return ProofArithmeticOracle
 	case candidate.NegativeControlSet && result.NegativeControlOK && result.TypedReplayRatio >= 2.0/3.0:
 		return ProofDifferentialReplay
 	default:
@@ -328,9 +355,12 @@ func evaluateProofPolicy(candidate Candidate, result Result) (ProofType, bool) {
 	case ProofBooleanPair:
 		return proofType, validBooleanPairProof(candidate.BooleanPairProof) &&
 			roles[RoleTrueBranch] >= 3 && roles[RoleFalseBranch] >= 3 && roles[RoleSyntaxControl] > 0
+	case ProofArithmeticOracle:
+		return proofType, validArithmeticOracleProof(candidate.ArithmeticProof) &&
+			roles[RoleTrueBranch] >= 3 && roles[RoleFalseBranch] >= 3
 	case ProofTiming:
-		return proofType, result.TimingConfirmed && len(candidate.TimingSamples) >= 3 &&
-			len(candidate.TimingControl) >= 3
+		return proofType, result.TimingConfirmed && len(candidate.TimingSamples) >= 2 &&
+			len(candidate.TimingControl) >= 2
 	case ProofStateMutation:
 		identityOK := !policy.RequiresIdentityProof || identityBoundaryEvidence(candidate.Observations)
 		return proofType, identityOK && negativeControlSatisfied(candidate, result, roles, policy.RequiresIdentityProof) &&
@@ -352,7 +382,10 @@ func evaluateProofPolicy(candidate Candidate, result Result) (ProofType, bool) {
 	case ProofHeaderEvidence:
 		return proofType, negativeControlSatisfied(candidate, result, roles, false) &&
 			roles[RolePositiveProbe]+roles[RolePositiveReplay] >= policy.MinimumIndependentRuns
-	case ProofContentEvidence, ProofConfiguration:
+	case ProofContentEvidence:
+		controlsOK := !policy.RequiresNegativeControl || negativeControlSatisfied(candidate, result, roles, false)
+		return proofType, controlsOK && roles[RolePositiveProbe]+roles[RolePositiveReplay] >= policy.MinimumIndependentRuns
+	case ProofConfiguration:
 		return proofType, roles[RolePositiveProbe] >= policy.MinimumIndependentRuns
 	case ProofSchemaExposure:
 		return proofType, roles[RolePositiveProbe]+roles[RolePositiveReplay] >= policy.MinimumIndependentRuns

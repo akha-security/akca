@@ -39,6 +39,12 @@ func (r *Runner) runGitDeepRecovery(ctx context.Context, target ScanTarget) []Mo
 		if err != nil || rr.Response.StatusCode != 200 || len(rr.Response.Body) < 2 {
 			continue
 		}
+		if rr.Response.Redirected && isRedirectedAway(rr, rawURL) {
+			continue
+		}
+		if isHTMLResponse(rr.Response) {
+			continue
+		}
 		result.FetchedPaths = append(result.FetchedPaths, path)
 		bodyByPath[path] = rr.Response.Body
 		if proofExchange.Request.URL == "" {
@@ -84,7 +90,7 @@ func (r *Runner) runGitDeepRecovery(ctx context.Context, target ScanTarget) []Mo
 			continue
 		}
 		rr, err := r.client.Do(ctx, "GET", objURL, nil, nil)
-		if err != nil || rr.Response.StatusCode != 200 {
+		if err != nil || rr.Response.StatusCode != 200 || (rr.Response.Redirected && isRedirectedAway(rr, objURL)) || isHTMLResponse(rr.Response) {
 			continue
 		}
 		result.ObjectPaths = append(result.ObjectPaths, objPath)
@@ -94,10 +100,24 @@ func (r *Runner) runGitDeepRecovery(ctx context.Context, target ScanTarget) []Mo
 		}
 	}
 
+	hasValidGitArtifact := (result.Branch != "" || result.HEADRef != "") ||
+		len(result.CommitHashes) > 0 ||
+		len(result.RemoteURLs) > 0 ||
+		len(result.IndexPaths) > 0 ||
+		len(result.ObjectPaths) > 0
+
+	if !hasValidGitArtifact {
+		return r.runCICDExposure(ctx, target)
+	}
+
 	var out []ModuleFinding
 	severity := "high"
 	if len(result.IndexPaths) > 0 || len(result.ObjectPaths) > 0 {
 		severity = "critical"
+	}
+	branchLabel := result.Branch
+	if branchLabel == "" {
+		branchLabel = "exposed"
 	}
 	desc := fmt.Sprintf(
 		"Exposed .git artifacts at %s — fetched %d paths, branch=%q, commits=%d, index_files=%d, objects=%d, remotes=%d",
@@ -108,7 +128,7 @@ func (r *Runner) runGitDeepRecovery(ctx context.Context, target ScanTarget) []Mo
 	f := r.verifyAndBuild(ctx, "git_recovery", target, p, baseline, proofExchange,
 		"partial_git_exposure", false, false, "", "")
 	if f != nil {
-		f.Title = "Exposed Git repository (" + result.Branch + ")"
+		f.Title = "Exposed Git repository (" + branchLabel + ")"
 		f.Severity = severity
 		f.Description = desc
 		r.recordFinding(ctx, &out, f, "git_recovery", "partial_git_exposure")
@@ -123,7 +143,7 @@ func (r *Runner) runGitDeepRecovery(ctx context.Context, target ScanTarget) []Mo
 			continue
 		}
 		rr, err := r.client.Do(ctx, "GET", fileURL, nil, nil)
-		if err != nil || rr.Response.StatusCode != 200 {
+		if err != nil || rr.Response.StatusCode != 200 || (rr.Response.Redirected && isRedirectedAway(rr, fileURL)) || isHTMLResponse(rr.Response) {
 			continue
 		}
 		findings := r.sourceFindingsFromBody(ctx, target, baseline, fileURL, rr, "git_index_path")
@@ -162,6 +182,12 @@ func (r *Runner) runSourceCodeDisclosure(ctx context.Context, target ScanTarget)
 		}
 		rr, err := r.client.Do(ctx, "GET", rawURL, nil, nil)
 		if err != nil || rr.Response.StatusCode != 200 {
+			continue
+		}
+		if rr.Response.Redirected && isRedirectedAway(rr, rawURL) {
+			continue
+		}
+		if isHTMLResponse(rr.Response) {
 			continue
 		}
 		ct := headerContentType(rr.Response.Headers)

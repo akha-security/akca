@@ -184,6 +184,7 @@ func (r *Runner) runSmuggling(ctx context.Context, target ScanTarget) []ModuleFi
 		}
 		verified := r.verifier.Verify(candidate)
 		if verified.Suppressed || !verified.ProofSatisfied {
+			r.recordVerificationOutcome(probeTarget, "smuggling", signal, verified)
 			continue
 		}
 		f := &ModuleFinding{

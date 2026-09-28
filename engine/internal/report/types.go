@@ -45,6 +45,8 @@ type Options struct {
 	Template    TemplateKind
 	Format      Format
 	Partial     bool
+	FastPartial bool
+	MaxFindings int
 	FindingIDs  []int64
 	Severities  []string
 	Confidences []string
@@ -157,17 +159,24 @@ type PathDiscoveryEntry struct {
 }
 
 type CoverageEntry struct {
-	EventType  string `json:"event_type"`
-	Summary    string `json:"summary"`
-	Module     string `json:"module,omitempty"`
-	Phase      string `json:"phase,omitempty"`
-	Endpoint   string `json:"endpoint,omitempty"`
-	Reason     string `json:"reason,omitempty"`
-	Configured *bool  `json:"configured,omitempty"`
+	EventType  string   `json:"event_type"`
+	Summary    string   `json:"summary"`
+	Module     string   `json:"module,omitempty"`
+	Phase      string   `json:"phase,omitempty"`
+	Endpoint   string   `json:"endpoint,omitempty"`
+	Reason     string   `json:"reason,omitempty"`
+	Reasons    []string `json:"reasons,omitempty"`
+	ProofType  string   `json:"proof_type,omitempty"`
+	Confidence string   `json:"confidence,omitempty"`
+	Score      float64  `json:"score,omitempty"`
+	Configured *bool    `json:"configured,omitempty"`
 }
 
 type Document struct {
 	SchemaVersion     string                       `json:"schema_version"`
+	EngineVersion     string                       `json:"engine_version"`
+	EngineCommit      string                       `json:"engine_commit,omitempty"`
+	EngineBuildDate   string                       `json:"engine_build_date,omitempty"`
 	GeneratedAt       time.Time                    `json:"generated_at"`
 	Template          TemplateKind                 `json:"template"`
 	Format            Format                       `json:"format"`

@@ -59,13 +59,16 @@ func (r *Runner) runSwaggerExposure(ctx context.Context, target ScanTarget) []Mo
 			continue
 		}
 
-		body := strings.TrimSpace(rr.Response.Body)
-		if wildcard200 && bodiesSimilar(body, wRR.Response.Body) {
+		if rr.Response.Redirected && isRedirectedAway(rr, probeURL) {
 			continue
 		}
 
-		// Reject HTML 200 custom 404 pages
-		if strings.Contains(body, "<html") || strings.Contains(body, "<!DOCTYPE") {
+		if isHTMLResponse(rr.Response) {
+			continue
+		}
+
+		body := strings.TrimSpace(rr.Response.Body)
+		if wildcard200 && bodiesSimilar(body, wRR.Response.Body) {
 			continue
 		}
 

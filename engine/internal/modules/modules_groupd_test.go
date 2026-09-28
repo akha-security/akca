@@ -163,6 +163,25 @@ func TestSecurityHeadersMissing(t *testing.T) {
 	}
 }
 
+func TestSecurityHeaderPolicyDetectsWeakHSTSAndScriptSchemes(t *testing.T) {
+	c := &groupDClient{responses: map[string]string{"": "ok"}, headers: map[string]map[string]string{"": {
+		"Content-Security-Policy":   "default-src 'self'; script-src data: http://cdn.example 'unsafe-inline'",
+		"Strict-Transport-Security": "max-age=300",
+		"X-Frame-Options":           "DENY", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "strict-origin",
+		"Permissions-Policy": "camera=()", "Cross-Origin-Opener-Policy": "same-origin",
+	}}}
+	findings := groupDRunner(t, c).runSecurityHeaders(context.Background(), ScanTarget{EndpointURL: "https://example.com/", Method: "GET"})
+	signals := map[string]bool{}
+	for _, finding := range findings {
+		signals[finding.Evidence.Signal] = true
+	}
+	for _, want := range []string{"csp_unsafe_script_scheme", "csp_insecure_script_source", "hsts_short_max_age", "hsts_missing_include_subdomains"} {
+		if !signals[want] {
+			t.Errorf("missing %s in %v", want, signals)
+		}
+	}
+}
+
 func TestTLSMisconfiguration(t *testing.T) {
 	c := &groupDClient{responses: map[string]string{"": "ok"}}
 	inspector := tlsInspectorFunc(func(context.Context, string) (TLSInspection, error) {
@@ -202,6 +221,19 @@ func TestSensitiveDataExposure(t *testing.T) {
 	findings := groupDRunner(t, c).runSensitiveData(context.Background(), target)
 	if len(findings) == 0 {
 		t.Fatal("expected sensitive data finding")
+	}
+}
+
+func TestDirectoryListingIsReportedWithoutInjectedBaseline(t *testing.T) {
+	body := `<html><head><title>Index of /assets/</title></head><body><h1>Index of /assets/</h1><a href="../">Parent Directory</a><a href="logo.png">logo.png</a></body></html>`
+	c := &groupDClient{responses: map[string]string{"/assets/": body}}
+	target := ScanTarget{EndpointURL: "http://example.com/assets/", Method: "GET"}
+	findings := groupDRunner(t, c).runSensitiveData(context.Background(), target)
+	if len(findings) != 1 {
+		t.Fatalf("expected one directory listing finding, got %d: %+v", len(findings), findings)
+	}
+	if findings[0].Title != "Directory listing enabled" || findings[0].Severity != "medium" {
+		t.Fatalf("unexpected directory listing finding: %+v", findings[0])
 	}
 }
 

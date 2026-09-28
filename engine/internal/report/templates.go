@@ -1332,7 +1332,7 @@ ul.scope li {
 </style></head><body><div class="wrap">
 <div class="top-bar">
   <nav class="report-nav" aria-label="Report sections">
-    <a href="#overview">Overview</a><a href="#findings">Findings</a><a href="#metrics">Metrics</a><a href="#scope">Scope</a><a href="#traffic">Evidence</a>
+    <a href="#overview">Overview</a><a href="#findings">Findings</a><a href="#metrics">Metrics</a><a href="#scope">Scope</a><a href="#coverage">Coverage</a><a href="#traffic">Evidence</a>
   </nav>
   <div class="top-actions">
     <button type="button" class="btn-action" id="themeToggleBtn" onclick="toggleReportTheme()">
@@ -1372,6 +1372,7 @@ ul.scope li {
       <tr><td>Requests:</td><td><strong>%d</strong></td></tr>
       <tr><td>Discovered endpoints:</td><td><strong>%d</strong></td></tr>
       <tr><td>Report Generated:</td><td>%s</td></tr>
+		<tr><td>Scanner build:</td><td><code>%s · %s</code></td></tr>
       <tr><td>Scope:</td><td>%d targets</td></tr>
     </table>
   </section>
@@ -1413,6 +1414,8 @@ ul.scope li {
 		totalReqs,
 		meta.Metrics.EndpointCount,
 		meta.GeneratedAt.Format("2006-01-02 15:04 UTC"),
+		template.HTMLEscapeString(meta.EngineVersion),
+		template.HTMLEscapeString(shortReportHash(meta.EngineCommit)),
 		len(meta.Scope.Targets),
 		critCount,
 		highCount,
@@ -1910,6 +1913,39 @@ func pathDiscoveryHTML(entries []PathDiscoveryEntry) string {
 			template.HTMLEscapeString(signal),
 			entry.BodyLength,
 		))
+	}
+	b.WriteString(`</tbody></table>`)
+	return b.String()
+}
+
+func coverageDiagnosticsHTML(entries []CoverageEntry) string {
+	if len(entries) == 0 {
+		return `<p class="meta-line">No coverage limitations or suppressed verification candidates were recorded.</p>`
+	}
+	var b strings.Builder
+	b.WriteString(`<table class="data"><thead><tr><th>Type</th><th>Module / Phase</th><th>Summary</th><th>Endpoint</th><th>Decision</th></tr></thead><tbody>`)
+	for _, entry := range entries {
+		owner := entry.Module
+		if owner == "" {
+			owner = entry.Phase
+		}
+		decision := entry.Reason
+		if decision == "" && len(entry.Reasons) > 0 {
+			decision = strings.Join(entry.Reasons, ", ")
+		}
+		if entry.ProofType != "" {
+			if decision != "" {
+				decision += " · "
+			}
+			decision += "proof=" + entry.ProofType
+		}
+		if entry.Confidence != "" {
+			decision += fmt.Sprintf(" · confidence=%s (%.2f)", entry.Confidence, entry.Score)
+		}
+		b.WriteString(`<tr><td>` + template.HTMLEscapeString(entry.EventType) + `</td><td>` +
+			template.HTMLEscapeString(owner) + `</td><td>` + template.HTMLEscapeString(entry.Summary) +
+			`</td><td><code>` + template.HTMLEscapeString(entry.Endpoint) + `</code></td><td>` +
+			template.HTMLEscapeString(decision) + `</td></tr>`)
 	}
 	b.WriteString(`</tbody></table>`)
 	return b.String()

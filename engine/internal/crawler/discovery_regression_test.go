@@ -67,6 +67,22 @@ func TestBrowserBlockedResourcesAreSummarizedOnce(t *testing.T) {
 	}
 }
 
+func TestStaticAssetDirectoriesAreInferred(t *testing.T) {
+	got := staticAssetDirectoryURLs("https://example.test/assets/icons/logo.png?v=4#preview", 4)
+	want := []string{"https://example.test/assets/icons/", "https://example.test/assets/"}
+	if len(got) != len(want) {
+		t.Fatalf("inferred directories = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("inferred directory %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if got := staticAssetDirectoryURLs("https://example.test/logo.png", 4); len(got) != 0 {
+		t.Fatalf("origin root must not be redundantly inferred: %#v", got)
+	}
+}
+
 func TestDeniedDocumentBrowserRecovery(t *testing.T) {
 	for _, status := range []int{200, 403, 0} {
 		cfg := config.DefaultScanConfig()

@@ -124,7 +124,7 @@ func ForResponse(payload, signal, baselineBody, probeBody, storedMarker string) 
 			add(actualCaseMarker(probeBody, marker))
 		}
 	}
-	if signalLower == "dom_execution" || signalLower == "stored_tracking" || signalLower == "reflected" {
+	if signalLower == "dom_execution" || signalLower == "stored_tracking" || signalLower == "reflected" || signalLower == "reflected_browser_execution" {
 		addMatch(xssExecutionRe)
 	}
 

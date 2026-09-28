@@ -158,3 +158,39 @@ func TestHTMLPIILabelIgnored(t *testing.T) {
 		t.Fatal("API payload with PII field should be flagged")
 	}
 }
+
+func TestDetectDirectoryListingRequiresStructuralEvidence(t *testing.T) {
+	pages := []string{
+		`<html><head><title>Index of /assets/</title></head><body><h1>Index of /assets/</h1><a href="../">Parent Directory</a><a href="logo.png">logo.png</a></body></html>`,
+		`<html><head><title>Directory listing for /images/</title></head><body><h1>Directory listing for /images/</h1><ul><li><a href="cat.png">cat.png</a></li></ul></body></html>`,
+		`<html><body><pre><a href="/">[To Parent Directory]</a> 09/28/2026 11:30 1234 <a href="banner.png">banner.png</a></pre></body></html>`,
+	}
+	for _, body := range pages {
+		evidence, ok := DetectDirectoryListing(body)
+		if !ok || evidence.EntryCount == 0 {
+			t.Fatalf("expected directory listing evidence, got ok=%v evidence=%+v", ok, evidence)
+		}
+		found := false
+		for _, finding := range Analyze(body) {
+			if finding.Kind == "directory_listing" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("directory listing was not surfaced by sensitive-data analysis")
+		}
+	}
+}
+
+func TestDetectDirectoryListingRejectsDocumentationAndOrdinaryLinks(t *testing.T) {
+	pages := []string{
+		`<html><title>Directory listings - security guidance</title><body><h1>Directory listings</h1><a href="/docs/remediation">Remediation</a></body></html>`,
+		`<html><title>Image gallery</title><body><a href="cat.png">Cat</a><a href="dog.png">Dog</a></body></html>`,
+		`<html><body><h1>Index of products</h1><a href="/products/1">First product</a></body></html>`,
+	}
+	for _, body := range pages {
+		if evidence, ok := DetectDirectoryListing(body); ok {
+			t.Fatalf("ordinary page misclassified as directory listing: %+v", evidence)
+		}
+	}
+}

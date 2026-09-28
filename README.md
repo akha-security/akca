@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/akha-security/akca/actions/workflows/ci.yml"><img src="https://github.com/akha-security/akca/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/akha-security/akca/releases/tag/v0.2.4"><img src="https://img.shields.io/badge/version-v0.2.4-8b5cf6" alt="Version v0.2.4"></a>
+  <a href="https://github.com/akha-security/akca/releases/tag/v0.2.5"><img src="https://img.shields.io/badge/version-v0.2.5-8b5cf6" alt="Version v0.2.5"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25 or newer"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache License 2.0"></a>
 </p>
@@ -47,7 +47,7 @@ AKCA does not claim feature or detection parity with mature commercial platforms
 <p align="center">
   <img src="docs/assets/scanner.png" alt="AKCA scanner running against a local security testing lab" width="760">
   <br>
-  <sub>AKCA v0.2.4 scan session with live engine status, resource telemetry, and confirmed findings.</sub>
+  <sub>AKCA v0.2.5 scan session with live engine status, resource telemetry, and confirmed findings.</sub>
 </p>
 
 ## Installation
@@ -60,6 +60,8 @@ Requires **Go 1.25 or newer**.
 go install github.com/akha-security/akca/engine/cmd/akca@latest
 akca --version
 ```
+
+`@latest` installs the newest tagged release, not an untagged commit on `main`. To test the current development branch, use `@main`. If an older binary still runs, compare `command -v akca` with `go env GOBIN` (or `$(go env GOPATH)/bin`) and refresh the shell command cache with `hash -r`. `akca --version` prints the embedded release build commit/date when available.
 
 <details>
 <summary>Command not found? Configure your PATH.</summary>
@@ -86,7 +88,7 @@ For future sessions, add the same directory to your user `Path` environment vari
 
 ### Prebuilt binaries
 
-Download your build from [GitHub Releases](https://github.com/akha-security/akca/releases/latest). Releases include `SHA256SUMS.txt` for checksum verification.
+Download your build from [GitHub Releases](https://github.com/akha-security/akca/releases/latest). Releases include `SHA256SUMS.txt` and GitHub build-provenance attestations. Verify a downloaded binary with `gh attestation verify <binary> -R akha-security/akca`.
 
 | Platform | Architecture | Asset |
 | --- | --- | --- |
@@ -214,8 +216,8 @@ The following list describes implemented discovery engines and security-test fam
 - WAF learning, request calibration, and adaptive traffic recovery
 - HTTP and headless-browser application crawling for traditional and client-rendered applications
 - JavaScript and AST-assisted endpoint analysis, including lazy-loaded application chunks
-- Hidden GET, POST, JSON, and form parameter discovery
-- Directory, file, backup, and administrative-path fuzzing
+- Hidden GET, POST, JSON, XML, multipart, GraphQL, WebSocket, header, cookie, and path-identifier parameter discovery
+- Directory, file, backup, and administrative-path fuzzing, including directory-index detection and parent-directory inference from static assets
 - 403 Forbidden bypass testing with header and path transformations
 - Reflection-context analysis
 - DNS, HTTP, and SMTP OAST callback collection and correlation
@@ -400,7 +402,7 @@ Reports mask recognized credentials by default. Raw stored evidence is preserved
 
 ### Crawl and proof configuration
 
-The crawler retains one browser session throughout each crawl phase, including cookies and browser storage. It explores explicit non-form tabs and expandable panels; it does not auto-fill or submit forms. Browser requests still obey scope and request budgets. For required third-party static dependencies, configure exact hostnames separately:
+The crawler retains one browser session throughout each crawl phase, including cookies and browser storage. It explores explicit non-form tabs and expandable panels; it does not auto-fill or submit forms. Browser requests still obey scope and request budgets. For required third-party static dependencies, exact hostnames may be configured separately:
 
 ```json
 {
@@ -409,20 +411,22 @@ The crawler retains one browser session throughout each crawl phase, including c
 }
 ```
 
-This permits only GET/HEAD script, stylesheet, image, font and media requests to those hosts, stripping credential and custom headers. It does not add those hosts to the active scan scope or permit cross-origin API calls. Blocked browser dependencies produce coverage-gap events.
+This permits only GET/HEAD script, stylesheet, image, font and media requests to those hosts, stripping credential and custom headers. Successful in-scope HTML may also teach the browser up to 32 exact passive dependency hosts found in resource tags or CSP; redirects, API calls and active scanner probes are never adopted this way. It does not add those hosts to the active scan scope. Blocked browser dependencies produce coverage-gap events.
 
 Discovered URLs are retained even when they cannot be visited. A crawl that exhausts its budget with queued work produces a partial scan and a nonzero CLI exit code. Module preflight messages distinguish missing identity/state policies from configured verification capabilities.
 
 Unconfigured rate-limit checks produce observations, not vulnerability findings. A configured threshold proof also requires `window_seconds`; if the requests do not fit inside that window, the check is inconclusive. SQLi does not treat a 400 response or arithmetic evaluation alone as proof. New vendor-specific SQL errors in 400/422 responses must pass the replay and control verification path.
 
-## What's new in v0.2.4
+## What's new in v0.2.5
 
-- Preserve complete stored raw HTTP requests and responses in reports, including long bodies, repeated headers, and trailing whitespace.
-- Render structured-only traffic in a conventional Burp-style layout with standard request headers, content length, and HTTP reason phrases.
-- Add an offline AKCA-branded HTML report, a vulnerability summary table, Request/Response/Both views, full-content controls, and print-safe evidence.
-- Rebuild the startup display as a Lipgloss-based Scan Session panel with target emphasis, system and RAM details, and an active-state indicator.
-- Replace the scan ETA with a continuously updating elapsed timer and show friendly module names with in-place Running-to-Completed transitions.
-- Keep repetitive browser dependency and coverage diagnostics in verbose output while preserving them in scan metadata and reports.
+- Expand SQL, LDAP, XPath, SSTI, command-injection and SSRF coverage with typed replay, boolean, timing, string-transform and protocol-aware probes.
+- Add heuristic IDOR coverage for single-profile scans while retaining strict multi-role BOLA ownership proofs.
+- Improve authenticated crawling, browser dependency discovery, exact captured-request replay and XML, multipart, GraphQL, WebSocket, header, cookie and path mutation surfaces.
+- Add directory-listing detection, broader cloud-takeover fingerprints and cache parameter-cloaking verification.
+- Publish explicit capability, module-completeness and proof-suppression diagnostics in reports without promoting unproven candidates.
+- Improve Ctrl+C behavior and stream large reports through a bounded fast-partial path.
+- Distinguish browser-confirmed reflected XSS from true DOM-based execution.
+- Embed build provenance in the CLI and reports, publish SHA-256 manifests and create signed GitHub build attestations for release binaries.
 
 See [CHANGELOG.md](CHANGELOG.md) for release details.
 
@@ -456,9 +460,10 @@ Run checks from the `engine` directory:
 go test ./... -count=1
 go vet ./...
 go run ./cmd/akca benchmark --strict
+go run ./cmd/akca benchmark --complete-corpus
 ```
 
-The benchmark measures its observed corpus. For implementation details and verification limitations, read the [architecture guide](engine/docs/ARCHITECTURE.md) and [verification audit](engine/docs/FALSE_POSITIVE_AUDIT.md).
+The operational benchmark measures its observed corpus. The complete-corpus gate additionally requires vulnerable and safe/control fixtures for every runnable module and fails if a required browser, OAST, or authentication capability is skipped. For implementation details and verification limitations, read the [architecture guide](engine/docs/ARCHITECTURE.md) and [verification audit](engine/docs/FALSE_POSITIVE_AUDIT.md).
 
 Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md) before opening a pull request. Report vulnerabilities in AKCA through [SECURITY.md](SECURITY.md).
 

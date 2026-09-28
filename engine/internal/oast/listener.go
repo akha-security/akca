@@ -227,6 +227,62 @@ func (l *Listener) Provider() Provider {
 	return l.provider
 }
 
+// HealthCheck verifies the complete callback path, not merely registration.
+// A generated URL is requested and must return through the provider with the
+// exact one-time correlation token before blind coverage is advertised.
+func (l *Listener) HealthCheck(ctx context.Context, timeout time.Duration) error {
+	if l == nil || l.provider == nil {
+		return fmt.Errorf("OAST listener is unavailable")
+	}
+	if _, localOnly := l.provider.(*LocalProvider); localOnly {
+		return fmt.Errorf("local OAST provider cannot receive callbacks from a remote target")
+	}
+	if timeout <= 0 || timeout > 10*time.Second {
+		timeout = 5 * time.Second
+	}
+	gen, err := l.GenerateBoundURL(ProbeBinding{
+		PayloadID: "preflight", CandidateID: "oast-health-" + fmt.Sprint(time.Now().UnixNano()),
+		EndpointURL: "oast://health-check", Location: "preflight", VulnClass: "oast_health",
+	})
+	if err != nil {
+		return fmt.Errorf("generate health callback: %w", err)
+	}
+	client := l.cfg.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: timeout}
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, gen.URL, nil)
+	if err != nil {
+		return fmt.Errorf("create health callback request: %w", err)
+	}
+	response, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("deliver health callback: %w", err)
+	}
+	_ = response.Body.Close()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		l.pollOnce()
+		l.mu.RLock()
+		strength := l.strengths[gen.CorrelationToken]
+		l.mu.RUnlock()
+		if strength > 0 {
+			_ = l.emit("oast_health_ok", "OAST callback path verified", map[string]interface{}{
+				"protocol_strength": strength, "mode": l.providerMode(), "domain": l.provider.Domain(),
+			})
+			return nil
+		}
+		select {
+		case <-requestCtx.Done():
+			return fmt.Errorf("callback not observed before timeout: %w", requestCtx.Err())
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("callback not observed within %s", timeout)
+}
+
 func (l *Listener) pollLoop(ctx context.Context) {
 	defer l.wg.Done()
 	defer func() {

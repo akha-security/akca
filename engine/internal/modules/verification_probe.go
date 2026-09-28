@@ -36,11 +36,11 @@ func (r *Runner) probePayload(ctx context.Context, target ScanTarget, p payloadg
 
 func (r *Runner) enrichVerification(ctx context.Context, module string, target ScanTarget, p payloadgen.Payload,
 	baseline, probe httpclient.RequestResponse, signal string, candidate verification.Candidate) verification.Candidate {
-	if module == "xss" && signal == "dom_execution" {
+	if module == "xss" && (signal == "dom_execution" || signal == "reflected_browser_execution") {
 		// Browser execution is an independent proof path. Replaying the DOM
-		// canary as a response-regex probe would discard a real execution event
-		// because the execution marker is observed in the rendered DOM, not
-		// necessarily in the raw HTTP response.
+		// canary as a response-regex probe would discard a real execution event.
+		// This applies both to browser-confirmed reflected XSS and true DOM-based
+		// execution; the signal still preserves the correct vulnerability subtype.
 		return candidate
 	}
 	if usesModuleManagedProof(module) {

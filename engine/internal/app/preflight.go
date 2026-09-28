@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/akha-security/akca/engine/internal/browserpool"
 	"github.com/akha-security/akca/engine/internal/config"
 )
 
@@ -21,6 +23,20 @@ func (e *Engine) runPreflightValidation(ctx context.Context, cfg config.ScanConf
 	if len(cfg.Targets) == 0 {
 		return fmt.Errorf("preflight requires at least one target")
 	}
+	e.emitCapabilityMatrix(cfg)
+	if cfg.EnableOAST {
+		if e.oast == nil {
+			_ = e.Emit("coverage_gap", "OAST is enabled but no listener is available; blind vulnerability coverage is disabled", map[string]interface{}{
+				"phase": "preflight", "capability": "oast", "affected_modules": []string{"blind_xss", "ssrf", "xxe", "sqli", "ssti", "command_injection", "insecure_deserialization", "pdf_injection", "server_side_js_injection", "llm_injection"},
+			})
+		} else if err := e.oast.HealthCheck(ctx, 5*time.Second); err != nil {
+			_ = e.Emit("coverage_gap", "OAST registration succeeded but the end-to-end callback self-test failed", map[string]interface{}{
+				"phase": "preflight", "capability": "oast", "reason": err.Error(), "blind_coverage": false,
+			})
+		} else {
+			_ = e.Emit("capability_ready", "OAST end-to-end callback path verified", map[string]interface{}{"phase": "preflight", "capability": "oast"})
+		}
+	}
 	if loginSessionGuardEnabled(cfg) {
 		if err := e.ensureAuthenticatedSession(ctx); err != nil {
 			return fmt.Errorf("authentication preflight failed: %w", err)
@@ -35,6 +51,40 @@ func (e *Engine) runPreflightValidation(ctx context.Context, cfg config.ScanConf
 	}
 	_ = e.Emit("preflight_ok", "target and authentication preflight passed", map[string]interface{}{"target": cfg.Targets[0], "status": rr.Response.StatusCode, "authenticated": scanHasConfiguredAuth(cfg)})
 	return nil
+}
+
+func (e *Engine) emitCapabilityMatrix(cfg config.ScanConfig) {
+	type capability struct {
+		ready   bool
+		reason  string
+		modules []string
+	}
+	browserAvailable := false
+	if cfg.EnableHeadlessCrawler || cfg.EnableBrowserWorkerPool {
+		browserAvailable = browserpool.NewHeadlessRendererWithProxy(cfg.ProxyURL, cfg.InsecureSkipVerify).Available()
+	}
+	workflowConfigured := len(cfg.RaceProofPolicies)+len(cfg.BusinessLogicProofPolicies)+
+		len(cfg.AccountRecoveryProofPolicies)+len(cfg.WebhookProofPolicies)+len(cfg.CSRFProofPolicies)+
+		len(cfg.SessionLifecycleProofPolicies)+len(cfg.FileUploadProofPolicies)+
+		len(cfg.CacheDeceptionProofPolicies)+len(cfg.HPPProofPolicies) > 0
+	runtimeSensorReady := e.platform != nil && e.platform.sensor != nil
+	matrix := map[string]capability{
+		"browser":              {browserAvailable, "no usable Chromium-compatible browser is available", []string{"xss", "csti_detection", "client_ssti", "jsonp_callback", "ws_cswsh"}},
+		"oast":                 {cfg.EnableOAST && e.oast != nil, "OAST listener is disabled or unavailable", []string{"blind_xss", "ssrf", "xxe", "sqli", "ssti", "command_injection"}},
+		"two_roles":            {len(cfg.RoleProfiles) >= 2, "at least two distinct role profiles are required", []string{"idor", "tenant_isolation", "bfla"}},
+		"ownership_policy":     {len(cfg.ObjectAuthorizationPolicies) > 0, "object ownership policy is missing", []string{"idor", "tenant_isolation"}},
+		"authorization_policy": {len(cfg.AuthorizationPolicies) > 0, "function authorization policy is missing", []string{"bfla"}},
+		"workflow_policy":      {workflowConfigured, "no stateful workflow proof policy is configured", []string{"business_logic", "race_condition", "account_recovery", "webhook_security", "csrf", "session_lifecycle", "file_upload", "cache_deception", "hpp"}},
+		"runtime_sensor":       {runtimeSensorReady, "runtime sensor is unavailable; sink-level confirmation is disabled", []string{"sqli", "ssti", "command_injection", "ssrf", "xxe", "insecure_deserialization", "react_rsc_rce"}},
+	}
+	payload := make(map[string]interface{}, len(matrix))
+	for name, item := range matrix {
+		payload[name] = map[string]interface{}{"ready": item.ready, "reason": item.reason, "affected_modules": item.modules}
+		if !item.ready {
+			_ = e.Emit("capability_gap", item.reason, map[string]interface{}{"phase": "preflight", "capability": name, "affected_modules": item.modules})
+		}
+	}
+	_ = e.Emit("capability_matrix", "scanner capability readiness evaluated", payload)
 }
 
 type readinessEntry struct {

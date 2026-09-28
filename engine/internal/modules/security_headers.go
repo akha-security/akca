@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,6 +75,13 @@ func (r *Runner) runSecurityHeaders(ctx context.Context, target ScanTarget) []Mo
 		p := defaultPayload("security_headers", weakness.signal, weakness.value, weakness.signal)
 		f := r.verifyAndBuild(ctx, "security_headers", target, p, baseline, rr, weakness.signal, false, false, "", "")
 		r.recordFinding(ctx, &out, f, "security_headers", weakness.signal)
+	}
+	if parsed, parseErr := url.Parse(target.EndpointURL); parseErr == nil && strings.EqualFold(parsed.Scheme, "https") {
+		for _, weakness := range weakHSTS(headerValue(rr.Response.Headers, "Strict-Transport-Security")) {
+			p := defaultPayload("security_headers", weakness.signal, weakness.value, weakness.signal)
+			f := r.verifyAndBuild(ctx, "security_headers", target, p, baseline, rr, weakness.signal, false, false, "", "")
+			r.recordFinding(ctx, &out, f, "security_headers", weakness.signal)
+		}
 	}
 	if value := strings.TrimSpace(headerValue(rr.Response.Headers, "Cross-Origin-Opener-Policy")); value != "" && !validCOOP(value) {
 		p := defaultPayload("security_headers", "weak_coop", value, "weak_coop")
@@ -157,7 +165,8 @@ func weakCSPDirectives(policy string) []cspWeakness {
 		}
 	}
 	for _, source := range scriptSources {
-		switch strings.ToLower(source) {
+		lower := strings.ToLower(source)
+		switch lower {
 		case "'unsafe-inline'":
 			// CSP3 ignores unsafe-inline when a nonce/hash is present.  Treating
 			// that compatibility token as exploitable creates a common false
@@ -169,7 +178,48 @@ func weakCSPDirectives(policy string) []cspWeakness {
 			out = append(out, cspWeakness{signal: "csp_unsafe_eval_script", value: source})
 		case "*":
 			out = append(out, cspWeakness{signal: "csp_wildcard_script_source", value: source})
+		case "data:", "blob:", "filesystem:":
+			out = append(out, cspWeakness{signal: "csp_unsafe_script_scheme", value: source})
+		default:
+			if strings.HasPrefix(lower, "http://") {
+				out = append(out, cspWeakness{signal: "csp_insecure_script_source", value: source})
+			}
 		}
+	}
+	return out
+}
+
+func weakHSTS(value string) []cspWeakness {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	var out []cspWeakness
+	maxAge := int64(-1)
+	hasSubdomains := false
+	for _, part := range strings.Split(value, ";") {
+		part = strings.TrimSpace(part)
+		name, raw, hasValue := strings.Cut(part, "=")
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "max-age":
+			if !hasValue {
+				continue
+			}
+			parsed, err := strconv.ParseInt(strings.Trim(strings.TrimSpace(raw), `"`), 10, 64)
+			if err == nil {
+				maxAge = parsed
+			}
+		case "includesubdomains":
+			hasSubdomains = true
+		}
+	}
+	if maxAge < 0 {
+		out = append(out, cspWeakness{signal: "hsts_invalid_max_age", value: value})
+	} else if maxAge < 15552000 {
+		out = append(out, cspWeakness{signal: "hsts_short_max_age", value: fmt.Sprint(maxAge)})
+	}
+	if !hasSubdomains {
+		out = append(out, cspWeakness{signal: "hsts_missing_include_subdomains", value: value})
 	}
 	return out
 }
@@ -222,9 +272,13 @@ func (r *Runner) runTLSMisconfig(ctx context.Context, target ScanTarget) []Modul
 		Request: httpclient.RequestRecord{Method: http.MethodGet, URL: rootURL},
 		Response: httpclient.ResponseRecord{StatusCode: http.StatusOK, Headers: map[string]string{
 			"TLS-Protocol": inspection.Protocol, "TLS-Cipher": inspection.Cipher,
-			"TLS-Certificate-Subject": inspection.CertificateSubject,
-			"TLS-Certificate-Issuer":  inspection.CertificateIssuer,
-			"TLS-Certificate-Expiry":  inspection.CertificateExpiry.Format("2006-01-02T15:04:05Z07:00"),
+			"TLS-Certificate-Subject":   inspection.CertificateSubject,
+			"TLS-Certificate-Issuer":    inspection.CertificateIssuer,
+			"TLS-Certificate-Expiry":    inspection.CertificateExpiry.Format("2006-01-02T15:04:05Z07:00"),
+			"TLS-Certificate-Signature": inspection.CertificateSignature,
+			"TLS-Public-Key-Bits":       fmt.Sprint(inspection.PublicKeyBits),
+			"TLS-OCSP-Stapled":          fmt.Sprint(inspection.OCSPStapled),
+			"TLS-ALPN":                  inspection.NegotiatedProtocol,
 		}},
 	}
 	var out []ModuleFinding
@@ -237,9 +291,10 @@ func (r *Runner) runTLSMisconfig(ctx context.Context, target ScanTarget) []Modul
 		observation := r.observation("tls_misconfig", rootTarget, verification.RolePositiveProbe, 1, rr)
 		f := &ModuleFinding{
 			Title: "TLS configuration: " + strings.ReplaceAll(signal, "_", " "), VulnClass: "tls_misconfig", Severity: severity,
-			Description: fmt.Sprintf("TLS inspection confirmed %s (protocol=%s, cipher=%s, subject=%s, issuer=%s, expires=%s)",
+			Description: fmt.Sprintf("TLS inspection confirmed %s (protocol=%s, cipher=%s, subject=%s, issuer=%s, expires=%s, signature=%s, key_bits=%d, ocsp_stapled=%t, alpn=%s)",
 				signal, inspection.Protocol, inspection.Cipher, inspection.CertificateSubject,
-				inspection.CertificateIssuer, inspection.CertificateExpiry.Format("2006-01-02")),
+				inspection.CertificateIssuer, inspection.CertificateExpiry.Format("2006-01-02"), inspection.CertificateSignature,
+				inspection.PublicKeyBits, inspection.OCSPStapled, inspection.NegotiatedProtocol),
 			Endpoint: rootURL, Confidence: verification.Confirmed,
 			Evidence: Evidence{
 				Module: "tls_misconfig", Signal: signal, Payload: p, Request: rr.Request, Response: rr.Response,

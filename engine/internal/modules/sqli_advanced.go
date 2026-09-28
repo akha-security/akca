@@ -10,7 +10,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/akha-security/akca/engine/internal/evidencemarkers"
+	"github.com/akha-security/akca/engine/internal/findingtext"
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/payloadgen"
 	"github.com/akha-security/akca/engine/internal/timingblind"
@@ -583,6 +586,13 @@ func sqliBooleanPairs(scanID string, target ScanTarget) []sqliBooleanPair {
 	}
 	pairs := []sqliBooleanPair{
 		{
+			fmt.Sprintf(`-1' OR %d*%d=%d -- `, left%17+2, right%19+2, (left%17+2)*(right%19+2)),
+			fmt.Sprintf(`-1' OR %d*%d=%d -- `, left%17+2, right%19+2, (left%17+2)*(right%19+2)+1),
+			fmt.Sprintf(`-1' OR %d*%d=%d -- `, left2%17+2, right2%19+2, (left2%17+2)*(right2%19+2)),
+			fmt.Sprintf(`-1' OR %d*%d=%d -- `, left2%17+2, right2%19+2, (left2%17+2)*(right2%19+2)+1),
+			"boolean_auth_arithmetic_or",
+		},
+		{
 			fmt.Sprintf(`%s' AND '%d'='%d'-- -`, baseVal, left, left), fmt.Sprintf(`%s' AND '%d'='%d'-- -`, baseVal, left, right),
 			fmt.Sprintf(`%s' AND '%d'='%d'-- -`, baseVal, left2, left2), fmt.Sprintf(`%s' AND '%d'='%d'-- -`, baseVal, left2, right2),
 			"boolean_single_quote_and",
@@ -621,6 +631,13 @@ func sqliBooleanPairs(scanID string, target ScanTarget) []sqliBooleanPair {
 			fmt.Sprintf(`%s%%' AND %d=%d AND '%%'='`, baseVal, left, left), fmt.Sprintf(`%s%%' AND %d=%d AND '%%'='`, baseVal, left, right),
 			fmt.Sprintf(`%s%%' AND %d=%d AND '%%'='`, baseVal, left2, left2), fmt.Sprintf(`%s%%' AND %d=%d AND '%%'='`, baseVal, left2, right2),
 			"boolean_like_percent_closed",
+		},
+		{
+			fmt.Sprintf(`%s%%' AND %d*%d=%d AND 'akca%d'!='akca%d%%`, baseVal, left%13+2, right%11+2, (left%13+2)*(right%11+2), left, left),
+			fmt.Sprintf(`%s%%' AND %d*%d=%d AND 'akca%d'!='akca%d%%`, baseVal, left%13+2, right%11+2, (left%13+2)*(right%11+2)+1, left, left),
+			fmt.Sprintf(`%s%%' AND %d*%d=%d AND 'akca%d'!='akca%d%%`, baseVal, left2%13+2, right2%11+2, (left2%13+2)*(right2%11+2), left2, left2),
+			fmt.Sprintf(`%s%%' AND %d*%d=%d AND 'akca%d'!='akca%d%%`, baseVal, left2%13+2, right2%11+2, (left2%13+2)*(right2%11+2)+1, left2, left2),
+			"boolean_like_percent_balanced",
 		},
 		{
 			fmt.Sprintf(`%s' AND %d=%d/*`, baseVal, left, left), fmt.Sprintf(`%s' AND %d=%d/*`, baseVal, left, right),
@@ -670,27 +687,39 @@ func sqliBooleanPairs(scanID string, target ScanTarget) []sqliBooleanPair {
 
 func (r *Runner) booleanBlindSQLiProbe(ctx context.Context, target ScanTarget, baseline httpclient.RequestResponse) []ModuleFinding {
 	pairs := sqliBooleanPairs(r.scanID, target)
+	pairsAttempted, requestsDelivered, candidatePairs := 0, 0, 0
+	defer func() {
+		r.emitSQLiCoverage("sqli_boolean_probe_coverage", target, map[string]interface{}{
+			"pairs_available": len(pairs), "pairs_attempted": pairsAttempted,
+			"requests_delivered": requestsDelivered, "candidate_pairs": candidatePairs,
+			"verification_skipped": false,
+		})
+	}()
 
 	for _, pair := range pairs {
 		if ctx.Err() != nil {
 			break
 		}
+		pairsAttempted++
 		falseAttempt, okF := r.sqliBestAttempt(ctx, target, pair.falseVal, baseline.Response.Body)
 		if !okF {
 			continue
 		}
+		requestsDelivered++
 		falseRR := falseAttempt.RR.Response
 
 		trueAttempt, okT := r.sqliBestAttempt(ctx, target, pair.trueVal, baseline.Response.Body)
 		if !okT {
 			continue
 		}
+		requestsDelivered++
 		trueRR := trueAttempt.RR.Response
 
 		signal := "boolean_pair_confirmed"
 		if !booleanPairConfirmed(baseline.Response, trueRR, falseRR, pair.trueVal, pair.falseVal) {
 			continue
 		}
+		candidatePairs++
 
 		orientation := booleanPairOrientation(baseline.Response.Body, trueRR.Body, falseRR.Body)
 		p := payloadgen.Payload{
@@ -731,8 +760,18 @@ func (r *Runner) booleanBlindSQLiProbe(ctx context.Context, target ScanTarget, b
 			continue
 		}
 
-		syntaxControl := booleanSyntaxControl(pair.trueVal)
-		controlRR, err := r.probeForModule(ctx, "sqli", trueAttempt.Target, syntaxControl)
+		// Replaying the native value is the reliable clean control. Deliberately
+		// corrupting SQL keywords (OR->XR, AND->XND) creates a database syntax
+		// error on genuinely injectable endpoints and used to suppress exactly
+		// the findings this proof is intended to validate.
+		controlValue := nativeTargetValue(trueAttempt.Target)
+		if controlValue == "" {
+			controlValue = nativeTargetValue(target)
+		}
+		if controlValue == "" {
+			controlValue = "1"
+		}
+		controlRR, err := r.probeForModule(ctx, "sqli", trueAttempt.Target, controlValue)
 		if err != nil || !usableBooleanSQLiResponse(controlRR.Response) {
 			continue
 		}
@@ -779,9 +818,9 @@ func (r *Runner) booleanBlindSQLiProbe(ctx context.Context, target ScanTarget, b
 				)
 			})
 		if f != nil {
-			f.Description += " Confirmed with two independent operand pairs in the same SQL context and a syntax-preserving non-SQL control."
+			f.Description += " Confirmed with two independent operand pairs in the same SQL context and a clean native-value control."
 			f.Evidence.Verification.UpgradeReasons = append(f.Evidence.Verification.UpgradeReasons,
-				"two_independent_boolean_pairs", "syntax_preserving_control_clean")
+				"two_independent_boolean_pairs", "native_value_control_clean")
 			var out []ModuleFinding
 			if r.recordFinding(ctx, &out, f, "sqli", "boolean_pair_confirmed") {
 				return out
@@ -798,8 +837,8 @@ func booleanResponseHash(body string) string {
 }
 
 func booleanPairOrientation(baseline, trueBody, falseBody string) int {
-	trueDelta := bodyDiffRatio(normalizeVolatileFields(baseline), normalizeVolatileFields(trueBody))
-	falseDelta := bodyDiffRatio(normalizeVolatileFields(baseline), normalizeVolatileFields(falseBody))
+	trueDelta := sqliSemanticDiffRatio(normalizeVolatileFields(baseline), normalizeVolatileFields(trueBody))
+	falseDelta := sqliSemanticDiffRatio(normalizeVolatileFields(baseline), normalizeVolatileFields(falseBody))
 	if trueDelta+0.02 < falseDelta {
 		return 1
 	}
@@ -868,15 +907,25 @@ func (r *Runner) numericArithmeticSQLiProbe(ctx context.Context, target ScanTarg
 			variant:   "arithmetic_subtraction_contrast",
 		},
 	}
+	testsAttempted, requestsDelivered, stableOracles := 0, 0, 0
+	defer func() {
+		r.emitSQLiCoverage("sqli_arithmetic_probe_coverage", target, map[string]interface{}{
+			"tests_available": len(tests), "tests_attempted": testsAttempted,
+			"requests_delivered": requestsDelivered, "stable_oracles": stableOracles,
+			"verification_skipped": false,
+		})
+	}()
 
 	for _, tc := range tests {
 		if ctx.Err() != nil {
 			break
 		}
+		testsAttempted++
 		id1Attempt, ok := r.sqliBestAttempt(ctx, target, tc.identity1, baseline.Response.Body)
 		if !ok {
 			continue
 		}
+		requestsDelivered++
 		id1RR := id1Attempt.RR.Response
 		if id1RR.StatusCode != baseline.Response.StatusCode {
 			continue
@@ -889,9 +938,10 @@ func (r *Runner) numericArithmeticSQLiProbe(ctx context.Context, target ScanTarg
 		if !ok {
 			continue
 		}
+		requestsDelivered++
 		ct1RR := ct1Attempt.RR.Response
 		statusDiff := ct1RR.StatusCode != id1RR.StatusCode
-		bodyDiff := bodyDiffRatio(normalizeVolatileFields(id1RR.Body), normalizeVolatileFields(ct1RR.Body)) >= 0.03
+		bodyDiff := sqliSemanticDiffRatio(normalizeVolatileFields(id1RR.Body), normalizeVolatileFields(ct1RR.Body)) >= 0.03
 		if !statusDiff && !bodyDiff {
 			continue
 		}
@@ -900,6 +950,7 @@ func (r *Runner) numericArithmeticSQLiProbe(ctx context.Context, target ScanTarg
 		if !ok {
 			continue
 		}
+		requestsDelivered++
 		id2RR := id2Attempt.RR.Response
 		if id2RR.StatusCode != baseline.Response.StatusCode || !sqliBodiesEquivalent(id1RR.Body, id2RR.Body) {
 			continue
@@ -909,14 +960,84 @@ func (r *Runner) numericArithmeticSQLiProbe(ctx context.Context, target ScanTarg
 		if !ok {
 			continue
 		}
+		requestsDelivered++
 		ct2RR := ct2Attempt.RR.Response
 		statusDiff2 := ct2RR.StatusCode != id2RR.StatusCode
-		bodyDiff2 := bodyDiffRatio(normalizeVolatileFields(id2RR.Body), normalizeVolatileFields(ct2RR.Body)) >= 0.03
+		bodyDiff2 := sqliSemanticDiffRatio(normalizeVolatileFields(id2RR.Body), normalizeVolatileFields(ct2RR.Body)) >= 0.03
 		if !statusDiff2 && !bodyDiff2 {
 			continue
 		}
 
-		r.emitDiscovery("sqli", target, "arithmetic_evaluation_observed", "Arithmetic evaluation alone does not prove SQL execution; independent SQL predicate probes are required")
+		// Re-run both orientations. The two independent expression families plus
+		// this alternating replay make the oracle visible without claiming the
+		// same confidence as a SQL-specific AND/OR predicate pair.
+		idReplay, err := r.probeForModule(ctx, "sqli", id1Attempt.Target, tc.identity1)
+		if err != nil || idReplay.Response.StatusCode != id1RR.StatusCode || !sqliBodiesEquivalent(id1RR.Body, idReplay.Response.Body) {
+			continue
+		}
+		requestsDelivered++
+		ctReplay, err := r.probeForModule(ctx, "sqli", ct1Attempt.Target, tc.contrast1)
+		if err != nil || ctReplay.Response.StatusCode != ct1RR.StatusCode || !sqliBodiesEquivalent(ct1RR.Body, ctReplay.Response.Body) {
+			continue
+		}
+		requestsDelivered++
+		if !sqliBodiesEquivalent(id1RR.Body, id2RR.Body) || !sqliBodiesEquivalent(ct1RR.Body, ct2RR.Body) {
+			continue
+		}
+		stableOracles++
+
+		p := payloadgen.Payload{Value: tc.contrast1, VulnClass: "sqli", Family: "sqli", Variant: tc.variant, ExpectedSignal: "numeric_arithmetic_oracle"}
+		proof := &verification.ArithmeticOracleProof{
+			BaselineHash:      booleanResponseHash(baseline.Response.Body),
+			FirstIdentityHash: booleanResponseHash(id1RR.Body), FirstContrastHash: booleanResponseHash(ct1RR.Body),
+			ReplayIdentityHash: booleanResponseHash(idReplay.Response.Body), ReplayContrastHash: booleanResponseHash(ctReplay.Response.Body),
+			SecondIdentityHash: booleanResponseHash(id2RR.Body), SecondContrastHash: booleanResponseHash(ct2RR.Body),
+			SameSurface: true, StableOrientation: true,
+		}
+		candidate := verification.Candidate{
+			ScanID: r.scanID, Title: "sqli on " + target.Parameter, VulnClass: "sqli",
+			EndpointURL: target.EndpointURL, Method: target.Method, Parameter: target.Parameter,
+			Payload: p.Value, Module: "sqli", Signal: "numeric_arithmetic_oracle",
+			Baseline: snapshot(baseline.Response), Probe: snapshot(ct1Attempt.RR.Response),
+			Reflection: &target.Profile, DirectTypedSignal: true,
+			ProofPolicyVersion: verification.CurrentProofPolicyVersion,
+			RequestedProofType: verification.ProofArithmeticOracle, ArithmeticProof: proof,
+		}
+		candidate.Observations = append(candidate.Observations,
+			r.observation("sqli", target, verification.RoleNativeBaseline, 1, baseline),
+			r.observation("sqli", target, verification.RoleTrueBranch, 1, id1Attempt.RR),
+			r.observation("sqli", target, verification.RoleFalseBranch, 1, ct1Attempt.RR),
+			r.observation("sqli", target, verification.RoleTrueBranch, 2, id2Attempt.RR),
+			r.observation("sqli", target, verification.RoleFalseBranch, 2, ct2Attempt.RR),
+			r.observation("sqli", target, verification.RoleTrueBranch, 3, idReplay),
+			r.observation("sqli", target, verification.RoleFalseBranch, 3, ctReplay),
+		)
+		result := r.verifier.Verify(candidate)
+		if result.Suppressed || !result.ProofSatisfied {
+			r.recordVerificationOutcome(target, "sqli", "numeric_arithmetic_oracle", result)
+			r.emitDiscovery("sqli", target, "arithmetic_evaluation_observed", "Stable arithmetic evaluation was observed but proof validation did not complete")
+			continue
+		}
+		// This oracle is intentionally capped at Potential until SQL-specific
+		// predicate, timing, OAST or runtime sink evidence corroborates it.
+		result.Confidence = verification.Potential
+		if result.Score < 0.55 || result.Score > 0.74 {
+			result.Score = 0.60
+		}
+		result.UpgradeReasons = append(result.UpgradeReasons, "stable_numeric_arithmetic_oracle")
+		f := &ModuleFinding{
+			Title: findingtext.HumanTitle("sqli"), VulnClass: "sqli", Severity: severityFor("sqli", result.Confidence),
+			Endpoint: target.EndpointURL, Parameter: target.Parameter, Location: target.Location, Confidence: result.Confidence,
+			Description: findingtext.HumanDescription("sqli", "numeric_arithmetic_oracle", target.Parameter, target.EndpointURL, p.Value, p.Variant, target.Location),
+			Evidence: Evidence{Module: "sqli", Signal: "numeric_arithmetic_oracle", Payload: p,
+				Parameter: target.Parameter, Location: target.Location,
+				ResponseMarkers: evidencemarkers.ForResponse(p.Value, "numeric_arithmetic_oracle", baseline.Response.Body, ct1Attempt.RR.Response.Body, ""),
+				Request:         ct1Attempt.RR.Request, Response: ct1Attempt.RR.Response, Verification: result, DetectedAt: time.Now().UTC()},
+		}
+		var out []ModuleFinding
+		if r.recordFinding(ctx, &out, f, "sqli", "numeric_arithmetic_oracle") {
+			return out
+		}
 		return nil
 	}
 	return nil

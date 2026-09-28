@@ -59,6 +59,8 @@ type Client struct {
 	limiter         *ratelimit.Limiter
 	cfg             config.ScanConfig
 	sessionMu       sync.RWMutex
+	browserDomainMu sync.RWMutex
+	browserDomains  map[string]struct{}
 	uaMu            sync.Mutex
 	uaIndex         int
 	blockMu         sync.Mutex
@@ -140,11 +142,17 @@ func New(cfg config.ScanConfig, scopeEngine *scope.Engine, limiter *ratelimit.Li
 		}
 	}
 	c := &Client{
-		scope:        scopeEngine,
-		limiter:      limiter,
-		cfg:          cfg,
-		hostBlocks:   make(map[string]int),
-		blockedUntil: make(map[string]time.Time),
+		scope:          scopeEngine,
+		limiter:        limiter,
+		cfg:            cfg,
+		hostBlocks:     make(map[string]int),
+		blockedUntil:   make(map[string]time.Time),
+		browserDomains: make(map[string]struct{}),
+	}
+	for _, domain := range cfg.BrowserResourceDomains {
+		if domain = strings.ToLower(strings.TrimSpace(domain)); domain != "" {
+			c.browserDomains[domain] = struct{}{}
+		}
 	}
 	wireTransport := NewWireTransport(transport, limiter, &c.networkAttempts, cfg.RequestBudget)
 	c.httpClient = &http.Client{

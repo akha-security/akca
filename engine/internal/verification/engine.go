@@ -72,7 +72,7 @@ func (e *Engine) Verify(candidate Candidate) Result {
 		reasons = append(reasons, ReasonBaselineMatch)
 	}
 
-	isXSS := candidate.Module == "xss" || candidate.VulnClass == "xss"
+	isXSS := candidate.Module == "xss" || candidate.VulnClass == "xss" || candidate.VulnClass == "blind_xss"
 	if isXSS && !candidate.DirectTypedSignal && !candidate.DOMPresent && !candidate.DOMExecuted &&
 		candidate.Reflection != nil && candidate.Reflection.Context == "html_body" &&
 		candidate.Reflection.ReflectionKind == "raw" {
@@ -204,6 +204,10 @@ func (e *Engine) Verify(candidate Candidate) Result {
 		proofCopy := *candidate.BooleanPairProof
 		result.BooleanPairProof = &proofCopy
 	}
+	if validArithmeticOracleProof(candidate.ArithmeticProof) {
+		proofCopy := *candidate.ArithmeticProof
+		result.ArithmeticProof = &proofCopy
+	}
 
 	result.DowngradeReasons = reasons
 	result.UpgradeReasons = upgrades
@@ -299,6 +303,12 @@ func ScoreConfidence(c Candidate, r Result) (ConfidenceLevel, float64) {
 	}
 	if validBooleanPairProof(c.BooleanPairProof) {
 		score += 0.30
+	}
+	if validArithmeticOracleProof(c.ArithmeticProof) {
+		// Arithmetic evaluation is a useful server-side oracle, but is not by
+		// itself SQL-specific. Keep it visible at Potential confidence unless a
+		// stronger proof path (runtime, timing, OAST, SQL predicate) also exists.
+		score += 0.25
 	}
 	if c.DOMExecuted {
 		score += 0.75

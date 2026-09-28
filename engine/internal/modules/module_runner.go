@@ -49,6 +49,7 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 		}
 	}
 	planData := map[string]interface{}{"scan_id": r.scanID, "module": module, "targets": len(targets), "targets_eligible": eligible, "budget_mode": "unlimited"}
+	planData["assurance_profile"] = AssuranceProfile(module)
 	if allocation != nil {
 		planData["budget_mode"] = "adaptive"
 		planData["requests_allocated"] = allocation.allocated
@@ -130,6 +131,9 @@ feed:
 		findings = append(findings, r.flushDelayedTimingVerifications(ctx)...)
 	}
 	tested, attempted, skipped, failed, exhausted, unprocessed := 0, 0, 0, 0, 0, 0
+	requests, responses, usableResponses := int64(0), int64(0), int64(0)
+	authBlocks, rateBlocks, gatewayBlocks := int64(0), int64(0), int64(0)
+	timeoutFailures, transportErrors := int64(0), int64(0)
 	for i, result := range results {
 		state := result.state
 		if state == nil {
@@ -139,6 +143,14 @@ feed:
 		if state.requests.Load() > 0 {
 			attempted++
 		}
+		requests += state.requests.Load()
+		responses += state.responses.Load()
+		usableResponses += state.usableResponses.Load()
+		authBlocks += state.authBlocks.Load()
+		rateBlocks += state.rateBlocks.Load()
+		gatewayBlocks += state.gatewayBlocks.Load()
+		timeoutFailures += state.timeoutFailures.Load()
+		transportErrors += state.transportErrors.Load()
 		state.mu.Lock()
 		reason := state.skip
 		state.mu.Unlock()
@@ -171,7 +183,9 @@ feed:
 		_ = r.emit("module_target_finished", module+" target "+status, map[string]interface{}{
 			"scan_id": r.scanID, "module": module, "endpoint": target.EndpointURL, "method": target.Method,
 			"parameter": target.Parameter, "location": target.Location, "status": status, "reason": reason,
-			"requests": state.requests.Load(), "findings": len(result.findings),
+			"requests": state.requests.Load(), "responses": state.responses.Load(), "usable_responses": state.usableResponses.Load(),
+			"auth_blocks": state.authBlocks.Load(), "rate_limit_blocks": state.rateBlocks.Load(), "gateway_blocks": state.gatewayBlocks.Load(),
+			"timeout_failures": state.timeoutFailures.Load(), "transport_errors": state.transportErrors.Load(), "findings": len(result.findings),
 		})
 	}
 	coverage := 0.0
@@ -183,6 +197,12 @@ feed:
 		"targets_tested": tested, "targets_attempted": attempted, "targets_skipped": skipped, "targets_failed": failed,
 		"targets_budget_exhausted": exhausted, "targets_unprocessed": unprocessed,
 		"coverage_percentage": fmt.Sprintf("%.1f%%", coverage), "coverage_pct": coverage,
+		"requests_attempted": requests, "responses_received": responses, "usable_responses": usableResponses,
+		"auth_blocked_responses": authBlocks, "rate_limited_responses": rateBlocks, "gateway_blocked_responses": gatewayBlocks,
+		"timeout_failures": timeoutFailures, "transport_errors": transportErrors,
+	}
+	for key, value := range summarizeProofCoverage(findings) {
+		data[key] = value
 	}
 	if allocation != nil {
 		data["requests_allocated"] = allocation.allocated
@@ -202,6 +222,40 @@ feed:
 		return findings, fmt.Errorf("module %s completed with %d execution or persistence errors", module, count)
 	}
 	return findings, nil
+}
+
+func summarizeProofCoverage(findings []ModuleFinding) map[string]interface{} {
+	roles := make(map[string]int)
+	proofTypes := make(map[string]int)
+	payloadFamilies := make(map[string]int)
+	verified := 0
+	for _, finding := range findings {
+		result := finding.Evidence.Verification
+		if result.ProofSatisfied && !result.Suppressed {
+			verified++
+		}
+		if result.ProofType != "" {
+			proofTypes[string(result.ProofType)]++
+		}
+		for _, observation := range result.Observations {
+			roles[string(observation.Role)]++
+		}
+		family := strings.TrimSpace(finding.Evidence.Payload.Family)
+		if family == "" {
+			family = strings.TrimSpace(finding.VulnClass)
+		}
+		if family != "" {
+			payloadFamilies[family]++
+		}
+	}
+	return map[string]interface{}{
+		"verified_findings": verified, "proof_types": proofTypes,
+		"proof_observation_roles": roles, "finding_payload_families": payloadFamilies,
+		"baseline_observations":         roles["native_baseline"] + roles["baseline_replay"],
+		"positive_probe_observations":   roles["positive_probe"],
+		"positive_replay_observations":  roles["positive_replay"],
+		"negative_control_observations": roles["negative_control"],
+	}
 }
 
 func (r *Runner) runSingleModule(ctx context.Context, module string, target ScanTarget) []ModuleFinding {

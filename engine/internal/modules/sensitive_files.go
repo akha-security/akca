@@ -202,13 +202,17 @@ func (r *Runner) runSensitiveFiles(ctx context.Context, target ScanTarget) []Mod
 			continue
 		}
 
+		if rr.Response.Redirected && isRedirectedAway(rr, probeURL) {
+			continue
+		}
+
 		body := rr.Response.Body
 		if wildcard200 && bodiesSimilar(body, wRR.Response.Body) {
 			continue
 		}
 
 		// Reject HTML 200 custom error pages (except for phpinfo which is HTML)
-		if sf.kind != "phpinfo_leak" && sf.kind != "exposed_installer" && (strings.Contains(strings.ToLower(body), "<html") || strings.Contains(strings.ToLower(body), "<!doctype")) {
+		if sf.kind != "phpinfo_leak" && sf.kind != "exposed_installer" && isHTMLResponse(rr.Response) {
 			continue
 		}
 

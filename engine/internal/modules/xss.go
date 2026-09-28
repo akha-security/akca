@@ -54,16 +54,27 @@ func (r *Runner) runXSS(ctx context.Context, target ScanTarget) []ModuleFinding 
 		domExecuted := false
 		domPayload := verification.DOMXSSPayload()
 		domRR, domErr := r.probeForModule(ctx, "xss", target, domPayload)
+		browserCanaryReflected := false
 		if domErr == nil && r.browser != nil && domRR.Request.Method == "GET" && domRR.Request.URL != "" {
+			browserCanaryReflected = verification.CheckDOMPresence(domRR.Response.Body, domPayload)
 			rendered, renderErr := r.browser.Render(ctx, domRR.Request.URL)
 			domExecuted = renderErr == nil && verification.CheckDOMExecution(rendered)
 		}
 		if domExecuted && !sqliErrorRe.MatchString(domRR.Response.Body) {
-			p = defaultPayload("xss", "browser_dom_canary", domPayload, "dom_execution")
+			// Browser execution is the proof mechanism, not automatically the XSS
+			// subtype. If the canary is present in the server response this is a
+			// reflected XSS that was confirmed in a browser. Only execution without
+			// server-side reflection is labelled DOM-based XSS.
+			if browserCanaryReflected {
+				p = defaultPayload("xss", "browser_reflected_canary", domPayload, "reflected_browser_execution")
+				signal = "reflected_browser_execution"
+			} else {
+				p = defaultPayload("xss", "browser_dom_canary", domPayload, "dom_execution")
+				signal = "dom_execution"
+			}
 			rr = domRR
 			probeTarget = target
-			domPresent = verification.CheckDOMPresence(domRR.Response.Body, domPayload)
-			signal = "dom_execution"
+			domPresent = browserCanaryReflected
 		}
 		marker := ""
 		if target.Profile.Stable && target.Profile.ReflectionKind == reflection.ReflectionRaw {
@@ -79,7 +90,7 @@ func (r *Runner) runXSS(ctx context.Context, target ScanTarget) []ModuleFinding 
 		// executable reflected payload is already validated by the HTML parser;
 		// treating that ordinary reflection as "DOM presence only" would apply
 		// an unrelated false-positive penalty.
-		domSignalPresent := domPresent && signal == "dom_execution"
+		domSignalPresent := domPresent && domExecuted
 		f := r.verifyAndBuild(ctx, "xss", probeTarget, p, baseline, rr, signal, domSignalPresent, domExecuted, oastURL, marker)
 		if f != nil {
 			if r.recordFinding(ctx, &out, f, "xss", signal) {

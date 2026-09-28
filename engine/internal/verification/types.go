@@ -25,6 +25,7 @@ const (
 	ProofNone               ProofType = ""
 	ProofDifferentialReplay ProofType = "differential_replay"
 	ProofBooleanPair        ProofType = "boolean_pair"
+	ProofArithmeticOracle   ProofType = "arithmetic_oracle"
 	ProofTiming             ProofType = "timing"
 	ProofOAST               ProofType = "oast_callback"
 	ProofDOMExecution       ProofType = "dom_execution"
@@ -93,6 +94,22 @@ type BooleanPairProof struct {
 	SyntaxControlOK   bool   `json:"syntax_control_ok"`
 }
 
+// ArithmeticOracleProof records a stable numeric-expression oracle. It is a
+// deliberately lower-confidence SQLi proof than a SQL predicate pair: some
+// applications evaluate arithmetic outside the database. Keeping it typed
+// makes the signal visible without incorrectly promoting it to Confirmed.
+type ArithmeticOracleProof struct {
+	BaselineHash       string `json:"baseline_hash"`
+	FirstIdentityHash  string `json:"first_identity_hash"`
+	FirstContrastHash  string `json:"first_contrast_hash"`
+	ReplayIdentityHash string `json:"replay_identity_hash"`
+	ReplayContrastHash string `json:"replay_contrast_hash"`
+	SecondIdentityHash string `json:"second_identity_hash"`
+	SecondContrastHash string `json:"second_contrast_hash"`
+	SameSurface        bool   `json:"same_surface"`
+	StableOrientation  bool   `json:"stable_orientation"`
+}
+
 type Candidate struct {
 	CrossOriginRead      bool
 	ScanID               string                        `json:"scan_id"`
@@ -124,6 +141,7 @@ type Candidate struct {
 	ExpectedEquivalent   bool                          `json:"expected_equivalent,omitempty"`
 	DirectTypedSignal    bool                          `json:"direct_typed_signal,omitempty"`
 	BooleanPairProof     *BooleanPairProof             `json:"boolean_pair_proof,omitempty"`
+	ArithmeticProof      *ArithmeticOracleProof        `json:"arithmetic_oracle_proof,omitempty"`
 	Observations         []Observation                 `json:"observations,omitempty"`
 	ProofPolicyVersion   string                        `json:"proof_policy_version,omitempty"`
 	RequestedProofType   ProofType                     `json:"requested_proof_type,omitempty"`
@@ -131,27 +149,28 @@ type Candidate struct {
 }
 
 type Result struct {
-	Confidence        ConfidenceLevel   `json:"confidence"`
-	Score             float64           `json:"score"`
-	Suppressed        bool              `json:"suppressed"`
-	DowngradeReasons  []DowngradeReason `json:"downgrade_reasons,omitempty"`
-	UpgradeReasons    []string          `json:"upgrade_reasons,omitempty"`
-	BaselineMatch     bool              `json:"baseline_match"`
-	SemanticDiff      bool              `json:"semantic_diff"`
-	StabilityRatio    float64           `json:"stability_ratio"`
-	PolymorphicOK     bool              `json:"polymorphic_ok"`
-	OASTConfirmed     bool              `json:"oast_confirmed"`
-	TimingConfirmed   bool              `json:"timing_confirmed"`
-	TypedReplayRatio  float64           `json:"typed_replay_ratio,omitempty"`
-	NegativeControlOK bool              `json:"negative_control_ok,omitempty"`
-	BooleanPairProof  *BooleanPairProof `json:"boolean_pair_proof,omitempty"`
-	ProofType         ProofType         `json:"proof_type,omitempty"`
-	ProofPolicy       string            `json:"proof_policy_version,omitempty"`
-	ProofSatisfied    bool              `json:"proof_satisfied"`
-	Observations      []Observation     `json:"observations,omitempty"`
-	SemanticDelta     SemanticDelta     `json:"semantic_delta"`
-	ErrorFingerprint  string            `json:"error_fingerprint,omitempty"`
-	VerifiedAt        time.Time         `json:"verified_at"`
+	Confidence        ConfidenceLevel        `json:"confidence"`
+	Score             float64                `json:"score"`
+	Suppressed        bool                   `json:"suppressed"`
+	DowngradeReasons  []DowngradeReason      `json:"downgrade_reasons,omitempty"`
+	UpgradeReasons    []string               `json:"upgrade_reasons,omitempty"`
+	BaselineMatch     bool                   `json:"baseline_match"`
+	SemanticDiff      bool                   `json:"semantic_diff"`
+	StabilityRatio    float64                `json:"stability_ratio"`
+	PolymorphicOK     bool                   `json:"polymorphic_ok"`
+	OASTConfirmed     bool                   `json:"oast_confirmed"`
+	TimingConfirmed   bool                   `json:"timing_confirmed"`
+	TypedReplayRatio  float64                `json:"typed_replay_ratio,omitempty"`
+	NegativeControlOK bool                   `json:"negative_control_ok,omitempty"`
+	BooleanPairProof  *BooleanPairProof      `json:"boolean_pair_proof,omitempty"`
+	ArithmeticProof   *ArithmeticOracleProof `json:"arithmetic_oracle_proof,omitempty"`
+	ProofType         ProofType              `json:"proof_type,omitempty"`
+	ProofPolicy       string                 `json:"proof_policy_version,omitempty"`
+	ProofSatisfied    bool                   `json:"proof_satisfied"`
+	Observations      []Observation          `json:"observations,omitempty"`
+	SemanticDelta     SemanticDelta          `json:"semantic_delta"`
+	ErrorFingerprint  string                 `json:"error_fingerprint,omitempty"`
+	VerifiedAt        time.Time              `json:"verified_at"`
 }
 
 type EventSink func(eventType, message string, payload map[string]interface{}) error

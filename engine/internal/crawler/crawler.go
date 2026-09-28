@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	pathpkg "path"
 	"regexp"
 	"sort"
 	"strings"
@@ -575,6 +576,9 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 
 	var discovered []DiscoveredEndpoint
 	if isHTML {
+		if rr.Response.StatusCode >= 200 && rr.Response.StatusCode < 300 {
+			c.adoptPassiveBrowserDependencies(pageURL, body, rr.Response.Headers)
+		}
 		discovered = append(discovered, ExtractFromHTML(pageURL, body)...)
 		discovered = append(discovered, ExtractManifestAndServiceWorker(pageURL, body)...)
 		// Inline <script> blocks frequently contain fetch/axios/XHR calls.
@@ -918,6 +922,13 @@ func (c *Crawler) enqueueCandidate(rawURL, method string, depth int, source Disc
 	// Skip enqueuing static binary assets (images, fonts, media, binary downloads, css) into the active crawl queue.
 	// They do not contain navigable links, HTML, or scripts to parse.
 	if isStaticMediaAsset(rawURL) {
+		// The binary itself is not crawlable, but its parent may expose a web
+		// server directory index. Infer a small, bounded ancestor chain from the
+		// observed asset instead of relying only on a fixed wordlist.
+		for _, directoryURL := range staticAssetDirectoryURLs(rawURL, 4) {
+			c.enqueueCandidate(directoryURL, http.MethodGet, depth, SourceStaticRoot, 0.75,
+				"parent directory inferred from observed static asset", budget, nil, rawURL)
+		}
 		return
 	}
 	// Endpoints discovered beyond the configured depth are still recorded for
@@ -1421,6 +1432,33 @@ func isStaticMediaAsset(rawURL string) bool {
 		}
 	}
 	return false
+}
+
+func staticAssetDirectoryURLs(rawURL string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.Path == "" {
+		return nil
+	}
+	dir := pathpkg.Dir(u.Path)
+	var out []string
+	seen := make(map[string]struct{})
+	for len(out) < limit && dir != "." && dir != "/" && dir != "" {
+		candidate := *u
+		candidate.Path = strings.TrimSuffix(dir, "/") + "/"
+		candidate.RawPath = ""
+		candidate.RawQuery = ""
+		candidate.Fragment = ""
+		value := candidate.String()
+		if _, ok := seen[value]; !ok {
+			seen[value] = struct{}{}
+			out = append(out, value)
+		}
+		dir = pathpkg.Dir(dir)
+	}
+	return out
 }
 
 func isApexWwwPair(h1, h2 string) bool {

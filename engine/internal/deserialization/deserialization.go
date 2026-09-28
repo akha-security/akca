@@ -41,6 +41,20 @@ func Probes() []DeserProbe {
 			Signal:   "java_serialized_stream",
 			Severity: "critical",
 		},
+		{
+			Language: "java",
+			Name:     "jackson_polymorphic_type",
+			Payload:  `["com.akca.NonExistingType",{"marker":"akca_deser_check"}]`,
+			Signal:   "java_polymorphic_type",
+			Severity: "high",
+		},
+		{
+			Language: "java",
+			Name:     "fastjson_autotype_probe",
+			Payload:  `{"@type":"com.akca.NonExistingType","marker":"akca_deser_check"}`,
+			Signal:   "java_polymorphic_type",
+			Severity: "high",
+		},
 
 		// --- Python Pickle ---
 		{
@@ -77,6 +91,13 @@ func Probes() []DeserProbe {
 		},
 		{
 			Language: "yaml",
+			Name:     "snakeyaml_unknown_type",
+			Payload:  `!!com.akca.NonExistingType {marker: akca_deser_check}`,
+			Signal:   "yaml_type_resolution",
+			Severity: "high",
+		},
+		{
+			Language: "yaml",
 			Name:     "ruby_yaml_gem_requirement",
 			Payload:  `--- !ruby/object:Gem::Requirement`,
 			Signal:   "ruby_yaml_deser",
@@ -90,6 +111,20 @@ func Probes() []DeserProbe {
 			Payload:  `{"$type":"System.Windows.Data.ObjectDataProvider, PresentationFramework","MethodName":"Start"}`,
 			Signal:   "dotnet_type_name_handling",
 			Severity: "critical",
+		},
+		{
+			Language: "dotnet",
+			Name:     "dotnet_json_net_unknown_type",
+			Payload:  `{"$type":"Akca.NonExistingType, Akca","marker":"akca_deser_check"}`,
+			Signal:   "dotnet_type_name_handling",
+			Severity: "high",
+		},
+		{
+			Language: "ruby",
+			Name:     "ruby_marshal_header_base64",
+			Payload:  "BAhJIhJha2NhX2Rlc2VyX2NoZWNrBjoGRVQ=",
+			Signal:   "ruby_marshal_stream",
+			Severity: "high",
 		},
 	}
 }
@@ -114,6 +149,14 @@ func AnalyzeResponse(baselineBody string, baselineStatus int, probeBody string, 
 		"java.io.streamcorruptedexception",
 		"deserialization of untrusted data",
 		"cannot resolve type id",
+		"could not resolve type id",
+		"invalid type id",
+		"auto type is not support",
+		"type not allowed",
+		"could not load type",
+		"unable to find assembly",
+		"undefined class/module",
+		"incompatible marshal file format",
 		"jsonmappingexception",
 		"yaml.constructorerror",
 	}

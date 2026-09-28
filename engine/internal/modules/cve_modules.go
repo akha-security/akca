@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	modcve "github.com/akha-security/akca/engine/internal/modules/cve"
@@ -14,7 +15,7 @@ var componentPatterns = []struct {
 	vendor, product, source string
 	pattern                 *regexp.Regexp
 }{
-	{"apache", "apache", "header", regexp.MustCompile(`(?i)apache[/ ]([0-9][\w.\-]+)`)},
+	{"apache", "http_server", "header", regexp.MustCompile(`(?i)apache[/ ]([0-9][\w.\-]+)`)},
 	{"nginx", "nginx", "header", regexp.MustCompile(`(?i)nginx[/ ]([0-9][\w.\-]+)`)},
 	{"php", "php", "header", regexp.MustCompile(`(?i)php[/ ]([0-9][\w.\-]+)`)},
 	{"php", "php-fpm", "header_or_body", regexp.MustCompile(`(?i)php-fpm[/ ]([0-9][\w.\-]+)`)},
@@ -22,6 +23,8 @@ var componentPatterns = []struct {
 	{"apache", "struts2", "header_or_body", regexp.MustCompile(`(?i)(?:struts2|apache struts)[ /-]([0-9][\w.\-]+)`)},
 	{"openssl", "openssl", "header_or_body", regexp.MustCompile(`(?i)openssl[/ ]([0-9][\w.\-]+)`)},
 	{"nghttp2", "nghttp2", "header_or_body", regexp.MustCompile(`(?i)nghttp2[/ ]([0-9][\w.\-]+)`)},
+	{"vercel", "nextjs", "header_or_body", regexp.MustCompile(`(?i)(?:next(?:\.?js)?|x-powered-by\s*[:=]\s*next\.js)[ /@-]+v?([0-9]+\.[0-9]+\.[0-9]+(?:[-+][\w.-]+)?)`)},
+	{"facebook", "react-server-dom", "body", regexp.MustCompile(`(?i)react-server-dom-(?:webpack|turbopack|parcel)[ /@-]+v?([0-9]+\.[0-9]+\.[0-9]+(?:[-+][\w.-]+)?)`)},
 }
 
 type detectedComponent struct {
@@ -69,6 +72,12 @@ func (r *Runner) runKnownCVE(ctx context.Context, target ScanTarget) []ModuleFin
 	rr, err := r.cachedEmptyProbe(ctx, target)
 	if err != nil {
 		return nil
+	}
+	if age := modcve.SnapshotAge(time.Now().UTC()); age > 45*24*time.Hour {
+		r.emitOnce("cve-catalog-stale", "coverage_gap", "Offline CVE catalog is older than 45 days; component vulnerability coverage may be incomplete", map[string]interface{}{
+			"module": "known_cve", "snapshot_version": modcve.EmbeddedSnapshotVersion,
+			"snapshot_date": modcve.EmbeddedSnapshotDate, "age_days": int(age.Hours() / 24),
+		})
 	}
 	components := detectComponents(rr.Response.Headers, rr.Response.Body)
 	return r.componentFindings(ctx, target, rr, components, "known_cve")
@@ -140,5 +149,5 @@ func (r *Runner) persistComponentMatch(c detectedComponent, match modcve.Catalog
 	matchRaw, _ := json.Marshal(match)
 	_ = r.db.SaveComponentCVEMatch(id, match.CVEID, string(matchRaw))
 	entries := []map[string]interface{}{{"cve_id": match.CVEID, "vendor": match.Vendor, "product": match.Product}}
-	_ = r.db.SeedCVECatalogIfEmpty(entries, "akca-embedded-v1")
+	_ = r.db.SeedCVECatalogIfEmpty(entries, modcve.EmbeddedSnapshotVersion)
 }

@@ -1,8 +1,10 @@
 package report
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -25,23 +27,34 @@ func NewExporter(builder *Builder, progress ProgressFunc) *Exporter {
 }
 
 func (e *Exporter) Export(w io.Writer, opts Options) error {
+	return e.ExportContext(context.Background(), w, opts)
+}
+
+func (e *Exporter) ExportContext(ctx context.Context, w io.Writer, opts Options) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	switch opts.Format {
 	case FormatHTML:
-		return e.ExportHTML(w, opts)
+		return e.ExportHTMLContext(ctx, w, opts)
 	case FormatJSON:
-		return e.ExportJSON(w, opts)
+		return e.ExportJSONContext(ctx, w, opts)
 	case FormatCSV:
-		return e.ExportCSV(w, opts)
+		return e.ExportCSVContext(ctx, w, opts)
 	case FormatMarkdown:
-		return e.ExportMarkdown(w, opts)
+		return e.ExportMarkdownContext(ctx, w, opts)
 	case FormatSARIF:
-		return e.ExportSARIF(w, opts)
+		return e.ExportSARIFContext(ctx, w, opts)
 	default:
 		return fmt.Errorf("unsupported format: %s", opts.Format)
 	}
 }
 
 func (e *Exporter) ExportSARIF(w io.Writer, opts Options) error {
+	return e.ExportSARIFContext(context.Background(), w, opts)
+}
+
+func (e *Exporter) ExportSARIFContext(ctx context.Context, w io.Writer, opts Options) error {
 	type sarifMessage struct {
 		Text string `json:"text"`
 	}
@@ -90,6 +103,9 @@ func (e *Exporter) ExportSARIF(w io.Writer, opts Options) error {
 	ruleSeen := map[string]struct{}{}
 	filter := e.builder.Filter(opts)
 	err := e.builder.db.IterateFindingsFiltered(filter, func(rec storage.FindingRecord) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		entry, ok := e.builder.ReportFinding(rec, opts)
 		if !ok {
 			return nil
@@ -138,11 +154,21 @@ func sarifLevel(severity string) string {
 }
 
 func (e *Exporter) ExportHTML(w io.Writer, opts Options) error {
+	return e.ExportHTMLContext(context.Background(), w, opts)
+}
+
+func (e *Exporter) ExportHTMLContext(ctx context.Context, w io.Writer, opts Options) error {
 	start := time.Now()
 	e.emit(opts, "header", 5, 0)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	meta, err := e.builder.BuildMeta(opts)
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if _, err := io.WriteString(w, htmlDocStart(meta)); err != nil {
@@ -156,6 +182,11 @@ func (e *Exporter) ExportHTML(w io.Writer, opts Options) error {
 	if err := renderHTMLSection(w, "metrics", "Scan Metrics", metricsHTML(meta.Metrics)); err != nil {
 		return err
 	}
+	if len(meta.Coverage) > 0 && opts.Template != TemplateExecutive {
+		if err := renderHTMLSection(w, "coverage", "Coverage diagnostics", coverageDiagnosticsHTML(meta.Coverage)); err != nil {
+			return err
+		}
+	}
 	if opts.Template != TemplateExecutive {
 		e.emit(opts, "api_keys", 25, 0)
 		if err := renderHTMLSection(w, "api_keys", "API Keys / Tokens", apiKeysHTML(meta.APIKeyValidations)); err != nil {
@@ -164,12 +195,12 @@ func (e *Exporter) ExportHTML(w io.Writer, opts Options) error {
 	}
 	if opts.Template == TemplateExecutive {
 		e.emit(opts, "executive_findings", 40, 0)
-		if err := e.streamExecutiveFindingsHTML(w, opts); err != nil {
+		if err := e.streamExecutiveFindingsHTML(ctx, w, opts); err != nil {
 			return err
 		}
 	} else {
 		e.emit(opts, "findings", 35, 0)
-		if err := e.streamFindingsHTML(w, opts, meta.Template); err != nil {
+		if err := e.streamFindingsHTML(ctx, w, opts, meta.Template); err != nil {
 			return err
 		}
 	}
@@ -205,16 +236,34 @@ func (e *Exporter) ExportHTML(w io.Writer, opts Options) error {
 	return err
 }
 
-func (e *Exporter) streamFindingsHTML(w io.Writer, opts Options, kind TemplateKind) error {
+var errFindingLimitReached = errors.New("report finding limit reached")
+
+func reportFindingLimit(opts Options) int {
+	if opts.MaxFindings > 0 {
+		return opts.MaxFindings
+	}
+	return 0
+}
+
+func (e *Exporter) streamFindingsHTML(ctx context.Context, w io.Writer, opts Options, kind TemplateKind) error {
 	filter := e.builder.Filter(opts)
+	limit := reportFindingLimit(opts)
 	total := e.builder.CountReportableFindings(opts)
+	displayTotal := total
+	if limit > 0 && displayTotal > limit {
+		displayTotal = limit
+	}
 	if total == 0 {
 		_, err := io.WriteString(w, `<section id="findings" class="report-section"><h2>Findings</h2><div class="card"><p class="meta-line">No findings matched the selected filters.</p></div></section>`)
 		return err
 	}
+	statusText := fmt.Sprintf("%d findings shown", total)
+	if limit > 0 && total > limit {
+		statusText = fmt.Sprintf("Showing first %d of %d findings", limit, total)
+	}
 	filterControls := `<div class="filter-controls">
 		<input type="text" id="vulnSearch" placeholder="🔍 Search findings by title, endpoint, parameter, or vulnerability class..." oninput="applyFilters()">
-		<span id="filterStatus" class="filter-status">` + fmt.Sprintf("%d findings shown", total) + `</span>
+		<span id="filterStatus" class="filter-status">` + statusText + `</span>
 		<div class="filter-buttons">
 			<button class="filter-btn active" onclick="setSeverityFilter('all', this)">All</button>
 			<button class="filter-btn" data-sev="critical" onclick="setSeverityFilter('critical', this)">Critical</button>
@@ -231,6 +280,12 @@ func (e *Exporter) streamFindingsHTML(w io.Writer, opts Options, kind TemplateKi
 	}
 	written := 0
 	err := e.builder.db.IterateFindingsFiltered(filter, func(rec storage.FindingRecord) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if limit > 0 && written >= limit {
+			return errFindingLimitReached
+		}
 		entry, ok := e.builder.ReportFinding(rec, opts)
 		if !ok {
 			return nil
@@ -240,23 +295,36 @@ func (e *Exporter) streamFindingsHTML(w io.Writer, opts Options, kind TemplateKi
 			return err
 		}
 		written++
-		pct := 35 + (written*45)/max(total, 1)
+		pct := 35 + (written*45)/max(displayTotal, 1)
 		e.emit(opts, "findings", pct, written)
 		return nil
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, errFindingLimitReached) {
 		return err
+	}
+	if limit > 0 && total > limit {
+		if _, err := io.WriteString(w, `<div class="card"><p class="meta-line">Partial report: additional findings were preserved in the local database and omitted from this fast interrupt report.</p></div>`); err != nil {
+			return err
+		}
 	}
 	_, err = io.WriteString(w, `</div></section>`)
 	return err
 }
 
-func (e *Exporter) streamExecutiveFindingsHTML(w io.Writer, opts Options) error {
+func (e *Exporter) streamExecutiveFindingsHTML(ctx context.Context, w io.Writer, opts Options) error {
 	filter := e.builder.Filter(opts)
+	limit := reportFindingLimit(opts)
+	written := 0
 	if _, err := io.WriteString(w, `<section class="report-section"><h2>Executive Findings Overview</h2><div class="card"><table class="data"><thead><tr><th>Severity</th><th>Title</th><th>Endpoint</th></tr></thead><tbody>`); err != nil {
 		return err
 	}
 	err := e.builder.db.IterateFindingsFiltered(filter, func(rec storage.FindingRecord) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if limit > 0 && written >= limit {
+			return errFindingLimitReached
+		}
 		entry, ok := e.builder.ReportFinding(rec, opts)
 		if !ok {
 			return nil
@@ -265,10 +333,13 @@ func (e *Exporter) streamExecutiveFindingsHTML(w io.Writer, opts Options) error 
 			template.HTMLEscapeString(entry.Severity),
 			template.HTMLEscapeString(entry.Title),
 			template.HTMLEscapeString(entry.EndpointURL))
-		_, err := io.WriteString(w, row)
-		return err
+		if _, err := io.WriteString(w, row); err != nil {
+			return err
+		}
+		written++
+		return nil
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, errFindingLimitReached) {
 		return err
 	}
 	_, err = io.WriteString(w, `</tbody></table></div></section>`)
@@ -276,14 +347,24 @@ func (e *Exporter) streamExecutiveFindingsHTML(w io.Writer, opts Options) error 
 }
 
 func (e *Exporter) ExportJSON(w io.Writer, opts Options) error {
+	return e.ExportJSONContext(context.Background(), w, opts)
+}
+
+func (e *Exporter) ExportJSONContext(ctx context.Context, w io.Writer, opts Options) error {
 	meta, err := e.builder.BuildMeta(opts)
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	e.emit(opts, "header", 10, 0)
 
 	type headerDoc struct {
 		SchemaVersion     string               `json:"schema_version"`
+		EngineVersion     string               `json:"engine_version"`
+		EngineCommit      string               `json:"engine_commit,omitempty"`
+		EngineBuildDate   string               `json:"engine_build_date,omitempty"`
 		GeneratedAt       interface{}          `json:"generated_at"`
 		Template          TemplateKind         `json:"template"`
 		Format            Format               `json:"format"`
@@ -298,11 +379,13 @@ func (e *Exporter) ExportJSON(w io.Writer, opts Options) error {
 		PathDiscoveries   []PathDiscoveryEntry `json:"path_discoveries,omitempty"`
 		Coverage          []CoverageEntry      `json:"coverage,omitempty"`
 		ManualLeads       []ManualLeadEntry    `json:"manual_leads,omitempty"`
+		Warnings          []string             `json:"warnings,omitempty"`
 		AppendixNotes     string               `json:"appendix_notes,omitempty"`
 	}
 	hdr := headerDoc{
 		SchemaVersion: meta.SchemaVersion,
-		GeneratedAt:   meta.GeneratedAt, Template: meta.Template, Format: meta.Format,
+		EngineVersion: meta.EngineVersion, EngineCommit: meta.EngineCommit, EngineBuildDate: meta.EngineBuildDate,
+		GeneratedAt: meta.GeneratedAt, Template: meta.Template, Format: meta.Format,
 		Partial: meta.Partial, Title: meta.Title, Summary: meta.Summary, Scope: meta.Scope,
 		Metrics: meta.Metrics, RootCauseGroups: meta.RootCauseGroups,
 		APIKeyValidations: meta.APIKeyValidations, AppendixNotes: meta.AppendixNotes,
@@ -310,6 +393,7 @@ func (e *Exporter) ExportJSON(w io.Writer, opts Options) error {
 		PathDiscoveries: meta.PathDiscoveries,
 		Coverage:        meta.Coverage,
 		ManualLeads:     meta.ManualLeads,
+		Warnings:        meta.Warnings,
 	}
 	hdrBytes, err := json.Marshal(hdr)
 	if err != nil {
@@ -321,9 +405,20 @@ func (e *Exporter) ExportJSON(w io.Writer, opts Options) error {
 
 	filter := e.builder.Filter(opts)
 	total, _ := e.builder.db.CountFindingsFiltered(filter)
+	limit := reportFindingLimit(opts)
+	displayTotal := total
+	if limit > 0 && displayTotal > limit {
+		displayTotal = limit
+	}
 	written := 0
 	first := true
 	err = e.builder.db.IterateFindingsFiltered(filter, func(rec storage.FindingRecord) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if limit > 0 && written >= limit {
+			return errFindingLimitReached
+		}
 		entry, ok := e.builder.ReportFinding(rec, opts)
 		if !ok {
 			return nil
@@ -342,11 +437,11 @@ func (e *Exporter) ExportJSON(w io.Writer, opts Options) error {
 			return err
 		}
 		written++
-		pct := 10 + (written*85)/max(total, 1)
+		pct := 10 + (written*85)/max(displayTotal, 1)
 		e.emit(opts, "findings", pct, written)
 		return nil
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, errFindingLimitReached) {
 		return err
 	}
 	e.emit(opts, "footer", 100, written)
@@ -355,6 +450,10 @@ func (e *Exporter) ExportJSON(w io.Writer, opts Options) error {
 }
 
 func (e *Exporter) ExportCSV(w io.Writer, opts Options) error {
+	return e.ExportCSVContext(context.Background(), w, opts)
+}
+
+func (e *Exporter) ExportCSVContext(ctx context.Context, w io.Writer, opts Options) error {
 	cols := opts.CSVColumns
 	if len(cols) == 0 {
 		cols = []string{"id", "title", "severity", "confidence", "vuln_class", "cwe", "owasp_top_10_2025", "endpoint_url", "parameter", "description"}
@@ -367,8 +466,19 @@ func (e *Exporter) ExportCSV(w io.Writer, opts Options) error {
 
 	filter := e.builder.Filter(opts)
 	total, _ := e.builder.db.CountFindingsFiltered(filter)
+	limit := reportFindingLimit(opts)
+	displayTotal := total
+	if limit > 0 && displayTotal > limit {
+		displayTotal = limit
+	}
 	written := 0
 	err := e.builder.db.IterateFindingsFiltered(filter, func(rec storage.FindingRecord) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if limit > 0 && written >= limit {
+			return errFindingLimitReached
+		}
 		entry, ok := e.builder.ReportFinding(rec, opts)
 		if !ok {
 			return nil
@@ -380,19 +490,29 @@ func (e *Exporter) ExportCSV(w io.Writer, opts Options) error {
 		written++
 		if written%100 == 0 {
 			cw.Flush()
-			pct := 5 + (written*90)/max(total, 1)
+			pct := 5 + (written*90)/max(displayTotal, 1)
 			e.emit(opts, "rows", pct, written)
 		}
 		return nil
 	})
 	cw.Flush()
 	e.emit(opts, "footer", 100, written)
+	if errors.Is(err, errFindingLimitReached) {
+		return nil
+	}
 	return err
 }
 
 func (e *Exporter) ExportMarkdown(w io.Writer, opts Options) error {
+	return e.ExportMarkdownContext(context.Background(), w, opts)
+}
+
+func (e *Exporter) ExportMarkdownContext(ctx context.Context, w io.Writer, opts Options) error {
 	meta, err := e.builder.BuildMeta(opts)
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	e.emit(opts, "header", 10, 0)
@@ -424,6 +544,23 @@ func (e *Exporter) ExportMarkdown(w io.Writer, opts Options) error {
 			return err
 		}
 	}
+	if len(meta.Coverage) > 0 {
+		if _, err := io.WriteString(w, "\n## Coverage Diagnostics\n\n"); err != nil {
+			return err
+		}
+		for _, item := range meta.Coverage {
+			detail := item.Reason
+			if detail == "" && len(item.Reasons) > 0 {
+				detail = strings.Join(item.Reasons, ", ")
+			}
+			if detail != "" {
+				detail = " — " + detail
+			}
+			if _, err := fmt.Fprintf(w, "- **%s**: %s%s\n", item.EventType, item.Summary, detail); err != nil {
+				return err
+			}
+		}
+	}
 	if len(meta.APIKeyValidations) > 0 {
 		e.emit(opts, "api_keys", 20, 0)
 		if _, err := io.WriteString(w, "\n## API Key / Token Validation\n\n"); err != nil {
@@ -437,11 +574,22 @@ func (e *Exporter) ExportMarkdown(w io.Writer, opts Options) error {
 	}
 	filter := e.builder.Filter(opts)
 	total, _ := e.builder.db.CountFindingsFiltered(filter)
+	limit := reportFindingLimit(opts)
+	displayTotal := total
+	if limit > 0 && displayTotal > limit {
+		displayTotal = limit
+	}
 	written := 0
 	if _, err := io.WriteString(w, "\n## Findings\n\n"); err != nil {
 		return err
 	}
 	err = e.builder.db.IterateFindingsFiltered(filter, func(rec storage.FindingRecord) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if limit > 0 && written >= limit {
+			return errFindingLimitReached
+		}
 		entry, ok := e.builder.ReportFinding(rec, opts)
 		if !ok {
 			return nil
@@ -450,10 +598,13 @@ func (e *Exporter) ExportMarkdown(w io.Writer, opts Options) error {
 			return err
 		}
 		written++
-		pct := 25 + (written*70)/max(total, 1)
+		pct := 25 + (written*70)/max(displayTotal, 1)
 		e.emit(opts, "findings", pct, written)
 		return nil
 	})
+	if errors.Is(err, errFindingLimitReached) {
+		err = nil
+	}
 	if err == nil && len(meta.ManualLeads) > 0 {
 		if _, writeErr := io.WriteString(w, "\n## Manual Leads\n\n> These leads were not automatically proven and are not bug-bounty submission ready.\n\n"); writeErr != nil {
 			return writeErr

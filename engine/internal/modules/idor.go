@@ -19,21 +19,28 @@ func (r *Runner) runIDOR(ctx context.Context, target ScanTarget) []ModuleFinding
 		r.emitSkip("idor", target, reason)
 		return nil
 	}
-	if len(r.cfg.RoleProfiles) >= 2 && len(r.cfg.ObjectAuthorizationPolicies) > 0 {
-		if out := r.runIDORRoleCompare(ctx, target); len(out) > 0 {
-			return out
+	if len(r.cfg.RoleProfiles) >= 2 {
+		if len(r.cfg.ObjectAuthorizationPolicies) > 0 {
+			if out := r.runIDORRoleCompare(ctx, target); len(out) > 0 {
+				return out
+			}
 		}
+		r.runIDORHeuristicCoverage(ctx, target)
+		r.emitOnce("coverage_gap:idor:ownership_contract", "coverage_gap", "BOLA ownership proof contract unavailable or unsatisfied", map[string]interface{}{
+			"module": "idor", "endpoint": target.EndpointURL, "required_role_profiles": 2,
+			"configured_role_profiles": len(r.cfg.RoleProfiles), "ownership_policies": len(r.cfg.ObjectAuthorizationPolicies),
+		})
+		return nil
+	}
+	if out := r.runIDORHeuristic(ctx, target); len(out) > 0 {
+		return out
 	}
 	r.runIDORHeuristicCoverage(ctx, target)
-	r.emitOnce("coverage_gap:idor:ownership_contract", "coverage_gap", "BOLA ownership proof contract unavailable or unsatisfied", map[string]interface{}{
-		"module": "idor", "endpoint": target.EndpointURL, "required_role_profiles": 2,
-		"configured_role_profiles": len(r.cfg.RoleProfiles), "ownership_policies": len(r.cfg.ObjectAuthorizationPolicies),
-	})
 	return nil
 }
 
 func (r *Runner) runIDORHeuristicCoverage(ctx context.Context, target ScanTarget) {
-	if !strings.EqualFold(target.Method, http.MethodGet) || strings.TrimSpace(target.Parameter) == "" {
+	if strings.TrimSpace(target.Parameter) == "" {
 		return
 	}
 	if strings.ContainsAny(target.EndpointURL, "{}") {
@@ -41,7 +48,7 @@ func (r *Runner) runIDORHeuristicCoverage(ctx context.Context, target ScanTarget
 	}
 	paramLower := strings.ToLower(target.Parameter)
 	isIDParam := false
-	for _, kw := range []string{"id", "user_id", "uid", "account", "account_id", "doc", "document", "order", "order_id", "profile", "profile_id", "file_id", "uuid", "user", "member", "ref", "key", "number", "item", "record", "obj", "object", "entity", "resource", "invoice", "ticket", "patient", "customer", "employee", "pid", "cid"} {
+	for _, kw := range []string{"id", "user_id", "uid", "account", "account_id", "doc", "document", "order", "order_id", "profile", "profile_id", "file_id", "uuid", "user", "member", "ref", "key", "number", "item", "record", "obj", "object", "entity", "resource", "invoice", "ticket", "patient", "customer", "employee", "pid", "cid", "tenant_id", "org_id", "workspace_id", "team_id", "project_id", "company_id", "organization_id", "group_id", "folder_id", "channel_id"} {
 		if paramLower == kw || strings.HasSuffix(paramLower, "_id") || strings.HasSuffix(paramLower, "id") {
 			isIDParam = true
 			break
@@ -117,7 +124,7 @@ func (r *Runner) runIDORHeuristicCoverage(ctx context.Context, target ScanTarget
 func (r *Runner) runIDORHeuristic(ctx context.Context, target ScanTarget) []ModuleFinding {
 	paramLower := strings.ToLower(target.Parameter)
 	isIDParam := false
-	for _, kw := range []string{"id", "user_id", "uid", "account", "account_id", "doc", "document", "order", "order_id", "profile", "profile_id", "file_id", "uuid", "user", "member", "ref", "key", "number", "item", "record", "obj", "object", "entity", "resource", "invoice", "ticket", "patient", "customer", "employee", "pid", "cid"} {
+	for _, kw := range []string{"id", "user_id", "uid", "account", "account_id", "doc", "document", "order", "order_id", "profile", "profile_id", "file_id", "uuid", "user", "member", "ref", "key", "number", "item", "record", "obj", "object", "entity", "resource", "invoice", "ticket", "patient", "customer", "employee", "pid", "cid", "tenant_id", "org_id", "workspace_id", "team_id", "project_id", "company_id", "organization_id", "group_id", "folder_id", "channel_id"} {
 		if paramLower == kw || strings.HasSuffix(paramLower, "_id") || strings.HasSuffix(paramLower, "id") {
 			isIDParam = true
 			break

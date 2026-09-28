@@ -56,7 +56,7 @@ func xssSignalConfirmed(p payloadgen.Payload, body, baseline, signal string) boo
 	switch signal {
 	case "reflected_encoded":
 		return false
-	case "reflected":
+	case "reflected", "reflected_browser_execution":
 		if injectionPayloadReflected(p.Value, body, baseline) {
 			if sqliErrorRe.MatchString(body) {
 				return false

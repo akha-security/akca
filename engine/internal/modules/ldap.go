@@ -19,6 +19,8 @@ var ldapErrorSignatures = []string{
 	"bad search filter", "protocol error occurred in LDAP",
 	"supplied argument is not a valid ldap", "namingException",
 	"org.apache.directory", "system.directoryservices", "net.sourceforge.jldap",
+	"filter error", "invalid attribute description", "size limit exceeded",
+	"no such object", "ldap: syntax error", "operations error",
 }
 
 func ldapErrorSignal(body, baseline string) bool {
@@ -55,6 +57,7 @@ func (r *Runner) runLDAPInjection(ctx context.Context, target ScanTarget) []Modu
 		{value: "*(|(mail=*))", variant: "attribute_enumeration", errorPattern: "ldap_attribute_enum"},
 		{value: "x' || '1'='1", variant: "quote_breakout", errorPattern: "ldap_quote_breakout"},
 		{value: "*)(cn=*))%00", variant: "null_byte_filter", errorPattern: "ldap_filter_breakout"},
+		{value: ")(cn=*))(|(cn=*", variant: "boolean_true_filter", errorPattern: "ldap_boolean_true"},
 	}
 
 	var out []ModuleFinding
@@ -89,7 +92,43 @@ func (r *Runner) runLDAPInjection(ctx context.Context, target ScanTarget) []Modu
 				f.Severity = "high"
 				f.Description = fmt.Sprintf("Target parameter '%s' triggered an LDAP directory error signature ('%s') when probed with '%s'.", target.Parameter, matchedSig, p.value)
 				r.recordFinding(ctx, &out, f, "ldap", signal)
-				break
+				return out
+			}
+		}
+	}
+
+	// Blind Boolean Differential Check
+	if len(out) == 0 && baseline.Response.StatusCode >= 200 && baseline.Response.StatusCode < 400 {
+		truePayload := "*)(objectClass=*"
+		falsePayload := "*)(&(objectClass=akca_nonexistent_xyz))"
+
+		trueRR, errTrue := r.probe(ctx, target, truePayload)
+		falseRR, errFalse := r.probe(ctx, target, falsePayload)
+
+		if errTrue == nil && errFalse == nil && !isInfrastructureError(trueRR.Response.StatusCode) && !isInfrastructureError(falseRR.Response.StatusCode) {
+			trueLen := len(trueRR.Response.Body)
+			falseLen := len(falseRR.Response.Body)
+			diff := trueLen - falseLen
+			if diff < 0 {
+				diff = -diff
+			}
+
+			// Condition: True probe maintains successful response and differs significantly from False probe
+			if (trueRR.Response.StatusCode == 200 && falseRR.Response.StatusCode != 200) ||
+				(diff > 40 && resourceFingerprint(trueRR.Response.Body) != resourceFingerprint(falseRR.Response.Body)) {
+				// Re-verify with negative control
+				reTrue, reErr := r.probe(ctx, target, truePayload)
+				if reErr == nil && reTrue.Response.StatusCode == trueRR.Response.StatusCode {
+					signal := "ldap_blind_boolean"
+					pObj := defaultPayload("ldap", "blind_boolean", truePayload, signal)
+					f := r.verifyAndBuild(ctx, "ldap", target, pObj, falseRR, reTrue, signal, false, false, "", "")
+					if f != nil {
+						f.Title = "LDAP Injection (Blind Boolean-Based)"
+						f.Severity = "high"
+						f.Description = fmt.Sprintf("Target parameter '%s' exhibits differential behavior between boolean LDAP filter conditions ('%s' vs '%s').", target.Parameter, truePayload, falsePayload)
+						r.recordFinding(ctx, &out, f, "ldap", signal)
+					}
+				}
 			}
 		}
 	}

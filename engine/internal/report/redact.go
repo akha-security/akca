@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-var secretHeaderRE = regexp.MustCompile(`(?im)((?:authorization|proxy-authorization|cookie|set-cookie|x-api-key)\s*:\s*)[^\r\n]+`)
+var secretHeaderRE = regexp.MustCompile(`(?im)((?:authorization|proxy-authorization|x-api-key)\s*:\s*)[^\r\n]+`)
 var secretAssignmentRE = regexp.MustCompile(`(?i)((?:["']?)(?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret|token)(?:["']?)\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^&\s,;}]+)`)
 
 func RedactString(s string) string {

@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/akha-security/akca/engine/internal/scope"
+	"github.com/akha-security/akca/engine/internal/sensitivedata"
 	"github.com/akha-security/akca/engine/internal/storage"
 )
 
@@ -29,6 +30,7 @@ type Engine struct {
 	reachable      atomic.Int64
 	authRestricted atomic.Int64
 	archives       atomic.Int64
+	directoryLists atomic.Int64
 	failures       atomic.Int64
 }
 
@@ -135,11 +137,12 @@ func (e *Engine) RunTasks(ctx context.Context, tasks []FuzzTask) error {
 		"scan_id": e.scanID, "queue_403": e.queue403.Metrics(),
 	})
 	_ = e.emit("fuzzing_discovery_summary", "directory and path fuzzing summary", map[string]interface{}{
-		"scan_id": e.scanID,
-		"probed":  e.probed.Load(),
-		"live":    e.reachable.Load(),
-		"blocked": e.authRestricted.Load(),
-		"archive": e.archives.Load(),
+		"scan_id":            e.scanID,
+		"probed":             e.probed.Load(),
+		"live":               e.reachable.Load(),
+		"blocked":            e.authRestricted.Load(),
+		"archive":            e.archives.Load(),
+		"directory_listings": e.directoryLists.Load(),
 	})
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -249,6 +252,15 @@ func (e *Engine) fuzzOne(ctx context.Context, task FuzzTask) []FuzzTask {
 	}
 
 	signal := ClassifySignal(status, isSoft404, isArchive)
+	listingEvidence, isDirectoryListing := sensitivedata.DetectDirectoryListing(body)
+	if status == http.StatusOK && !isSoft404 && isDirectoryListing {
+		signal = "directory_listing"
+		e.directoryLists.Add(1)
+		_ = e.emit("directory_listing_observed", "directory listing exposed", map[string]interface{}{
+			"scan_id": e.scanID, "url": task.URL, "entries": listingEvidence.EntryCount,
+			"signature": listingEvidence.Signature,
+		})
+	}
 
 	result := FuzzResult{
 		URL: task.URL, Method: task.Method, StatusCode: status,

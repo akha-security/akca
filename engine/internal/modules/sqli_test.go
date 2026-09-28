@@ -817,7 +817,7 @@ func TestNativeTargetValueNestedJSON(t *testing.T) {
 	}
 }
 
-func TestSQLiNumericArithmeticAloneDoesNotProveSQL(t *testing.T) {
+func TestSQLiNumericArithmeticOracleIsVisibleAsPotential(t *testing.T) {
 	c := &groupBClient{
 		responses: map[string]string{
 			"__default__":       "user: admin profile",
@@ -845,8 +845,10 @@ func TestSQLiNumericArithmeticAloneDoesNotProveSQL(t *testing.T) {
 		},
 	}
 	findings := r.numericArithmeticSQLiProbe(context.Background(), target, baseRR)
-	if len(findings) != 0 {
-		t.Fatal("math evaluation without SQL-specific proof must remain a discovery")
+	if len(findings) != 1 || findings[0].Confidence != verification.Potential ||
+		findings[0].Evidence.Signal != "numeric_arithmetic_oracle" ||
+		findings[0].Evidence.Verification.ProofType != verification.ProofArithmeticOracle {
+		t.Fatalf("stable arithmetic oracle must remain visible as Potential: %+v", findings)
 	}
 }
 
@@ -857,13 +859,19 @@ func TestSQLiBooleanPairsIncludeLikeAndUncommentedNumeric(t *testing.T) {
 		Location:    "query",
 	}
 	pairs := sqliBooleanPairs("test-scan", target)
-	var foundLike, foundNumericDirect bool
+	var foundLike, foundBalancedLike, foundNumericDirect, foundAuthArithmetic bool
 	for _, p := range pairs {
 		if strings.Contains(p.variant, "like") {
 			foundLike = true
 		}
+		if p.variant == "boolean_like_percent_balanced" {
+			foundBalancedLike = true
+		}
 		if p.variant == "boolean_numeric_and_direct" {
 			foundNumericDirect = true
+		}
+		if p.variant == "boolean_auth_arithmetic_or" {
+			foundAuthArithmetic = true
 		}
 	}
 	if !foundLike {
@@ -871,5 +879,35 @@ func TestSQLiBooleanPairsIncludeLikeAndUncommentedNumeric(t *testing.T) {
 	}
 	if !foundNumericDirect {
 		t.Fatalf("expected boolean_numeric_and_direct in sqliBooleanPairs")
+	}
+	if !foundBalancedLike || !foundAuthArithmetic {
+		t.Fatalf("expected balanced LIKE and arithmetic auth pairs")
+	}
+}
+
+func TestBooleanSQLiSemanticDiffIgnoresLargeCommentPadding(t *testing.T) {
+	padding := strings.Repeat("<!-- stable padding -->", 500)
+	base := "<html><body><div class=user>admin</div>" + padding + "</body></html>"
+	trueBody := base
+	falseBody := "<html><body><div class=empty>No users</div>" + padding + "</body></html>"
+	if bodyDiffRatio(trueBody, falseBody) >= 0.03 {
+		t.Fatal("fixture must demonstrate a raw body delta hidden by padding")
+	}
+	if !booleanSQLiConfirmed(trueBody, falseBody, base) {
+		t.Fatal("visible semantic difference must survive HTML comment padding")
+	}
+}
+
+func TestPrioritizeSQLiPayloadsIncludesNativeAppendMixedQuote(t *testing.T) {
+	payloads := prioritizeSQLiPayloads(nil, "", false, "laptop")
+	found := false
+	for _, payload := range payloads {
+		if payload.Value == `laptop'"` {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected original-value mixed quote SQL error probe")
 	}
 }

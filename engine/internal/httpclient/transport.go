@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -20,12 +21,56 @@ func (c *Client) ReserveBrowserResource(ctx context.Context, rawURL, transport s
 	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
 		return ErrOutsideScope
 	}
-	for _, domain := range c.cfg.BrowserResourceDomains {
-		if strings.EqualFold(strings.TrimSpace(domain), u.Hostname()) {
-			return reserveNetwork(ctx, u, c.limiter, &c.networkAttempts, c.cfg.RequestBudget)
-		}
+	host := strings.ToLower(u.Hostname())
+	c.browserDomainMu.RLock()
+	_, allowed := c.browserDomains[host]
+	c.browserDomainMu.RUnlock()
+	if allowed {
+		return reserveNetwork(ctx, u, c.limiter, &c.networkAttempts, c.cfg.RequestBudget)
 	}
 	return ErrOutsideScope
+}
+
+// AdmitBrowserResourceDomains adds exact passive dependency hosts learned from
+// a successful in-scope HTML document. It does not expand scanner scope: the
+// browser guard permits only GET/HEAD Script, Stylesheet, Image, Font and Media
+// requests and strips credentials before this method is consulted.
+func (c *Client) AdmitBrowserResourceDomains(domains []string) []string {
+	if c == nil {
+		return nil
+	}
+	c.browserDomainMu.Lock()
+	defer c.browserDomainMu.Unlock()
+	var added []string
+	for _, domain := range domains {
+		domain = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(domain, ".")))
+		if !safeLearnedBrowserHost(domain) || len(c.browserDomains) >= 32 {
+			continue
+		}
+		if _, exists := c.browserDomains[domain]; exists {
+			continue
+		}
+		c.browserDomains[domain] = struct{}{}
+		added = append(added, domain)
+	}
+	return added
+}
+
+func safeLearnedBrowserHost(host string) bool {
+	if host == "" || strings.ContainsAny(host, "/\\@:#?[]") {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSuffix(host, "."))
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") ||
+		strings.HasSuffix(lower, ".local") || strings.HasSuffix(lower, ".internal") ||
+		strings.HasSuffix(lower, ".lan") {
+		return false
+	}
+	if ip := net.ParseIP(lower); ip != nil {
+		return !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast() &&
+			!ip.IsLinkLocalMulticast() && !ip.IsUnspecified() && !ip.IsMulticast()
+	}
+	return strings.Contains(lower, ".")
 }
 
 // WireTransport intercepts every physical outbound HTTP transaction (including retries and redirects).

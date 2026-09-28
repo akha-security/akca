@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -49,7 +51,13 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p ../dist
-          go build -buildvcs=false -trimpath -ldflags="-s -w" -o "../dist/${{ matrix.artifact }}" ./cmd/akca
+          build_date="$(git show -s --format=%cI "${GITHUB_SHA}")"
+          go build -buildvcs=false -trimpath -ldflags="-s -w -X github.com/akha-security/akca/engine/internal/branding.CommitSHA=${GITHUB_SHA} -X github.com/akha-security/akca/engine/internal/branding.BuildDate=${build_date}" -o "../dist/${{ matrix.artifact }}" ./cmd/akca
+
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/${{ matrix.artifact }}
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

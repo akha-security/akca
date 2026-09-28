@@ -46,6 +46,13 @@ var takeoverFingerprints = []takeoverFingerprint{
 	{provider: "Tictail", cnameSubstr: "domains.tictail.com", errorMsg: "to be used with", severity: "high"},
 	{provider: "SmartJobBoard", cnameSubstr: "smartjobboard.com", errorMsg: "This job board currently does not exist", severity: "high"},
 	{provider: "Landingi", cnameSubstr: "landingi.com", errorMsg: "It looks like you’re lost", severity: "high"},
+	{provider: "AWS CloudFront", cnameSubstr: "cloudfront.net", errorMsg: "Bad request", severity: "high"},
+	{provider: "AWS Elastic Beanstalk", cnameSubstr: "elasticbeanstalk.com", errorMsg: "404 Not Found", severity: "high"},
+	{provider: "Azure CDN", cnameSubstr: "azureedge.net", errorMsg: "<h1>404</h1>", severity: "high"},
+	{provider: "Google Cloud Run", cnameSubstr: "run.app", errorMsg: "could not find the app", severity: "high"},
+	{provider: "Render", cnameSubstr: "onrender.com", errorMsg: "not found", severity: "high"},
+	{provider: "Canny", cnameSubstr: "canny.io", errorMsg: "Company not found", severity: "high"},
+	{provider: "Tilda", cnameSubstr: "tilda.ws", errorMsg: "Please renew your subscription", severity: "high"},
 }
 
 func (r *Runner) runCloudTakeover(ctx context.Context, target ScanTarget) []ModuleFinding {

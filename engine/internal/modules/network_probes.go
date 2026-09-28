@@ -3,7 +3,9 @@ package modules
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha1"
 	"crypto/tls"
 	"crypto/x509"
@@ -27,12 +29,16 @@ import (
 )
 
 type TLSInspection struct {
-	Signals            []string
-	Protocol           string
-	Cipher             string
-	CertificateSubject string
-	CertificateIssuer  string
-	CertificateExpiry  time.Time
+	Signals              []string
+	Protocol             string
+	Cipher               string
+	CertificateSubject   string
+	CertificateIssuer    string
+	CertificateExpiry    time.Time
+	CertificateSignature string
+	PublicKeyBits        int
+	OCSPStapled          bool
+	NegotiatedProtocol   string
 }
 
 type SmugglingProbeResult struct {
@@ -68,12 +74,32 @@ func (p *networkTLSInspector) Inspect(ctx context.Context, rawURL string) (TLSIn
 	}
 	state := conn.ConnectionState()
 	_ = conn.Close()
-	inspection := TLSInspection{Protocol: tlsVersionName(state.Version), Cipher: tls.CipherSuiteName(state.CipherSuite)}
+	inspection := TLSInspection{
+		Protocol: tlsVersionName(state.Version), Cipher: tls.CipherSuiteName(state.CipherSuite),
+		OCSPStapled: len(state.OCSPResponse) > 0, NegotiatedProtocol: state.NegotiatedProtocol,
+	}
 	if len(state.PeerCertificates) > 0 {
 		leaf := state.PeerCertificates[0]
 		inspection.CertificateSubject = leaf.Subject.String()
 		inspection.CertificateIssuer = leaf.Issuer.String()
 		inspection.CertificateExpiry = leaf.NotAfter.UTC()
+		inspection.CertificateSignature = leaf.SignatureAlgorithm.String()
+		switch key := leaf.PublicKey.(type) {
+		case *rsa.PublicKey:
+			inspection.PublicKeyBits = key.N.BitLen()
+			if inspection.PublicKeyBits < 2048 {
+				inspection.Signals = append(inspection.Signals, "weak_certificate_public_key")
+			}
+		case *ecdsa.PublicKey:
+			inspection.PublicKeyBits = key.Curve.Params().BitSize
+			if inspection.PublicKeyBits < 256 {
+				inspection.Signals = append(inspection.Signals, "weak_certificate_public_key")
+			}
+		}
+		switch leaf.SignatureAlgorithm {
+		case x509.MD2WithRSA, x509.MD5WithRSA, x509.SHA1WithRSA, x509.DSAWithSHA1, x509.ECDSAWithSHA1:
+			inspection.Signals = append(inspection.Signals, "weak_certificate_signature")
+		}
 		now := time.Now()
 		if now.Before(leaf.NotBefore) {
 			inspection.Signals = append(inspection.Signals, "certificate_not_yet_valid")
@@ -102,6 +128,9 @@ func (p *networkTLSInspector) Inspect(ctx context.Context, rawURL string) (TLSIn
 	if weakCipher(state.CipherSuite) {
 		inspection.Signals = append(inspection.Signals, "weak_cipher")
 	}
+	if deprecatedCipher(state.CipherSuite) {
+		inspection.Signals = append(inspection.Signals, "deprecated_cipher")
+	}
 	for _, legacy := range []uint16{tls.VersionTLS10, tls.VersionTLS11} {
 		legacyConn, legacyErr := p.dial(ctx, address, u.Hostname(), legacy, legacy, nil)
 		if legacyErr == nil {
@@ -123,6 +152,11 @@ func (p *networkTLSInspector) Inspect(ctx context.Context, rawURL string) (TLSIn
 	}
 	inspection.Signals = uniqueStrings(inspection.Signals)
 	return inspection, nil
+}
+
+func deprecatedCipher(id uint16) bool {
+	name := tls.CipherSuiteName(id)
+	return strings.Contains(name, "_CBC_") || strings.HasPrefix(name, "TLS_RSA_")
 }
 
 func (p *networkTLSInspector) dial(ctx context.Context, address, serverName string, minVersion, maxVersion uint16, suites []uint16) (*tls.Conn, error) {

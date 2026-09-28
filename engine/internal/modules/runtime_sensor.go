@@ -116,6 +116,7 @@ func (r *Runner) runtimeSinkProof(ctx context.Context, module string, target Sca
 	)
 	result := r.verifier.Verify(candidate)
 	if result.Suppressed || !result.ProofSatisfied {
+		r.recordVerificationOutcome(target, module, signal, result)
 		return nil, true
 	}
 	return &ModuleFinding{

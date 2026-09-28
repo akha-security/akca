@@ -156,6 +156,7 @@ func TestHTMLUsesComprehensiveScannerLayout(t *testing.T) {
 		`data-evidence-tab="response"`, "OUTBOUND", "INBOUND", "Captured transaction", "Print / PDF",
 		"SQLSTATE[42000]", "Content-Type: text/plain", "HTTP/1.1 200 OK",
 		`data-evidence-tab="both"`, "Show full content", `alt="AKCA logo"`, "data:image/png;base64,",
+		"Coverage diagnostics", "Browser dependency blocked", "resource_policy",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("comprehensive scanner layout omitted %q", want)
@@ -203,7 +204,7 @@ func TestPathDiscoverySectionUsesFuzzResults(t *testing.T) {
 	}
 }
 
-func TestCoverageDiagnosticsMarkReportPartialWithoutDedicatedSection(t *testing.T) {
+func TestCoverageDiagnosticsMarkReportPartialAndRemainVisible(t *testing.T) {
 	db, scanID := setupReportDB(t, 0)
 	defer db.Close()
 	if err := db.SaveTimelineEvent(scanID, "module_readiness", "GraphQL is not configured", `{"module":"graphql","configured":false,"reason":"no endpoint"}`); err != nil {
@@ -212,13 +213,16 @@ func TestCoverageDiagnosticsMarkReportPartialWithoutDedicatedSection(t *testing.
 	if err := db.SaveTimelineEvent(scanID, "coverage_gap", "Crawler budget exhausted", `{"phase":"crawl","reason":"request_budget","endpoint":"https://example.com/private"}`); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SaveTimelineEvent(scanID, "verification_suppressed", "Verification candidate was suppressed by proof policy", `{"module":"sqli","endpoint":"https://example.com/search?q=x","proof_type":"boolean_pair","confidence":"Suppressed","score":0.12,"reasons":["waf_block_page","negative_control_triggered"]}`); err != nil {
+		t.Fatal(err)
+	}
 
 	builder := NewBuilder(evidencestore.New(db), db)
 	meta, err := builder.BuildMeta(Options{ScanID: scanID, Template: TemplateInternal, Redact: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !meta.Partial || len(meta.Coverage) != 2 || len(meta.Warnings) == 0 {
+	if !meta.Partial || len(meta.Coverage) != 3 || len(meta.Warnings) == 0 {
 		t.Fatalf("coverage diagnostics were not reflected in report metadata: %+v", meta)
 	}
 	var htmlBuf bytes.Buffer
@@ -229,15 +233,16 @@ func TestCoverageDiagnosticsMarkReportPartialWithoutDedicatedSection(t *testing.
 	if !strings.Contains(html, "Partial scan") {
 		t.Fatalf("HTML report omitted the partial-scan warning")
 	}
-	if strings.Contains(html, "Coverage &amp; Readiness") || strings.Contains(html, "Crawler budget exhausted") {
-		t.Fatalf("HTML report retained the removed coverage section")
+	if !strings.Contains(html, "Coverage diagnostics") || !strings.Contains(html, "Crawler budget exhausted") || !strings.Contains(html, "request_budget") ||
+		!strings.Contains(html, "waf_block_page") || !strings.Contains(html, "proof=boolean_pair") {
+		t.Fatalf("HTML report omitted actionable coverage diagnostics")
 	}
 	var markdown bytes.Buffer
 	if err := NewExporter(builder, nil).Export(&markdown, Options{ScanID: scanID, Template: TemplateInternal, Format: FormatMarkdown, Redact: true}); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(markdown.String(), "Coverage & Readiness") || strings.Contains(markdown.String(), "Crawler budget exhausted") {
-		t.Fatalf("Markdown report retained the removed coverage section")
+	if !strings.Contains(markdown.String(), "Coverage Diagnostics") || !strings.Contains(markdown.String(), "Crawler budget exhausted") {
+		t.Fatalf("Markdown report omitted actionable coverage diagnostics")
 	}
 }
 
@@ -352,6 +357,39 @@ func TestLargeScanStreamingMemory(t *testing.T) {
 	growth := int64(after.HeapAlloc) - int64(before.HeapAlloc)
 	if growth > 50*1024*1024 {
 		t.Fatalf("heap grew too much during streaming export: %d bytes", growth)
+	}
+}
+
+func TestFastPartialReportLimitsFindings(t *testing.T) {
+	db, scanID := setupReportDB(t, 12)
+	defer db.Close()
+
+	store := evidencestore.New(db)
+	builder := NewBuilder(store, db)
+	exporter := NewExporter(builder, nil)
+	opts := Options{ScanID: scanID, Template: TemplateInternal, Format: FormatJSON, Partial: true, FastPartial: true, MaxFindings: 3}
+
+	var buf bytes.Buffer
+	if err := exporter.Export(&buf, opts); err != nil {
+		t.Fatal(err)
+	}
+
+	var parsed struct {
+		Partial  bool           `json:"partial"`
+		Findings []FindingEntry `json:"findings"`
+		Warnings []string       `json:"warnings"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.Partial {
+		t.Fatal("fast interrupt report must be marked partial")
+	}
+	if len(parsed.Findings) != 3 {
+		t.Fatalf("expected capped findings, got %d", len(parsed.Findings))
+	}
+	if len(parsed.Warnings) == 0 || !strings.Contains(parsed.Warnings[0], "Fast interrupt report") {
+		t.Fatalf("expected fast partial warning, got %#v", parsed.Warnings)
 	}
 }
 

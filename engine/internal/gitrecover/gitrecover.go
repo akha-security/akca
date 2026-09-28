@@ -93,10 +93,10 @@ func ObjectStoragePath(hash string) string {
 	return "/.git/objects/" + hash[:2] + "/" + hash[2:]
 }
 
-// ExtractIndexPaths heuristically pulls file paths from a binary git index (DIRC).
+// ExtractIndexPaths pulls file paths from a binary git index (DIRC).
 func ExtractIndexPaths(body []byte) []string {
 	if len(body) < 12 || string(body[:4]) != "DIRC" {
-		return extractPathsFromText(string(body))
+		return nil
 	}
 	seen := map[string]struct{}{}
 	var out []string
@@ -154,21 +154,25 @@ func looksLikeProjectPath(p string) bool {
 // IsGitHEAD validates .git/HEAD response body.
 func IsGitHEAD(body string) bool {
 	body = strings.TrimSpace(body)
+	lower := strings.ToLower(body)
+	if strings.Contains(lower, "<html") || strings.Contains(lower, "<!doctype") || strings.Contains(lower, "<head") {
+		return false
+	}
 	return strings.HasPrefix(body, "ref: refs/") || (len(body) == 40 && hashRe.MatchString(body))
 }
 
 // IsGitConfig validates exposed .git/config.
 func IsGitConfig(body string) bool {
 	lower := strings.ToLower(body)
+	if strings.Contains(lower, "<html") || strings.Contains(lower, "<!doctype") || strings.Contains(lower, "<head") {
+		return false
+	}
 	return strings.Contains(lower, "[core]") || strings.Contains(lower, "[remote")
 }
 
-// IsGitIndex validates DIRC index signature or path-rich fallback.
+// IsGitIndex validates DIRC index signature.
 func IsGitIndex(body []byte) bool {
-	if len(body) >= 4 && string(body[:4]) == "DIRC" {
-		return true
-	}
-	return len(ExtractIndexPaths(body)) >= 3
+	return len(body) >= 4 && string(body[:4]) == "DIRC"
 }
 
 // DecodeLooseObject attempts to read plaintext from an uncompressed git loose object body.

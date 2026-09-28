@@ -14,10 +14,17 @@ import (
 
 type targetRun struct {
 	requests        atomic.Int64
+	responses       atomic.Int64
+	usableResponses atomic.Int64
 	failures        atomic.Int64
+	timeoutFailures atomic.Int64
+	transportErrors atomic.Int64
 	evidence        atomic.Bool
 	usableResponse  atomic.Bool
 	blockedResponse atomic.Bool
+	authBlocks      atomic.Int64
+	rateBlocks      atomic.Int64
+	gatewayBlocks   atomic.Int64
 	mu              sync.Mutex
 	skip            string
 	managed         bool
@@ -81,6 +88,12 @@ func noteExchange(ctx context.Context, err error) {
 		s.requests.Add(1)
 		if err != nil {
 			s.failures.Add(1)
+			lower := strings.ToLower(err.Error())
+			if errors.Is(err, context.DeadlineExceeded) || strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline") {
+				s.timeoutFailures.Add(1)
+			} else {
+				s.transportErrors.Add(1)
+			}
 		} else {
 			s.evidence.Store(true)
 		}
@@ -88,12 +101,21 @@ func noteExchange(ctx context.Context, err error) {
 }
 func noteResponse(ctx context.Context, rr httpclient.RequestResponse) {
 	if s, ok := ctx.Value(targetRunKey{}).(*targetRun); ok {
+		s.responses.Add(1)
 		switch rr.Response.StatusCode {
-		case 401, 403, 429, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527:
+		case 401, 403:
 			s.blockedResponse.Store(true)
+			s.authBlocks.Add(1)
+		case 429:
+			s.blockedResponse.Store(true)
+			s.rateBlocks.Add(1)
+		case 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527:
+			s.blockedResponse.Store(true)
+			s.gatewayBlocks.Add(1)
 		default:
 			if rr.Response.StatusCode > 0 {
 				s.usableResponse.Store(true)
+				s.usableResponses.Add(1)
 			}
 		}
 	}

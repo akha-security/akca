@@ -134,6 +134,12 @@ func (r *Runner) runBackupArchives(ctx context.Context, target ScanTarget) []Mod
 		if err != nil || rr.Response.StatusCode != 200 {
 			return
 		}
+		if rr.Response.Redirected && isRedirectedAway(rr, targetURL) {
+			return
+		}
+		if isHTMLResponse(rr.Response) {
+			return
+		}
 
 		// Strict Binary Magic Bytes Matching (Zero False Positive Proof Contract)
 		bodyBytes := []byte(rr.Response.Body)

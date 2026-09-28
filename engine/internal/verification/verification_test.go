@@ -261,6 +261,23 @@ func TestBooleanPairProofRequiresBaselineControlAndIdenticalSecondBranches(t *te
 	}
 }
 
+func TestArithmeticOracleProofRequiresStableIndependentPairs(t *testing.T) {
+	proof := &ArithmeticOracleProof{
+		BaselineHash: "base", FirstIdentityHash: "base", FirstContrastHash: "contrast",
+		ReplayIdentityHash: "base", ReplayContrastHash: "contrast",
+		SecondIdentityHash: "base", SecondContrastHash: "contrast",
+		SameSurface: true, StableOrientation: true,
+	}
+	if !validArithmeticOracleProof(proof) {
+		t.Fatal("complete arithmetic oracle proof should be valid")
+	}
+	unstable := *proof
+	unstable.SecondContrastHash = "different"
+	if validArithmeticOracleProof(&unstable) {
+		t.Fatal("unstable second arithmetic contrast must be rejected")
+	}
+}
+
 func TestMismatchedOASTCorrelationIsRejected(t *testing.T) {
 	r := NewEngine(nil, nil).Verify(Candidate{
 		ScanID: "scan-a", Module: "ssrf", VulnClass: "ssrf", EndpointURL: "https://target.test/fetch",

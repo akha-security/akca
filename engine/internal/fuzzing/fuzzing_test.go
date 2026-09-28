@@ -109,6 +109,24 @@ func TestActuatorShutdownExcluded(t *testing.T) {
 	}
 }
 
+func TestCommonStaticDirectoriesAreFuzzed(t *testing.T) {
+	tasks := BuildTasks("https://example.com")
+	wanted := make(map[string]bool, len(contentDirectoryPaths))
+	for _, path := range contentDirectoryPaths {
+		wanted[path] = false
+	}
+	for _, task := range tasks {
+		if _, ok := wanted[task.Path]; ok {
+			wanted[task.Path] = true
+		}
+	}
+	for path, found := range wanted {
+		if !found {
+			t.Fatalf("common content directory %s is absent from fuzzing tasks", path)
+		}
+	}
+}
+
 func Test403PriorityOrdering(t *testing.T) {
 	low := Score403Priority("https://example.com/static/app.js", "GET")
 	high := Score403Priority("https://example.com/admin/api", "GET")

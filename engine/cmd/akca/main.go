@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -435,6 +436,7 @@ func printVersion() {
 	fmt.Fprintln(os.Stderr)
 	printASCIIWordmark(os.Stderr)
 	fmt.Printf("%s %s\n", branding.ProductName, branding.VersionLabel)
+	fmt.Printf("Build %s\n", branding.BuildIdentity())
 }
 
 type helpEntry struct {
@@ -1385,6 +1387,9 @@ func NewConsoleWriterMode(mode string) *ConsoleWriter {
 }
 
 func (cw *ConsoleWriter) acceptOASTCallback(payload map[string]interface{}) bool {
+	if isOASTHealthCallback(payload) {
+		return false
+	}
 	protocol := strings.ToLower(safeTerminalText(fmt.Sprint(payload["protocol"])))
 	module := strings.ToLower(safeTerminalText(fmt.Sprint(payload["vuln_class"])))
 	endpoint := strings.ToLower(safeTerminalText(fmt.Sprint(payload["endpoint"])))
@@ -1402,6 +1407,12 @@ func (cw *ConsoleWriter) acceptOASTCallback(payload map[string]interface{}) bool
 	cw.oastSeen[key] = struct{}{}
 	cw.oastCallbacks++
 	return true
+}
+
+func isOASTHealthCallback(payload map[string]interface{}) bool {
+	module := strings.ToLower(strings.TrimSpace(safeTerminalText(fmt.Sprint(payload["vuln_class"]))))
+	endpoint := strings.ToLower(strings.TrimSpace(safeTerminalText(fmt.Sprint(payload["endpoint"]))))
+	return module == "oast_health" || endpoint == "oast://health-check"
 }
 
 func oastCallbackPanel(payload map[string]interface{}) string {
@@ -1808,6 +1819,12 @@ func (cw *ConsoleWriter) eventNeedsProgressClose(e events.Event) bool {
 }
 
 func (cw *ConsoleWriter) handleEvent(e events.Event) error {
+	// Preflight callbacks prove scanner infrastructure readiness; they are not
+	// target vulnerabilities and must not interrupt the live status, render a
+	// finding-like card, or inflate the final oast_hits counter.
+	if e.Type == "oast_callback_received" && isOASTHealthCallback(e.Payload) {
+		return nil
+	}
 	if cw.mode == "quiet" && !quietEvent(e.Type) {
 		return nil
 	}
@@ -2557,24 +2574,27 @@ func formatVulnType(vulnClass, signal string) string {
 	}
 
 	prettySignals := map[string]string{
-		"reflected_html":       "Reflected HTML",
-		"reflected_attribute":  "Reflected Attribute",
-		"reflected_javascript": "Reflected JavaScript",
-		"dom_xss":              "DOM-Based",
-		"blind_xss":            "Blind",
-		"time_blind":           "Time-Based Blind",
-		"boolean_blind":        "Boolean-Based Blind",
-		"error_based":          "Error-Based",
-		"dns_callback":         "DNS Callback",
-		"http_callback":        "HTTP Callback",
-		"dns":                  "DNS Callback",
-		"http":                 "HTTP Callback",
-		"origin_reflection":    "Origin Reflection",
-		"wildcard_credentials": "Wildcard With Credentials",
-		"null_origin":          "Null Origin Reflection",
-		"path_fuzz":            "Path Manipulation",
-		"header_fuzz":          "HTTP Headers Manipulation",
-		"method_override":      "HTTP Method Override",
+		"reflected":                   "Reflected",
+		"reflected_browser_execution": "Reflected",
+		"reflected_html":              "Reflected HTML",
+		"reflected_attribute":         "Reflected Attribute",
+		"reflected_javascript":        "Reflected JavaScript",
+		"dom_xss":                     "DOM-Based",
+		"dom_execution":               "DOM-Based",
+		"blind_xss":                   "Blind",
+		"time_blind":                  "Time-Based Blind",
+		"boolean_blind":               "Boolean-Based Blind",
+		"error_based":                 "Error-Based",
+		"dns_callback":                "DNS Callback",
+		"http_callback":               "HTTP Callback",
+		"dns":                         "DNS Callback",
+		"http":                        "HTTP Callback",
+		"origin_reflection":           "Origin Reflection",
+		"wildcard_credentials":        "Wildcard With Credentials",
+		"null_origin":                 "Null Origin Reflection",
+		"path_fuzz":                   "Path Manipulation",
+		"header_fuzz":                 "HTTP Headers Manipulation",
+		"method_override":             "HTTP Method Override",
 	}
 
 	if pretty, ok := prettySignals[strings.ToLower(signal)]; ok {
@@ -3024,19 +3044,50 @@ func runScanCommand(args []string) int {
 	sigCh := make(chan os.Signal, 1)
 	signalDone := make(chan struct{})
 	interrupted := make(chan struct{})
+	var interruptedOnce sync.Once
+	var reportMu sync.Mutex
+	var reportCancel context.CancelFunc
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 	defer close(signalDone)
 	go func() {
-		select {
-		case <-sigCh:
-			close(interrupted)
-			cw.renderMu.Lock()
-			cw.closeProgressLine()
-			printCLIStatus("warn", "Interrupt received; stopping gracefully")
-			cw.renderMu.Unlock()
-			_ = engine.StopScan()
-		case <-signalDone:
+		for {
+			select {
+			case <-sigCh:
+				first := false
+				interruptedOnce.Do(func() {
+					first = true
+					close(interrupted)
+				})
+				reportMu.Lock()
+				cancelReport := reportCancel
+				reportMu.Unlock()
+				cw.renderMu.Lock()
+				cw.closeProgressLine()
+				if first {
+					if cancelReport != nil {
+						printCLIStatus("warn", "Interrupt received; cancelling report generation")
+						cw.renderMu.Unlock()
+						cancelReport()
+						continue
+					}
+					printCLIStatus("warn", "Interrupt received; stopping gracefully")
+					cw.renderMu.Unlock()
+					_ = engine.StopScan()
+					continue
+				}
+				if cancelReport != nil {
+					printCLIStatus("warn", "Second interrupt received; cancelling report generation")
+					cw.renderMu.Unlock()
+					cancelReport()
+					continue
+				}
+				printCLIStatus("warn", "Second interrupt received; exiting")
+				cw.renderMu.Unlock()
+				os.Exit(130)
+			case <-signalDone:
+				return
+			}
 		}
 	}()
 
@@ -3058,17 +3109,51 @@ func runScanCommand(args []string) int {
 		}
 	}
 
+	wasInterrupted := false
+	select {
+	case <-interrupted:
+		wasInterrupted = true
+	default:
+	}
+	reportCtx := context.Background()
+	var cancelReport context.CancelFunc
+	if wasInterrupted {
+		reportCtx, cancelReport = context.WithTimeout(context.Background(), 30*time.Second)
+		if !quiet {
+			printCLIStatus("info", "Fast partial report enabled after interrupt")
+		}
+	} else {
+		reportCtx, cancelReport = context.WithCancel(context.Background())
+	}
+	reportMu.Lock()
+	reportCancel = cancelReport
+	reportMu.Unlock()
+	defer cancelReport()
+	defer func() {
+		reportMu.Lock()
+		reportCancel = nil
+		reportMu.Unlock()
+	}()
+
 	reportOpts := report.Options{
 		ScanID:   cfg.ScanID,
 		Template: report.TemplateInternal,
 		Format:   repFmt,
-		Partial:  scanErr != nil,
+		Partial:  scanErr != nil || wasInterrupted,
 		Redact:   cfg.RedactReports,
 	}
+	if wasInterrupted {
+		reportOpts.FastPartial = true
+		reportOpts.MaxFindings = 250
+	}
 
-	reportData, err := engine.GenerateReport(reportOpts)
+	reportData, err := engine.GenerateReportWithContext(reportCtx, reportOpts)
 	if err != nil {
 		cw.closeProgressLine()
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			printCLIError(fmt.Errorf("report generation cancelled after interrupt: %w", err))
+			return 130
+		}
 		printCLIError(fmt.Errorf("report generation failed: %w", err))
 		return 1
 	}
@@ -3172,22 +3257,24 @@ func runBenchmarkCommand(args []string) int {
 	var dbPath string
 	var outputPath string
 	var strict bool
+	var completeCorpus bool
 	var help bool
 	fs.StringVar(&dbPath, "db", "", "")
 	fs.StringVar(&outputPath, "output", "", "")
 	fs.BoolVar(&strict, "strict", false, "")
+	fs.BoolVar(&completeCorpus, "complete-corpus", false, "")
 	fs.BoolVar(&help, "help", false, "")
 	fs.BoolVar(&help, "h", false, "")
 	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
 		if err != nil {
 			printCLIError(fmt.Errorf("benchmark: %w", err))
 		}
-		fmt.Fprintln(os.Stderr, "Usage: akca benchmark [--db <path>] [--output <json>] [--strict]")
+		fmt.Fprintln(os.Stderr, "Usage: akca benchmark [--db <path>] [--output <json>] [--strict] [--complete-corpus]")
 		return 2
 	}
 	if help {
-		fmt.Fprintln(os.Stderr, "Usage: akca benchmark [--db <path>] [--output <json>] [--strict]")
-		fmt.Fprintln(os.Stderr, "Runs observed scanner quality gates; --strict returns exit code 3 when a gate fails.")
+		fmt.Fprintln(os.Stderr, "Usage: akca benchmark [--db <path>] [--output <json>] [--strict] [--complete-corpus]")
+		fmt.Fprintln(os.Stderr, "Runs observed scanner quality gates; --complete-corpus requires positive and negative fixtures for every runnable module and no capability skips.")
 		return 0
 	}
 	if dbPath == "" {
@@ -3219,9 +3306,12 @@ func runBenchmarkCommand(args []string) int {
 		fmt.Fprintf(os.Stderr, "akca benchmark: %v\n", err)
 		return 1
 	}
-	gate := benchmark.EvaluateQualityGate(
-		benchmark.DefaultScenarios(), results, benchmark.StrictGateConfig(),
-	)
+	gateConfig := benchmark.StrictGateConfig()
+	if completeCorpus {
+		gateConfig = benchmark.CompleteCorpusGateConfig()
+		strict = true
+	}
+	gate := benchmark.EvaluateQualityGate(benchmark.DefaultScenarios(), results, gateConfig)
 	payload := map[string]interface{}{"results": results, "quality_gate": gate}
 	encoded, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {

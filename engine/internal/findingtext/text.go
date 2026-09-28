@@ -97,6 +97,8 @@ func formatSignal(signal string) string {
 		return "boolean-based response difference compared to baseline"
 	case "boolean_pair_confirmed":
 		return "alternating true/false SQL predicates reproduced with stable, non-reflected responses"
+	case "numeric_arithmetic_oracle":
+		return "two independent numeric expression pairs and a replay produced a stable server-side evaluation oracle; SQL execution remains potential until corroborated"
 	case "stacked_differential", "stacked_timing":
 		return "stacked query execution confirmed via differential or timing signal"
 	case "oob_sqli":
@@ -105,8 +107,12 @@ func formatSignal(signal string) string {
 		return "time-based response delay consistent with injection"
 	case "math_evaluation", "template_evaluation_49":
 		return "server-side template evaluated arithmetic expression"
-	case "reflected", "dom_xss", "stored":
-		return "user-controlled input reflected or executed in the page"
+	case "reflected", "reflected_browser_execution":
+		return "user-controlled input was reflected by the server in an executable browser context"
+	case "dom_execution", "dom_xss":
+		return "client-side code executed the payload without server-side reflection"
+	case "stored":
+		return "stored user-controlled input executed when the affected page was rendered"
 	case "blind_oast", "rfi_oast", "blind_xss_oast_callback":
 		return "out-of-band callback received via Interactsh (OAST) correlation"
 	default:

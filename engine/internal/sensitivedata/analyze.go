@@ -24,7 +24,10 @@ var (
 	internalIPRe       = regexp.MustCompile(`\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|127\.0\.0\.1)\b`)
 	stackTraceRe       = regexp.MustCompile(`(?i)(?:stack trace|traceback \(most recent call last\)|exception in thread|at [\w.$]+\([\w./\\]+:\d+\)|whoops! there was an error|django version:|werkzeug debugger|whitelabel error page|server error in '/' application|system\.web\.httpexception|uncaught exception:|fatal error:.*in /.+ on line \d+)`)
 	dbErrorRe          = regexp.MustCompile(`(?i)(?:sql syntax|mysql_fetch|mysqli_|pg_query|sqlite3\.|ORA-\d{5}|unclosed quotation mark|odbc sql server driver|sqlstate\[)`)
-	directoryListingRe = regexp.MustCompile(`(?i)(?:<title>Index of /|<h1>Index of /|Directory Listing for /|<a href="[^"]*">\[To Parent Directory\]</a>|<table summary="Directory Listing")`)
+	directoryHeadingRe = regexp.MustCompile(`(?is)<(?:title|h1|h2)[^>]*>\s*(?:index of|directory listing(?: for)?|directory of)\s+/[^<]*</(?:title|h1|h2)>`)
+	directoryAnchorRe  = regexp.MustCompile(`(?is)<a\s+[^>]*href\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a>`)
+	directoryTagRe     = regexp.MustCompile(`(?is)<[^>]+>`)
+	directoryDateRe    = regexp.MustCompile(`(?i)\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\s+\d{1,2}:\d{2}`)
 	sourceCodeRe       = regexp.MustCompile(`(?m)^\s*(?:import |from .+ import |package |#include |function \w+\(|class \w+|def \w+\()`)
 	tcknCandidate      = regexp.MustCompile(`\b[1-9]\d{10}\b`)
 	ibanCandidate      = regexp.MustCompile(`(?i)\b(?:[A-Z]{2}\d{2}[A-Z0-9]{11,30}|[A-Z]{2}\d{2}(?:[ -][A-Z0-9]{2,4}){3,8})\b`)
@@ -57,6 +60,9 @@ func Analyze(body string) []Finding {
 		out = append(out, Finding{Kind: kind, Match: match, Redacted: redacted, Severity: severity, Score: score})
 	}
 
+	lowerBody := strings.ToLower(body)
+	isHTML := strings.Contains(lowerBody, "<html") || strings.Contains(lowerBody, "<!doctype")
+
 	for _, m := range ssnRe.FindAllString(body, -1) {
 		add("pii_ssn", m, redactDigits(m), "high", 0.85)
 	}
@@ -73,8 +79,6 @@ func Analyze(body string) []Finding {
 		}
 	}
 	if piiKeywordRe.MatchString(body) {
-		lowerBody := strings.ToLower(body)
-		isHTML := strings.Contains(lowerBody, "<html") || strings.Contains(lowerBody, "<!doctype")
 		// Only alert on PII keywords in JSON/API payloads or non-HTML data, not bare HTML form labels or policy text
 		if !isHTML || strings.Contains(lowerBody, "application/json") {
 			add("pii_context", piiKeywordRe.FindString(body), "[PII keyword]", "medium", 0.7)
@@ -82,6 +86,9 @@ func Analyze(body string) []Finding {
 	}
 	for _, m := range emailRe.FindAllString(body, 5) {
 		if strings.Contains(strings.ToLower(m), "example.com") || isPublicRoleEmail(m) {
+			continue
+		}
+		if isHTML && strings.Contains(lowerBody, "mailto:"+strings.ToLower(m)) {
 			continue
 		}
 		add("pii_email", m, redactEmail(m), "medium", 0.55)
@@ -136,14 +143,69 @@ func Analyze(body string) []Finding {
 	if dbErrorRe.MatchString(body) {
 		add("database_error", dbErrorRe.FindString(body), "[db error]", "high", 0.8)
 	}
-	if directoryListingRe.MatchString(body) {
-		add("directory_listing", directoryListingRe.FindString(body), "[directory listing enabled]", "medium", 0.9)
+	if evidence, ok := DetectDirectoryListing(body); ok {
+		add("directory_listing", evidence.Signature, "[directory listing enabled]", "medium", 0.95)
 	}
-	if sourceCodeRe.MatchString(body) && looksLikeSourceLeak(body) {
+	if !isHTML && sourceCodeRe.MatchString(body) && looksLikeSourceLeak(body) {
 		add("source_code_snippet", sourceCodeRe.FindString(body), "[source snippet]", "medium", 0.65)
 	}
 
 	return out
+}
+
+// DirectoryListingEvidence describes the structural proof used to distinguish
+// a real web-server directory index from an ordinary page that merely talks
+// about directory listings.
+type DirectoryListingEvidence struct {
+	Signature  string `json:"signature"`
+	EntryCount int    `json:"entry_count"`
+}
+
+// DetectDirectoryListing recognises common Apache/nginx/lighttpd/Python and
+// IIS directory-index layouts. A heading alone is deliberately insufficient:
+// the response must also expose a parent-directory control or at least one
+// concrete child entry.
+func DetectDirectoryListing(body string) (DirectoryListingEvidence, bool) {
+	if strings.TrimSpace(body) == "" {
+		return DirectoryListingEvidence{}, false
+	}
+	const maxListingScanBytes = 2 * 1024 * 1024
+	if len(body) > maxListingScanBytes {
+		body = body[:maxListingScanBytes]
+	}
+
+	heading := strings.TrimSpace(directoryHeadingRe.FindString(body))
+	lower := strings.ToLower(body)
+	parentMarker := strings.Contains(lower, "[to parent directory]") ||
+		strings.Contains(lower, ">parent directory</a>") ||
+		strings.Contains(lower, `href="../"`) || strings.Contains(lower, `href='../'`)
+
+	entries := 0
+	for _, match := range directoryAnchorRe.FindAllStringSubmatch(body, -1) {
+		if len(match) < 3 {
+			continue
+		}
+		href := strings.TrimSpace(strings.ToLower(match[1]))
+		label := strings.TrimSpace(strings.ToLower(directoryTagRe.ReplaceAllString(match[2], "")))
+		if href == "" || href == "/" || href == "../" || href == ".." ||
+			strings.HasPrefix(href, "#") || strings.HasPrefix(href, "?") ||
+			strings.Contains(label, "parent directory") || strings.Contains(label, "to parent") {
+			continue
+		}
+		entries++
+	}
+
+	if heading != "" && (parentMarker || entries > 0) {
+		return DirectoryListingEvidence{Signature: heading, EntryCount: entries}, true
+	}
+
+	// IIS directory browsing does not always label the page "Directory
+	// Listing". Its parent control plus dated child rows is sufficiently
+	// specific when at least one linked entry is present.
+	if parentMarker && entries > 0 && directoryDateRe.MatchString(body) {
+		return DirectoryListingEvidence{Signature: "[To Parent Directory]", EntryCount: entries}, true
+	}
+	return DirectoryListingEvidence{}, false
 }
 
 func sensitiveContext(body string, start, end int, positive *regexp.Regexp) bool {
@@ -262,11 +324,11 @@ func knownTestPAN(value string) bool {
 
 func looksLikeSourceLeak(body string) bool {
 	lower := strings.ToLower(body)
-	if strings.Contains(lower, "<html") && strings.Count(body, "\n") < 3 {
+	if strings.Contains(lower, "<html") || strings.Contains(lower, "<!doctype") || strings.Contains(lower, "<head") {
 		return false
 	}
 	hits := 0
-	for _, kw := range []string{"import ", "function ", "class ", "def ", "#include", "package "} {
+	for _, kw := range []string{"import ", "def ", "#include", "package ", "namespace ", "using System;", "<?php"} {
 		if strings.Contains(body, kw) {
 			hits++
 		}
@@ -353,7 +415,13 @@ func isPublicRoleEmail(email string) bool {
 	if idx := strings.Index(lower, "@"); idx != -1 {
 		prefix = lower[:idx]
 	}
-	roles := []string{"support", "info", "contact", "sales", "help", "hello", "press", "billing", "privacy", "security", "jobs", "careers", "marketing", "admin", "team", "service", "inquiry", "feedback"}
+	roles := []string{
+		"support", "info", "contact", "sales", "help", "hello", "press", "billing", "privacy", "security",
+		"jobs", "careers", "marketing", "admin", "team", "service", "inquiry", "feedback",
+		"reservations", "reservation", "booking", "bookings", "ecommerce", "order", "orders",
+		"media", "general", "office", "mail", "inquiries", "customerservice", "customercare",
+		"compliance", "legal", "abuse", "investor", "investors", "partner", "partners",
+	}
 	for _, r := range roles {
 		if prefix == r || strings.HasPrefix(prefix, r+".") || strings.HasPrefix(prefix, r+"-") || strings.HasPrefix(prefix, r+"_") {
 			return true

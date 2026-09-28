@@ -1,8 +1,13 @@
 package reflection
 
 import (
+	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -10,7 +15,10 @@ import (
 	"strings"
 )
 
-var pathUUIDRe = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var (
+	pathUUIDRe       = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	pathIndexParamRe = regexp.MustCompile(`^path_segment_([0-9]+)$`)
+)
 
 // EffectiveMethod returns the method that can actually carry the discovered
 // injection surface. Body parameters discovered from a GET-rendered form must
@@ -19,7 +27,7 @@ var pathUUIDRe = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0
 func EffectiveMethod(method, location string) string {
 	method = strings.ToUpper(strings.TrimSpace(method))
 	switch strings.ToLower(strings.TrimSpace(location)) {
-	case "form", "multipart", "json", "graphql", "xml":
+	case "form", "multipart", "json", "graphql", "graphql_query", "websocket", "xml":
 		if method == "" || method == http.MethodGet {
 			return http.MethodPost
 		}
@@ -65,10 +73,10 @@ func MutateRequest(template RequestTemplate, param, location, value string) (Mut
 				form = parsed
 			}
 		}
-		form.Set(param, value)
+		setFirstURLValue(form, param, value)
 		setHeaderCI(headers, "Content-Type", "application/x-www-form-urlencoded")
 		return materialized(method, endpointURL, []byte(form.Encode()), headers)
-	case "json", "graphql":
+	case "json", "graphql", "websocket":
 		var doc interface{}
 		if body != "" {
 			_ = json.Unmarshal([]byte(body), &doc)
@@ -87,6 +95,26 @@ func MutateRequest(template RequestTemplate, param, location, value string) (Mut
 				}
 				return materialized(method, endpointURL, mutated, headers)
 			}
+		}
+	case "graphql_query":
+		mutated, ok := mutateGraphQLQuery(template.Body, param, value)
+		if ok {
+			setHeaderCI(headers, "Content-Type", "application/graphql")
+			return materialized(method, endpointURL, []byte(mutated), headers)
+		}
+	case "xml":
+		mutated, ok := mutateXMLBody(template.Body, param, value)
+		if ok {
+			if headerValueCI(headers, "Content-Type") == "" {
+				setHeaderCI(headers, "Content-Type", "application/xml")
+			}
+			return materialized(method, endpointURL, mutated, headers)
+		}
+	case "multipart":
+		mutated, mediaType, ok := mutateMultipartBody([]byte(template.Body), template.ContentType, param, value)
+		if ok {
+			setHeaderCI(headers, "Content-Type", mediaType)
+			return materialized(method, endpointURL, mutated, headers)
 		}
 	case "header":
 		setHeaderCI(headers, param, value)
@@ -116,6 +144,130 @@ func MutateRequest(template RequestTemplate, param, location, value string) (Mut
 		setHeaderCI(headers, key, headerValue)
 	}
 	return MutatedRequest{Method: method, URL: probeURL, Body: probeBody, Headers: headers}, nil
+}
+
+func mutateXMLBody(body, param, value string) ([]byte, bool) {
+	if strings.TrimSpace(body) == "" {
+		return nil, false
+	}
+	wantedPath, wantedAttr, _ := strings.Cut(param, "@")
+	decoder := xml.NewDecoder(strings.NewReader(body))
+	var output bytes.Buffer
+	encoder := xml.NewEncoder(&output)
+	stack := make([]string, 0, 8)
+	mutated := false
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, false
+		}
+		switch typed := token.(type) {
+		case xml.StartElement:
+			stack = append(stack, typed.Name.Local)
+			if !mutated && wantedAttr != "" && strings.EqualFold(strings.Join(stack, "."), wantedPath) {
+				for index := range typed.Attr {
+					if strings.EqualFold(typed.Attr[index].Name.Local, wantedAttr) {
+						typed.Attr[index].Value = value
+						mutated = true
+					}
+				}
+				token = typed
+			}
+		case xml.CharData:
+			if !mutated && wantedAttr == "" && strings.EqualFold(strings.Join(stack, "."), wantedPath) && strings.TrimSpace(string(typed)) != "" {
+				token = xml.CharData([]byte(value))
+				mutated = true
+			}
+		case xml.EndElement:
+			deferPop := true
+			if err := encoder.EncodeToken(token); err != nil {
+				return nil, false
+			}
+			if deferPop && len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+			continue
+		}
+		if err := encoder.EncodeToken(token); err != nil {
+			return nil, false
+		}
+	}
+	if encoder.Flush() != nil || !mutated {
+		return nil, false
+	}
+	return output.Bytes(), true
+}
+
+func mutateMultipartBody(body []byte, contentType, param, value string) ([]byte, string, bool) {
+	mediaType, parameters, err := mime.ParseMediaType(contentType)
+	if err != nil || !strings.HasPrefix(strings.ToLower(mediaType), "multipart/") || parameters["boundary"] == "" {
+		return nil, "", false
+	}
+	reader := multipart.NewReader(bytes.NewReader(body), parameters["boundary"])
+	var output bytes.Buffer
+	writer := multipart.NewWriter(&output)
+	if err := writer.SetBoundary(parameters["boundary"]); err != nil {
+		return nil, "", false
+	}
+	mutated := false
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, "", false
+		}
+		partBody, readErr := io.ReadAll(io.LimitReader(part, 16<<20))
+		_ = part.Close()
+		if readErr != nil {
+			return nil, "", false
+		}
+		outPart, createErr := writer.CreatePart(part.Header)
+		if createErr != nil {
+			return nil, "", false
+		}
+		if !mutated && part.FormName() == param {
+			partBody = []byte(value)
+			mutated = true
+		}
+		if _, err := outPart.Write(partBody); err != nil {
+			return nil, "", false
+		}
+	}
+	if err := writer.Close(); err != nil || !mutated {
+		return nil, "", false
+	}
+	return output.Bytes(), writer.FormDataContentType(), true
+}
+
+func mutateGraphQLQuery(query, variable, value string) (string, bool) {
+	if strings.TrimSpace(query) == "" || strings.TrimSpace(variable) == "" {
+		return "", false
+	}
+	// Raw application/graphql requests have no separate variables object. Only
+	// mutate an explicit default value or a literal argument; never rewrite the
+	// query shape or splice into field names.
+	escaped := regexp.QuoteMeta(variable)
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?m)(\$` + escaped + `\s*:\s*[^=,)]+\s*=\s*)("[^"]*"|-?[0-9.]+|true|false|null)`),
+		regexp.MustCompile(`(?m)(\b` + escaped + `\s*:\s*)("[^"]*"|-?[0-9.]+|true|false|null)`),
+	}
+	replacement := strconv.Quote(value)
+	if value == "true" || value == "false" || value == "null" {
+		replacement = value
+	} else if _, err := strconv.ParseFloat(value, 64); err == nil {
+		replacement = value
+	}
+	for _, pattern := range patterns {
+		if pattern.MatchString(query) {
+			return pattern.ReplaceAllString(query, `${1}`+replacement), true
+		}
+	}
+	return "", false
 }
 
 func mutateCookieHeader(raw, name, value string) string {
@@ -273,7 +425,7 @@ func BuildProbeRequest(endpointURL, method, param, location, value string) (stri
 	switch strings.ToLower(location) {
 	case "form", "multipart":
 		form := url.Values{}
-		form.Set(param, value)
+		setFirstURLValue(form, param, value)
 		headers["Content-Type"] = "application/x-www-form-urlencoded"
 		if strings.ToUpper(method) == "" || strings.ToUpper(method) == "GET" {
 			method = "POST"
@@ -309,7 +461,25 @@ func BuildProbeRequest(endpointURL, method, param, location, value string) (stri
 		return u.String(), nil, headers, nil
 	case "path":
 		replaced := false
+		if match := pathIndexParamRe.FindStringSubmatch(param); len(match) == 2 {
+			if index, parseErr := strconv.Atoi(match[1]); parseErr == nil {
+				segments := strings.Split(strings.Trim(u.Path, "/"), "/")
+				if index >= 0 && index < len(segments) {
+					segments[index] = value
+					prefix := ""
+					if strings.HasPrefix(u.Path, "/") {
+						prefix = "/"
+					}
+					u.Path = prefix + strings.Join(segments, "/")
+					u.RawPath = ""
+					replaced = true
+				}
+			}
+		}
 		for _, placeholder := range []string{"{" + param + "}", ":" + param, "[" + param + "]"} {
+			if replaced {
+				break
+			}
 			if strings.Contains(u.Path, placeholder) {
 				u.Path = strings.ReplaceAll(u.Path, placeholder, value)
 				u.RawPath = ""
@@ -353,8 +523,21 @@ func BuildProbeRequest(endpointURL, method, param, location, value string) (stri
 		return u.String(), nil, headers, nil
 	default:
 		q := u.Query()
-		q.Set(param, value)
+		setFirstURLValue(q, param, value)
 		u.RawQuery = q.Encode()
 		return u.String(), nil, headers, nil
 	}
+}
+
+// setFirstURLValue mutates one occurrence without collapsing HTTP parameter
+// pollution/repeated-field shapes captured from the real request.
+func setFirstURLValue(values url.Values, name, value string) {
+	existing, ok := values[name]
+	if !ok || len(existing) == 0 {
+		values[name] = []string{value}
+		return
+	}
+	updated := append([]string(nil), existing...)
+	updated[0] = value
+	values[name] = updated
 }

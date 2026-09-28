@@ -92,6 +92,65 @@ func (r *Runner) runCachePoisoning(ctx context.Context, target ScanTarget) []Mod
 			break
 		}
 	}
+
+	// Parameter cloaking test
+	cloakToken := "akca-cache-" + randomToken(10)
+	cloakMarker := "MARKER-" + randomToken(6)
+	baselineURL := target.EndpointURL
+	if strings.Contains(baselineURL, "?") {
+		baselineURL += "&utm_content=" + cloakToken
+	} else {
+		baselineURL += "?utm_content=" + cloakToken
+	}
+
+	cloakBaseline, err := anonymous.DoWithoutSession(ctx, "GET", baselineURL, nil, nil)
+	if err == nil && !strings.Contains(cloakBaseline.Response.Body, cloakMarker) {
+		poisonURL := baselineURL + "&_=" + cloakMarker
+		rr, err := r.client.Do(ctx, "GET", poisonURL, nil, nil)
+		if err == nil && strings.Contains(rr.Response.Body, cloakMarker) {
+			var victims []httpclient.RequestResponse
+			for replay := 0; replay < 3; replay++ {
+				victim, victimErr := anonymous.DoWithoutSession(ctx, "GET", baselineURL, nil, nil)
+				if victimErr != nil || !cachePoisonPersisted(cloakBaseline.Response.Body, victim.Response.Body, victim.Response.Headers, cloakMarker) {
+					victims = nil
+					break
+				}
+				victims = append(victims, victim)
+			}
+			if len(victims) == 3 {
+				coldURL := target.EndpointURL
+				if strings.Contains(coldURL, "?") {
+					coldURL += "&utm_content=" + randomToken(10)
+				} else {
+					coldURL += "?utm_content=" + randomToken(10)
+				}
+				cold, err := anonymous.DoWithoutSession(ctx, "GET", coldURL, nil, nil)
+				if err == nil && !strings.Contains(cold.Response.Body, cloakMarker) {
+					signal := "unkeyed_query_param"
+					p := defaultPayload("cache_poisoning", signal, cloakMarker, signal)
+					f := r.verifyAndBuildWithCandidate(ctx, "cache_poisoning", target, p, cloakBaseline, victims[0],
+						signal, false, false, "", "", func(candidate *verification.Candidate) {
+							candidate.RequestedProofType = verification.ProofDifferentialReplay
+							candidate.NegativeControlSet = true
+							candidate.NegativeControlOK = true
+							candidate.TypedReplayHits = []bool{true, true, true}
+							candidate.Observations = append(candidate.Observations,
+								r.observation("cache_poisoning", target, verification.RolePositiveReplay, 2, victims[1]),
+								r.observation("cache_poisoning", target, verification.RolePositiveReplay, 3, victims[2]),
+								r.observation("cache_poisoning", target, verification.RoleNegativeControl, 1, cold),
+							)
+						})
+					if f != nil {
+						f.Title = "Web Cache Poisoning via Parameter Cloaking"
+						f.Severity = "high"
+						f.Description = "An unkeyed query parameter was reflected into the response and persisted in intermediate cache layers for anonymous clients."
+						r.recordFinding(ctx, &out, f, "cache_poisoning", signal)
+					}
+				}
+			}
+		}
+	}
+
 	return out
 }
 

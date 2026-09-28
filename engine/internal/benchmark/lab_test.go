@@ -153,3 +153,42 @@ func TestStrictGateRejectsSyntheticAndConfirmedFalsePositive(t *testing.T) {
 		t.Fatalf("unsafe benchmark must fail the gate: %+v", report)
 	}
 }
+
+func TestCorpusCoverageFailsClosedForMissingModuleFixtures(t *testing.T) {
+	scenarios := []Scenario{
+		{ID: "xss-positive", VulnClass: "xss", Vulnerable: true},
+		{ID: "xss-negative", VulnClass: "xss", Vulnerable: false},
+	}
+	results := []Result{
+		{Scenario: "xss-positive", Detected: true},
+		{Scenario: "xss-negative"},
+	}
+	corpus := AuditCorpusCoverage(scenarios, results, []string{"xss", "sqli"})
+	if corpus.BenchmarkedModules != 1 || corpus.CoverageRatio != 0.5 || len(corpus.MissingPositiveFixtures) != 1 {
+		t.Fatalf("unexpected corpus audit: %+v", corpus)
+	}
+	results = append(results, Result{
+		Scenario: "aggregate", Deterministic: true, ReportSchemaCompatible: true, Corpus: &corpus,
+	})
+	cfg := CompleteCorpusGateConfig()
+	cfg.MaximumFPRUpper95 = 1
+	cfg.MaximumRequests = 0
+	cfg.MaximumDurationSec = 0
+	gate := EvaluateQualityGate(scenarios, results, cfg)
+	if gate.Passed || gate.Checks["module_corpus"] || gate.Checks["corpus_contracts"] {
+		t.Fatalf("complete corpus gate accepted missing fixtures: %+v", gate)
+	}
+}
+
+func TestCompleteCorpusGateRejectsCapabilitySkip(t *testing.T) {
+	scenarios := []Scenario{{ID: "browser", VulnClass: "xss", Vulnerable: true, Capability: "browser"}}
+	results := []Result{{Scenario: "browser", Skipped: true, SkipReason: "capability unavailable: browser"}}
+	corpus := AuditCorpusCoverage(scenarios, results, []string{"xss"})
+	results = append(results, Result{Scenario: "aggregate", Deterministic: true, ReportSchemaCompatible: true, Corpus: &corpus})
+	cfg := CompleteCorpusGateConfig()
+	cfg.MaximumFPRUpper95 = 1
+	gate := EvaluateQualityGate(scenarios, results, cfg)
+	if gate.Passed || gate.Checks["capability_execution"] {
+		t.Fatalf("complete corpus gate accepted capability skip: %+v", gate)
+	}
+}

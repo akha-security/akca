@@ -57,10 +57,16 @@ func LooksLikeSourceCode(body, contentType string) bool {
 	if len(body) < 20 {
 		return false
 	}
+	lowerBody := strings.ToLower(body)
+	trimmed := strings.TrimSpace(lowerBody)
+	isRawScript := strings.HasPrefix(trimmed, "<?php") || strings.HasPrefix(trimmed, "<?=") || strings.HasPrefix(trimmed, "#!/")
+	if !isRawScript && (strings.Contains(lowerBody, "<!doctype") || strings.Contains(lowerBody, "<html") || strings.Contains(lowerBody, "<head")) {
+		return false
+	}
 	lower := strings.ToLower(contentType + " " + body[:min(512, len(body))])
 	markers := []string{
-		"<?php", "<?=", "#!/usr/bin", "import ", "def ", "function ",
-		"class ", "package ", "namespace ", "const ", "module.exports",
+		"<?php", "<?=", "#!/usr/bin", "import ", "def ",
+		"package ", "namespace ", "module.exports",
 		"-----BEGIN", "DB_HOST", "mysql://", "postgres://",
 	}
 	for _, m := range markers {

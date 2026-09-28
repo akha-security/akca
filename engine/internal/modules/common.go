@@ -270,8 +270,8 @@ func (r *Runner) verifyAndBuildWithCandidate(ctx context.Context, module string,
 		mutate(&candidate)
 	}
 	result := r.verifier.Verify(candidate)
-	if result.Suppressed {
-		r.recordVerificationOutcome(target.EndpointURL, module, result)
+	if result.Suppressed || !result.ProofSatisfied {
+		r.recordVerificationOutcome(target, module, signal, result)
 		return nil
 	}
 	confStr := string(result.Confidence)
@@ -355,7 +355,7 @@ func buildReplayPlan(module string, target ScanTarget, baseline, probe httpclien
 	}
 }
 
-func (r *Runner) recordVerificationOutcome(endpointURL, module string, result verification.Result) {
+func (r *Runner) recordVerificationOutcome(target ScanTarget, module, signal string, result verification.Result) {
 	outcome := learning.OutcomeInconclusive
 	for _, reason := range result.DowngradeReasons {
 		switch reason {
@@ -367,7 +367,27 @@ func (r *Runner) recordVerificationOutcome(endpointURL, module string, result ve
 			}
 		}
 	}
-	r.recordLearning(endpointURL, module, outcome)
+	r.recordLearning(target.EndpointURL, module, outcome)
+	reasons := make([]string, 0, len(result.DowngradeReasons))
+	for _, reason := range result.DowngradeReasons {
+		reasons = append(reasons, string(reason))
+	}
+	message := "Verification candidate was suppressed by proof policy"
+	if !result.Suppressed {
+		message = "Verification candidate did not satisfy the class-specific proof policy"
+	}
+	key := strings.Join([]string{
+		"verification", module, target.EndpointURL, target.Parameter, target.Location,
+		signal, fmt.Sprint(result.Suppressed), strings.Join(reasons, ","),
+	}, "|")
+	r.emitOnce(key, "verification_suppressed", message, map[string]interface{}{
+		"scan_id": r.scanID, "module": module, "endpoint": target.EndpointURL,
+		"method": target.Method, "parameter": target.Parameter, "location": target.Location,
+		"signal": signal, "confidence": result.Confidence, "score": result.Score,
+		"proof_type": result.ProofType, "proof_policy_version": result.ProofPolicy,
+		"proof_satisfied": result.ProofSatisfied, "suppressed": result.Suppressed,
+		"reasons": reasons,
+	})
 }
 
 func buildCandidate(scanID, module string, target ScanTarget, p payloadgen.Payload,
@@ -426,4 +446,25 @@ var probeTokenCounter uint64
 func randomProbeToken() string {
 	seq := atomic.AddUint64(&probeTokenCounter, 1)
 	return fmt.Sprintf("%x_%x", time.Now().UnixNano(), seq)
+}
+
+func isRedirectedAway(rr httpclient.RequestResponse, origURL string) bool {
+	if !rr.Response.Redirected {
+		return false
+	}
+	finalClean := strings.TrimRight(strings.Split(rr.Response.FinalURL, "?")[0], "/")
+	origClean := strings.TrimRight(strings.Split(origURL, "?")[0], "/")
+	return !strings.EqualFold(finalClean, origClean)
+}
+
+func isHTMLResponse(resp httpclient.ResponseRecord) bool {
+	bodyLower := strings.ToLower(strings.TrimSpace(resp.Body))
+	if strings.Contains(bodyLower, "<!doctype") || strings.Contains(bodyLower, "<html") || strings.Contains(bodyLower, "<head") {
+		return true
+	}
+	ct := strings.ToLower(resp.Headers["Content-Type"])
+	if (strings.Contains(ct, "text/html") || strings.Contains(ct, "application/xhtml+xml")) && strings.HasPrefix(bodyLower, "<") {
+		return true
+	}
+	return false
 }

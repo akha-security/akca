@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/akha-security/akca/engine/internal/modules"
 	"github.com/akha-security/akca/engine/internal/storage"
 	"github.com/akha-security/akca/engine/internal/testlab"
 )
@@ -27,38 +28,51 @@ type Scenario struct {
 }
 
 type Result struct {
-	Scenario                string   `json:"scenario"`
-	VulnClass               string   `json:"vuln_class,omitempty"`
-	Fixture                 string   `json:"fixture,omitempty"`
-	DetectionRate           float64  `json:"detection_rate"`
-	FalsePositiveRate       float64  `json:"false_positive_rate"`
-	Requests                int      `json:"requests"`
-	ReplayRequests          int      `json:"replay_requests,omitempty"`
-	RequestRepeatDriftRatio float64  `json:"request_repeat_drift_ratio,omitempty"`
-	DurationSec             float64  `json:"duration_sec"`
-	Confidence              float64  `json:"confidence"`
-	Detected                bool     `json:"detected"`
-	Precision               float64  `json:"precision,omitempty"`
-	Recall                  float64  `json:"recall,omitempty"`
-	Specificity             float64  `json:"specificity,omitempty"`
-	F1                      float64  `json:"f1,omitempty"`
-	FPRUpper95              float64  `json:"false_positive_rate_upper_95,omitempty"`
-	TruePositive            int      `json:"true_positive,omitempty"`
-	FalsePositive           int      `json:"false_positive,omitempty"`
-	TrueNegative            int      `json:"true_negative,omitempty"`
-	FalseNegative           int      `json:"false_negative,omitempty"`
-	Synthetic               bool     `json:"synthetic_fixture"`
-	Confirmed               bool     `json:"confirmed,omitempty"`
-	Skipped                 bool     `json:"skipped,omitempty"`
-	SkipReason              string   `json:"skip_reason,omitempty"`
-	BaselineRequests        int      `json:"baseline_requests,omitempty"`
-	RequestRegressionRatio  float64  `json:"request_regression_ratio,omitempty"`
-	BaselineDurationSec     float64  `json:"baseline_duration_sec,omitempty"`
-	DurationRegressionRatio float64  `json:"duration_regression_ratio,omitempty"`
-	Deterministic           bool     `json:"deterministic,omitempty"`
-	DeterminismMismatches   []string `json:"determinism_mismatches,omitempty"`
-	GoroutineDelta          int      `json:"goroutine_delta,omitempty"`
-	ReportSchemaCompatible  bool     `json:"report_schema_compatible,omitempty"`
+	Scenario                string          `json:"scenario"`
+	VulnClass               string          `json:"vuln_class,omitempty"`
+	Fixture                 string          `json:"fixture,omitempty"`
+	DetectionRate           float64         `json:"detection_rate"`
+	FalsePositiveRate       float64         `json:"false_positive_rate"`
+	Requests                int             `json:"requests"`
+	ReplayRequests          int             `json:"replay_requests,omitempty"`
+	RequestRepeatDriftRatio float64         `json:"request_repeat_drift_ratio,omitempty"`
+	DurationSec             float64         `json:"duration_sec"`
+	Confidence              float64         `json:"confidence"`
+	Detected                bool            `json:"detected"`
+	Precision               float64         `json:"precision,omitempty"`
+	Recall                  float64         `json:"recall,omitempty"`
+	Specificity             float64         `json:"specificity,omitempty"`
+	F1                      float64         `json:"f1,omitempty"`
+	FPRUpper95              float64         `json:"false_positive_rate_upper_95,omitempty"`
+	TruePositive            int             `json:"true_positive,omitempty"`
+	FalsePositive           int             `json:"false_positive,omitempty"`
+	TrueNegative            int             `json:"true_negative,omitempty"`
+	FalseNegative           int             `json:"false_negative,omitempty"`
+	Synthetic               bool            `json:"synthetic_fixture"`
+	Confirmed               bool            `json:"confirmed,omitempty"`
+	Skipped                 bool            `json:"skipped,omitempty"`
+	SkipReason              string          `json:"skip_reason,omitempty"`
+	BaselineRequests        int             `json:"baseline_requests,omitempty"`
+	RequestRegressionRatio  float64         `json:"request_regression_ratio,omitempty"`
+	BaselineDurationSec     float64         `json:"baseline_duration_sec,omitempty"`
+	DurationRegressionRatio float64         `json:"duration_regression_ratio,omitempty"`
+	Deterministic           bool            `json:"deterministic,omitempty"`
+	DeterminismMismatches   []string        `json:"determinism_mismatches,omitempty"`
+	GoroutineDelta          int             `json:"goroutine_delta,omitempty"`
+	ReportSchemaCompatible  bool            `json:"report_schema_compatible,omitempty"`
+	Corpus                  *CorpusCoverage `json:"corpus_coverage,omitempty"`
+}
+
+// CorpusCoverage makes benchmark omissions visible. A module is benchmarked
+// only when the observed corpus contains both a vulnerable fixture and a safe
+// or misleading control for that exact runnable module.
+type CorpusCoverage struct {
+	TotalModules            int      `json:"total_modules"`
+	BenchmarkedModules      int      `json:"benchmarked_modules"`
+	CoverageRatio           float64  `json:"coverage_ratio"`
+	MissingPositiveFixtures []string `json:"missing_positive_fixtures,omitempty"`
+	MissingNegativeFixtures []string `json:"missing_negative_fixtures,omitempty"`
+	SkippedCapabilities     []string `json:"skipped_capabilities,omitempty"`
 }
 
 type Lab struct {
@@ -302,6 +316,8 @@ func (l *Lab) RunObserved(ctx context.Context) ([]Result, error) {
 		ReportSchemaCompatible: full.ReportSchemaCompatible && patched.ReportSchemaCompatible &&
 			replayFull.ReportSchemaCompatible && replayPatched.ReportSchemaCompatible,
 	}
+	corpus := AuditCorpusCoverage(scenarios, results, modules.ModuleCatalog())
+	summary.Corpus = &corpus
 	if baselineAvailable {
 		summary.BaselineRequests = baseline.Requests
 		summary.BaselineDurationSec = baseline.DurationSec
@@ -387,6 +403,9 @@ type GateConfig struct {
 	RequireDeterminism               bool    `json:"require_determinism"`
 	RequireReportSchemaCompatibility bool    `json:"require_report_schema_compatibility"`
 	AllowSynthetic                   bool    `json:"allow_synthetic"`
+	MinimumModuleCorpusCoverage      float64 `json:"minimum_module_corpus_coverage"`
+	RequirePositiveAndNegativeCorpus bool    `json:"require_positive_and_negative_corpus"`
+	AllowSkippedCapabilities         bool    `json:"allow_skipped_capabilities"`
 }
 
 func StrictGateConfig() GateConfig {
@@ -397,7 +416,18 @@ func StrictGateConfig() GateConfig {
 		MaximumRequestRegressionRatio: 0.20, MaximumDurationRegressionRatio: 0.75,
 		MaximumGoroutineDelta: 16, RequireDeterminism: true,
 		RequireReportSchemaCompatibility: true, AllowSynthetic: false,
+		AllowSkippedCapabilities: true,
 	}
+}
+
+// CompleteCorpusGateConfig is intended for release qualification. Unlike the
+// operational gate it fails closed for missing module fixtures or capabilities.
+func CompleteCorpusGateConfig() GateConfig {
+	cfg := StrictGateConfig()
+	cfg.MinimumModuleCorpusCoverage = 1
+	cfg.RequirePositiveAndNegativeCorpus = true
+	cfg.AllowSkippedCapabilities = false
+	return cfg
 }
 
 type GateReport struct {
@@ -481,9 +511,19 @@ func EvaluateQualityGate(scenarios []Scenario, results []Result, cfg GateConfig)
 		report.Checks["goroutine_leak"] = cfg.MaximumGoroutineDelta < 0 ||
 			aggregate.GoroutineDelta <= cfg.MaximumGoroutineDelta
 		report.Checks["report_schema"] = !cfg.RequireReportSchemaCompatibility || aggregate.ReportSchemaCompatible
+		if aggregate.Corpus != nil {
+			report.Checks["module_corpus"] = aggregate.Corpus.CoverageRatio >= cfg.MinimumModuleCorpusCoverage
+			report.Checks["corpus_contracts"] = !cfg.RequirePositiveAndNegativeCorpus ||
+				(len(aggregate.Corpus.MissingPositiveFixtures) == 0 && len(aggregate.Corpus.MissingNegativeFixtures) == 0)
+			report.Checks["capability_execution"] = cfg.AllowSkippedCapabilities || len(aggregate.Corpus.SkippedCapabilities) == 0
+		} else {
+			report.Checks["module_corpus"] = cfg.MinimumModuleCorpusCoverage <= 0
+			report.Checks["corpus_contracts"] = !cfg.RequirePositiveAndNegativeCorpus
+			report.Checks["capability_execution"] = cfg.AllowSkippedCapabilities
+		}
 		for _, check := range []string{
 			"request_budget", "request_repeat_stability", "duration_budget", "request_regression", "duration_regression",
-			"determinism", "goroutine_leak", "report_schema",
+			"determinism", "goroutine_leak", "report_schema", "module_corpus", "corpus_contracts", "capability_execution",
 		} {
 			if !report.Checks[check] {
 				report.Violations = append(report.Violations, check+" quality gate failed")
@@ -492,6 +532,44 @@ func EvaluateQualityGate(scenarios []Scenario, results []Result, cfg GateConfig)
 	}
 	report.Passed = len(report.Violations) == 0
 	return report
+}
+
+// AuditCorpusCoverage compares observed fixtures with the runnable module
+// catalog. Vulnerability classes deliberately must match module identifiers;
+// aliases would otherwise make the coverage percentage look better than it is.
+func AuditCorpusCoverage(scenarios []Scenario, results []Result, moduleCatalog []string) CorpusCoverage {
+	positive := make(map[string]bool)
+	negative := make(map[string]bool)
+	for _, scenario := range scenarios {
+		name := strings.ToLower(strings.TrimSpace(scenario.VulnClass))
+		if scenario.Vulnerable {
+			positive[name] = true
+		} else {
+			negative[name] = true
+		}
+	}
+	coverage := CorpusCoverage{TotalModules: len(moduleCatalog)}
+	for _, module := range moduleCatalog {
+		module = strings.ToLower(strings.TrimSpace(module))
+		if positive[module] && negative[module] {
+			coverage.BenchmarkedModules++
+		}
+		if !positive[module] {
+			coverage.MissingPositiveFixtures = append(coverage.MissingPositiveFixtures, module)
+		}
+		if !negative[module] {
+			coverage.MissingNegativeFixtures = append(coverage.MissingNegativeFixtures, module)
+		}
+	}
+	if coverage.TotalModules > 0 {
+		coverage.CoverageRatio = float64(coverage.BenchmarkedModules) / float64(coverage.TotalModules)
+	}
+	for _, result := range results {
+		if result.Skipped && strings.TrimSpace(result.SkipReason) != "" {
+			coverage.SkippedCapabilities = append(coverage.SkippedCapabilities, result.Scenario+": "+result.SkipReason)
+		}
+	}
+	return coverage
 }
 
 func observedFinding(findings []storage.FindingRecord, scenario Scenario) (bool, float64, bool) {

@@ -31,6 +31,9 @@ func BuildTasksForTech(baseURL string, hints []string) []FuzzTask {
 	for _, p := range generalPaths {
 		add(p, CategoryGeneral)
 	}
+	for _, p := range contentDirectoryPaths {
+		add(p, CategoryGeneral)
+	}
 	for _, p := range archivePaths {
 		add(p, CategoryArchive)
 	}
@@ -70,6 +73,26 @@ var generalPaths = []string{
 	"/.well-known/assetlinks.json", "/.well-known/apple-app-site-association",
 	"/humans.txt", "/browserconfig.xml", "/ads.txt", "/app-ads.txt",
 	"/manifest.json", "/manifest.webmanifest", "/service-worker.js",
+}
+
+// contentDirectoryPaths contains bounded, high-signal directory roots used by
+// common web stacks and file-management features. Requests remain GET-only and
+// are protected by scope, soft-404, rate-limit, and global request controls.
+var contentDirectoryPaths = []string{
+	// Common public/static roots.
+	"/assets/", "/static/", "/images/", "/img/", "/media/", "/public/",
+	"/files/", "/resources/", "/content/", "/downloads/",
+	// Front-end build and dependency roots.
+	"/css/", "/js/", "/scripts/", "/styles/", "/fonts/", "/icons/",
+	"/dist/", "/build/", "/vendor/",
+	// Uploads, attachments, documents, and galleries.
+	"/upload/", "/uploads/", "/userfiles/", "/attachments/", "/documents/",
+	"/photos/", "/gallery/", "/download/",
+	// Application data and generated output.
+	"/storage/", "/data/", "/export/", "/temp/", "/tmp/", "/cache/",
+	// Sensitive operational and historical roots.
+	"/backup/", "/backups/", "/archive/", "/logs/", "/private/",
+	"/old/", "/legacy/", "/site/", "/web/", "/www/",
 }
 
 var archivePaths = []string{

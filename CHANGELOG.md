@@ -5,6 +5,54 @@ All notable changes to AKCA will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [v0.2.5] - 2026-09-28
+
+### Added
+
+- Add directory-listing discovery for common content roots, inferred parent directories from observed static assets, and structural Apache/nginx/Python/IIS listing detection with CWE-548 reporting.
+- Add machine-readable assurance profiles for every runnable module, including OWASP ASVS, WSTG and API Security Top 10 mappings, required request surfaces, capabilities and benchmark contracts.
+- Add a fail-closed `akca benchmark --complete-corpus` release gate that requires positive and negative observed fixtures for every module and rejects capability skips.
+- Add end-to-end OAST self-testing, explicit browser/OAST/identity/workflow/runtime capability matrices and automatic role-profile inference from distinct configured authentication profiles.
+- Add XML, multipart, raw GraphQL, WebSocket JSON, observed-header and positional path-identifier mutation surfaces.
+- Add paired SQL boolean-oracle and numeric arithmetic-oracle regression coverage for search, login and numeric identifier surfaces.
+- Add cryptographically signed GitHub build-provenance attestations for every release binary.
+- Add blind boolean LDAP and XPath injection verification with expanded vendor and parser error signatures.
+- Add Velocity, Smarty and Razor SSTI probes plus string-transform execution checks that do not depend only on arithmetic evaluation.
+- Add dynamic MSSQL `WAITFOR DELAY` timing probes, Windows PowerShell/cmd command-injection variants and the Unix `||id` operator family.
+- Add heuristic single-profile IDOR testing and a broader tenant, organization, workspace, team, project and company identifier dictionary while preserving multi-role ownership proofs.
+- Add route authorization-bypass variants for encoded slashes, case normalization and `X-HTTP-Method-Override`, including safe-read fallback for non-GET endpoints.
+- Add IPv6, IPv4-mapped IPv6, hexadecimal/octal, zero-address and gopher/dict SSRF variants.
+- Add takeover fingerprints for AWS CloudFront and Elastic Beanstalk, Azure CDN, Google Cloud Run, Render, Tilda and Canny.
+- Add cache-poisoning parameter-cloaking verification with anonymous replays and a cold negative control.
+
+### Changed
+
+- Expand SSRF URL-parser and cloud-metadata variants, deserialization format coverage, LLM indirect/RAG/tool-boundary probes, TLS key/signature/cipher analysis, HSTS validation and executable CSP-source checks.
+- Auto-admit exact cross-origin hosts discovered only from passive HTML/CSP dependencies, while keeping active requests out of scope and stripping credentials.
+- Publish response usability, authentication/rate/gateway blocks, transport failures and proof-observation roles in module coverage events.
+- Preserve captured browser requests as the preferred replay template, including duplicate parameters and case-insensitive HTTP header identity.
+- Publish proof-policy suppression reasons in machine-readable and HTML/Markdown coverage diagnostics.
+- Validate the curated CVE snapshot at startup, publish provenance/freshness metadata and fail closed for incomplete component identities.
+- Embed release version, commit and build date in `akca --version` and generated reports.
+- Stream report findings with cancellation support and a bounded fast-partial path after Ctrl+C.
+
+### Fixed
+
+- Hide OAST preflight health callbacks from vulnerability cards and exclude them from the final OAST hit count.
+- Correct request mutation for XML, multipart and raw GraphQL bodies and extend path mutation to UUID, ULID, hash and high-entropy identifiers.
+- Prevent configured browser or OAST flags from being treated as working capabilities until the underlying browser/callback path is actually usable.
+- Replace destructive SQL syntax controls with clean native-value controls and compare normalized visible response content to resist padding noise.
+- Distinguish browser-confirmed reflected XSS from true DOM-based XSS in live finding labels and evidence signals.
+
+### Validation
+
+- Full Go package tests pass with `go test ./... -count=1`.
+- Static analysis passes with `go vet ./...`.
+- Strict observed-corpus quality gates retain 1.0 precision and an F1 score above 0.96.
+- Release binaries are built for Windows x64, Linux x64/ARM64 and macOS Intel/Apple Silicon with SHA-256 manifests and GitHub provenance attestations.
+
 ## [v0.2.4] - 2026-09-26
 
 ### Added
@@ -283,7 +331,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - HTML, JSON, Markdown, CSV and SARIF reporting.
 - CWE and OWASP Top 10:2025 report classification.
 
-[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.5...HEAD
+[v0.2.5]: https://github.com/akha-security/akca/compare/v0.2.4...v0.2.5
 [v0.2.4]: https://github.com/akha-security/akca/compare/v0.2.3...v0.2.4
 [v0.2.3]: https://github.com/akha-security/akca/compare/v0.2.2...v0.2.3
 [v0.2.2]: https://github.com/akha-security/akca/compare/v0.2.1...v0.2.2

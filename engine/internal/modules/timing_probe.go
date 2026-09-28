@@ -201,7 +201,8 @@ func (r *Runner) buildTimedFinding(ctx context.Context, target ScanTarget, modul
 	candidate.TimingMatchedControl = append([]int64(nil), zeroSamples...)
 	candidate.TimingControl = append([]int64(nil), zeroSamples...)
 	result := r.verifier.Verify(candidate)
-	if result.Suppressed {
+	if result.Suppressed || !result.ProofSatisfied {
+		r.recordVerificationOutcome(target, module, signal, result)
 		return nil
 	}
 	responseMarkers := evidencemarkers.ForResponse(p.Value, signal, baseline.Response.Body, probe.Response.Body, "")

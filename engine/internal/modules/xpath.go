@@ -19,6 +19,8 @@ var xpathErrorSignatures = []string{
 	"system.xml.xpath.xpathexception", "msxml3.dll", "msxml4.dll",
 	"org.apache.xpath.XPathException", "saxon.trans.XPathException",
 	"xpath syntax error", "invalid predicate in xpath",
+	"xmlxpatherror", "invalid xpath expression", "xpathexception",
+	"unknown xpath", "xpath error", "evaluation of xpath", "invalid token in xpath",
 }
 
 func xpathErrorSignal(body, baseline string) bool {
@@ -54,6 +56,7 @@ func (r *Runner) runXPathInjection(ctx context.Context, target ScanTarget) []Mod
 		{value: "1' or count(/child::node())>0 or '1'='1", variant: "count_predicate_injection"},
 		{value: "1 and count(//*)>0", variant: "count_all_nodes"},
 		{value: "admin' or '1'='1' or 'a'='a", variant: "admin_or_true"},
+		{value: "' or string-length(name(/*[1]))>0 or 'a'='a", variant: "string_length_boolean"},
 	}
 
 	var out []ModuleFinding
@@ -88,7 +91,41 @@ func (r *Runner) runXPathInjection(ctx context.Context, target ScanTarget) []Mod
 				f.Severity = "high"
 				f.Description = fmt.Sprintf("Target parameter '%s' triggered an XML/XPath query engine error ('%s') when probed with '%s'.", target.Parameter, matchedSig, p.value)
 				r.recordFinding(ctx, &out, f, "xpath", signal)
-				break
+				return out
+			}
+		}
+	}
+
+	// Blind Boolean Differential Check
+	if len(out) == 0 && baseline.Response.StatusCode >= 200 && baseline.Response.StatusCode < 400 {
+		truePayload := "' or '1'='1' or 'a'='b"
+		falsePayload := "' and '1'='2' and 'a'='a"
+
+		trueRR, errTrue := r.probe(ctx, target, truePayload)
+		falseRR, errFalse := r.probe(ctx, target, falsePayload)
+
+		if errTrue == nil && errFalse == nil && !isInfrastructureError(trueRR.Response.StatusCode) && !isInfrastructureError(falseRR.Response.StatusCode) {
+			trueLen := len(trueRR.Response.Body)
+			falseLen := len(falseRR.Response.Body)
+			diff := trueLen - falseLen
+			if diff < 0 {
+				diff = -diff
+			}
+
+			if (trueRR.Response.StatusCode == 200 && falseRR.Response.StatusCode != 200) ||
+				(diff > 40 && resourceFingerprint(trueRR.Response.Body) != resourceFingerprint(falseRR.Response.Body)) {
+				reTrue, reErr := r.probe(ctx, target, truePayload)
+				if reErr == nil && reTrue.Response.StatusCode == trueRR.Response.StatusCode {
+					signal := "xpath_blind_boolean"
+					pObj := defaultPayload("xpath", "blind_boolean", truePayload, signal)
+					f := r.verifyAndBuild(ctx, "xpath", target, pObj, falseRR, reTrue, signal, false, false, "", "")
+					if f != nil {
+						f.Title = "XPath Injection (Blind Boolean-Based)"
+						f.Severity = "high"
+						f.Description = fmt.Sprintf("Target parameter '%s' exhibits differential behavior between boolean XPath conditions ('%s' vs '%s').", target.Parameter, truePayload, falsePayload)
+						r.recordFinding(ctx, &out, f, "xpath", signal)
+					}
+				}
 			}
 		}
 	}

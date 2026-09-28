@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/akha-security/akca/engine/internal/branding"
 	"github.com/akha-security/akca/engine/internal/evidencestore"
 	"github.com/akha-security/akca/engine/internal/findingtext"
 	"github.com/akha-security/akca/engine/internal/storage"
@@ -23,13 +24,24 @@ func NewBuilder(store *evidencestore.Store, db *storage.DB) *Builder {
 
 func (b *Builder) BuildMeta(opts Options) (Document, error) {
 	doc := Document{
-		SchemaVersion: ReportSchemaVersion,
-		GeneratedAt:   time.Now().UTC(),
-		Template:      opts.Template,
-		Format:        opts.Format,
-		Partial:       opts.Partial,
-		Title:         templateTitle(opts.Template),
-		Summary:       templateSummary(opts.Template),
+		SchemaVersion:   ReportSchemaVersion,
+		EngineVersion:   branding.VersionLabel,
+		EngineCommit:    branding.CommitSHA,
+		EngineBuildDate: branding.BuildDate,
+		GeneratedAt:     time.Now().UTC(),
+		Template:        opts.Template,
+		Format:          opts.Format,
+		Partial:         opts.Partial,
+		Title:           templateTitle(opts.Template),
+		Summary:         templateSummary(opts.Template),
+	}
+	if opts.FastPartial {
+		doc.Partial = true
+		if opts.MaxFindings > 0 {
+			doc.Warnings = append(doc.Warnings, fmt.Sprintf("Fast interrupt report: rendered at most %d findings. Additional records remain in the local database.", opts.MaxFindings))
+		} else {
+			doc.Warnings = append(doc.Warnings, "Fast interrupt report: secondary report sections were shortened so Ctrl+C can return promptly.")
+		}
 	}
 	scopeSec, err := b.buildScope(opts.ScanID)
 	if err != nil {
@@ -53,12 +65,16 @@ func (b *Builder) BuildMeta(opts Options) (Document, error) {
 	if err != nil {
 		return doc, err
 	}
-	repMetrics, err := b.reportMetrics(opts, metrics)
-	if err != nil {
-		doc.Partial = true
-		doc.Warnings = append(doc.Warnings, fmt.Sprintf("metrics calculation warning: %v", err))
+	if opts.FastPartial {
+		doc.Metrics = metrics
+	} else {
+		repMetrics, err := b.reportMetrics(opts, metrics)
+		if err != nil {
+			doc.Partial = true
+			doc.Warnings = append(doc.Warnings, fmt.Sprintf("metrics calculation warning: %v", err))
+		}
+		doc.Metrics = repMetrics
 	}
-	doc.Metrics = repMetrics
 
 	groups, err := b.db.ListFindingGroups(opts.ScanID, 100)
 	if err != nil {
@@ -104,7 +120,7 @@ func (b *Builder) BuildMeta(opts Options) (Document, error) {
 		doc.Warnings = append(doc.Warnings, "Scan coverage contains explicit gaps; review the coverage section before treating absence of findings as assurance.")
 	}
 
-	if opts.Template == TemplateInternal || opts.Template == TemplateAppendix {
+	if !opts.FastPartial && (opts.Template == TemplateInternal || opts.Template == TemplateAppendix) {
 		leads, err := b.buildManualLeads(opts)
 		if err != nil {
 			doc.Partial = true
@@ -127,26 +143,35 @@ func (b *Builder) buildCoverageSection(scanID string, redact bool) ([]CoverageEn
 	incomplete := false
 	for _, row := range rows {
 		switch row.EventType {
-		case "module_readiness", "coverage_gap", "plugin_skipped", "resource_limit_reached", "scan_error":
+		case "module_readiness", "coverage_gap", "plugin_skipped", "resource_limit_reached", "scan_error", "verification_suppressed":
 		default:
 			continue
 		}
 		var payload struct {
-			Module     string `json:"module"`
-			Phase      string `json:"phase"`
-			Endpoint   string `json:"endpoint"`
-			Reason     string `json:"reason"`
-			Configured *bool  `json:"configured"`
+			Module     string   `json:"module"`
+			Phase      string   `json:"phase"`
+			Endpoint   string   `json:"endpoint"`
+			Reason     string   `json:"reason"`
+			Reasons    []string `json:"reasons"`
+			ProofType  string   `json:"proof_type"`
+			Confidence string   `json:"confidence"`
+			Score      float64  `json:"score"`
+			Configured *bool    `json:"configured"`
 		}
 		_ = json.Unmarshal([]byte(row.EventJSON), &payload)
 		entry := CoverageEntry{
 			EventType: row.EventType, Summary: row.Summary, Module: payload.Module,
-			Phase: payload.Phase, Endpoint: payload.Endpoint, Reason: payload.Reason, Configured: payload.Configured,
+			Phase: payload.Phase, Endpoint: payload.Endpoint, Reason: payload.Reason,
+			Reasons: payload.Reasons, ProofType: payload.ProofType, Confidence: payload.Confidence,
+			Score: payload.Score, Configured: payload.Configured,
 		}
 		if redact {
 			entry.Summary = RedactString(entry.Summary)
 			entry.Endpoint = RedactString(entry.Endpoint)
 			entry.Reason = RedactString(entry.Reason)
+			for i := range entry.Reasons {
+				entry.Reasons[i] = RedactString(entry.Reasons[i])
+			}
 		}
 		switch row.EventType {
 		case "coverage_gap", "resource_limit_reached", "scan_error":
