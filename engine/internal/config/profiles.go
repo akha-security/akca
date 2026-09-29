@@ -1,12 +1,13 @@
 package config
 
 const (
-	// Zero means unlimited. Full Scan is exhaustive by default; operators that
-	// need a bounded crawl can still set the explicit CLI/API limits.
+	// The global/module request budget remains unlimited. Crawl traffic is
+	// bounded separately, while the larger endpoint inventory preserves method
+	// variants and hidden routes discovered from forms, JavaScript, and APIs.
 	FullScanRequestBudget        = 0
-	FullScanCrawlerRequestBudget = 0
+	FullScanCrawlerRequestBudget = 1_500
 	FullScanMaxPages             = 0
-	FullScanMaxEndpoints         = 0
+	FullScanMaxEndpoints         = 10_000
 )
 
 // ApplyScanProfile normalizes every scan to AKCA's single exhaustive Full Scan
@@ -26,7 +27,7 @@ func ApplyScanProfile(cfg ScanConfig) ScanConfig {
 		cfg.MaxPages = FullScanMaxPages
 	}
 	if !cfg.Explicit.MaxEndpoints {
-		cfg.MaxEndpoints = cfg.MaxPages
+		cfg.MaxEndpoints = FullScanMaxEndpoints
 	}
 	if !cfg.Explicit.MaxDepth {
 		cfg.MaxDepth = 0

@@ -180,6 +180,7 @@ func TestCrawlerRetainsOrdinaryAndAPIVariantCoverage(t *testing.T) {
 
 func TestUnlimitedCrawlerDoesNotSilentlySaturateRoutes(t *testing.T) {
 	cfg := config.DefaultScanConfig()
+	cfg.MaxEndpoints = 0
 	cfg.IncludeDomains = []string{"example.com"}
 	c := New("scan-unlimited-routes", cfg, nil, scope.NewEngine(cfg), nil, nil)
 	budget := Budget{}
