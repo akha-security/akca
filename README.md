@@ -348,7 +348,7 @@ AKCA distributes bounded module budgets across modules, URLs, and parameters. Un
 | `--rate-limit 5` | Limit requests per second |
 | `--concurrency 4` | Limit concurrent workers |
 
-By default, crawl traffic is capped at 1,500 requests and the discovered endpoint inventory at 10,000 entries. The endpoint inventory keeps distinct HTTP method variants such as GET and POST. The module scan has no request quota. Budget interruptions are reported as **incomplete coverage**. Interrupted targets are not automatically resumed when later work returns unused budget. No budget setting guarantees detection of every vulnerability.
+By default, crawl traffic is capped at 1,500 requests and 1,000 visited pages. The discovered endpoint inventory remains unlimited so distinct HTTP method variants such as GET and POST and hidden routes are retained. The module scan has no request quota. Budget interruptions are reported as **incomplete coverage**. Interrupted targets are not automatically resumed when later work returns unused budget. No budget setting guarantees detection of every vulnerability.
 
 Linked API/service subdomains are outside the default target scope. To include linked subdomains under the same root:
 

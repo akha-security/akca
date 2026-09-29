@@ -1002,10 +1002,11 @@ func sessionDiscoverySummary(maxPages, maxEndpoints, maxDepth int) string {
 		return "Exhaustive"
 	case maxPages <= 0 && maxEndpoints <= 0:
 		return fmt.Sprintf("Depth %d", maxDepth)
-	case maxPages > 0 && maxEndpoints > 0:
-		return fmt.Sprintf("%s URLs · %s endpoints", shortSessionCount(maxPages), shortSessionCount(maxEndpoints))
 	case maxPages > 0:
-		return fmt.Sprintf("%s URL cap", shortSessionCount(maxPages))
+		if maxDepth > 0 {
+			return fmt.Sprintf("%s pages · depth %d", formattedCount(maxPages), maxDepth)
+		}
+		return fmt.Sprintf("%s pages", formattedCount(maxPages))
 	default:
 		return fmt.Sprintf("%s endpoint cap", shortSessionCount(maxEndpoints))
 	}
@@ -1014,16 +1015,23 @@ func sessionDiscoverySummary(maxPages, maxEndpoints, maxDepth int) string {
 func sessionMemorySummary(payload map[string]interface{}) string {
 	limit := payloadInt(payload, "memory_limit_mb")
 	available := payloadInt(payload, "detected_available_memory_mb")
+	total := payloadInt(payload, "detected_total_memory_mb")
 	if limit <= 0 {
+		if total > 0 {
+			return shortMemory(total) + " total"
+		}
 		return "System managed"
 	}
+	if total > 0 {
+		return fmt.Sprintf("%s scan / %s total", shortMemory(limit), shortMemory(total))
+	}
 	if available > 0 {
-		return fmt.Sprintf("%s cap · %s avail", shortMemory(limit), shortMemory(available))
+		return fmt.Sprintf("%s scan / %s free", shortMemory(limit), shortMemory(available))
 	}
 	if safeTerminalText(fmt.Sprint(payload["memory_limit_source"])) == "manual" {
-		return shortMemory(limit) + " manual"
+		return shortMemory(limit) + " scan max"
 	}
-	return shortMemory(limit) + " limit"
+	return shortMemory(limit) + " scan max"
 }
 
 func shortMemory(mb int) string {

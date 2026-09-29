@@ -10,16 +10,16 @@ import (
 	"strings"
 )
 
-func availableMemoryBytes() (uint64, string, error) {
-	hostAvailable, err := linuxMemAvailable()
+func memoryCapacityBytes() (uint64, uint64, string, error) {
+	hostTotal, hostAvailable, err := linuxMemoryCapacity()
 	if err != nil {
-		return 0, "linux", err
+		return 0, 0, "linux", err
 	}
-	containerAvailable := linuxCgroupAvailable()
-	if containerAvailable > 0 && containerAvailable < hostAvailable {
-		return containerAvailable, "linux_cgroup", nil
+	containerTotal, containerAvailable := linuxCgroupCapacity()
+	if containerTotal > 0 && containerAvailable > 0 && containerTotal < hostTotal {
+		return containerTotal, containerAvailable, "linux_cgroup", nil
 	}
-	return hostAvailable, "linux_available", nil
+	return hostTotal, hostAvailable, "linux", nil
 }
 
 func processMemoryBytes() (uint64, error) {
@@ -38,30 +38,40 @@ func processMemoryBytes() (uint64, error) {
 	return residentPages * uint64(os.Getpagesize()), nil
 }
 
-func linuxMemAvailable() (uint64, error) {
+func linuxMemoryCapacity() (uint64, uint64, error) {
 	file, err := os.Open("/proc/meminfo")
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer file.Close()
+	var total, available uint64
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
-		if len(fields) >= 2 && fields[0] == "MemAvailable:" {
-			kb, parseErr := strconv.ParseUint(fields[1], 10, 64)
-			if parseErr != nil {
-				return 0, parseErr
-			}
-			return kb * 1024, nil
+		if len(fields) < 2 {
+			continue
+		}
+		kb, parseErr := strconv.ParseUint(fields[1], 10, 64)
+		if parseErr != nil {
+			continue
+		}
+		switch fields[0] {
+		case "MemTotal:":
+			total = kb * 1024
+		case "MemAvailable:":
+			available = kb * 1024
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return 0, fmt.Errorf("MemAvailable not found in /proc/meminfo")
+	if total == 0 || available == 0 {
+		return 0, 0, fmt.Errorf("MemTotal or MemAvailable not found in /proc/meminfo")
+	}
+	return total, available, nil
 }
 
-func linuxCgroupAvailable() uint64 {
+func linuxCgroupCapacity() (uint64, uint64) {
 	for _, pair := range [][2]string{
 		{"/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"},
 		{"/sys/fs/cgroup/memory/memory.limit_in_bytes", "/sys/fs/cgroup/memory/memory.usage_in_bytes"},
@@ -69,10 +79,10 @@ func linuxCgroupAvailable() uint64 {
 		limit, limitOK := readMemoryNumber(pair[0])
 		used, usedOK := readMemoryNumber(pair[1])
 		if limitOK && usedOK && limit > used {
-			return limit - used
+			return limit, limit - used
 		}
 	}
-	return 0
+	return 0, 0
 }
 
 func readMemoryNumber(path string) (uint64, bool) {

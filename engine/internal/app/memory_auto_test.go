@@ -6,9 +6,9 @@ import (
 )
 
 func TestResolveMemoryLimitHonorsManualOverride(t *testing.T) {
-	limit, source, available := resolveMemoryLimitMB(4096)
-	if limit != 4096 || source != "manual" || available != 0 {
-		t.Fatalf("manual memory limit was not preserved: limit=%d source=%q available=%d", limit, source, available)
+	limit, source, available, total := resolveMemoryLimitMB(4096)
+	if limit != 4096 || source != "manual" || total < available {
+		t.Fatalf("manual memory limit was not preserved: limit=%d source=%q available=%d total=%d", limit, source, available, total)
 	}
 }
 
@@ -30,9 +30,9 @@ func TestAutomaticLimitNeverExceedsSafeShareOnTinySystems(t *testing.T) {
 }
 
 func TestAutomaticMemoryDetectionReturnsUsableLimit(t *testing.T) {
-	limit, source, _ := resolveMemoryLimitMB(0)
-	if limit < 64 || !strings.HasPrefix(source, "automatic_") {
-		t.Fatalf("automatic detection returned limit=%d source=%q", limit, source)
+	limit, source, available, total := resolveMemoryLimitMB(0)
+	if limit < 64 || !strings.HasPrefix(source, "automatic_") || available <= 0 || total < available {
+		t.Fatalf("automatic detection returned limit=%d source=%q available=%d total=%d", limit, source, available, total)
 	}
 }
 

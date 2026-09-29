@@ -37,16 +37,16 @@ type processMemoryCounters struct {
 	PeakPagefileUsage          uintptr
 }
 
-func availableMemoryBytes() (uint64, string, error) {
+func memoryCapacityBytes() (uint64, uint64, string, error) {
 	status := memoryStatusEx{Length: uint32(unsafe.Sizeof(memoryStatusEx{}))}
 	ok, _, callErr := globalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&status)))
 	if ok == 0 {
-		return 0, "windows", fmt.Errorf("GlobalMemoryStatusEx: %v", callErr)
+		return 0, 0, "windows", fmt.Errorf("GlobalMemoryStatusEx: %v", callErr)
 	}
-	if status.AvailPhys == 0 {
-		return 0, "windows", fmt.Errorf("GlobalMemoryStatusEx returned zero available memory")
+	if status.TotalPhys == 0 || status.AvailPhys == 0 {
+		return 0, 0, "windows", fmt.Errorf("GlobalMemoryStatusEx returned zero physical memory")
 	}
-	return status.AvailPhys, "windows_available", nil
+	return status.TotalPhys, status.AvailPhys, "windows", nil
 }
 
 func processMemoryBytes() (uint64, error) {

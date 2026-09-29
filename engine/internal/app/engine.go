@@ -193,7 +193,7 @@ func (e *Engine) startScan(cfg config.ScanConfig, completed map[string]bool) err
 	if strings.HasPrefix(cfg.MemoryLimitSource, "automatic_") {
 		configuredMemoryMB = 0
 	}
-	cfg.MaxMemoryMB, cfg.MemoryLimitSource, cfg.DetectedAvailableMemoryMB = resolveMemoryLimitMB(configuredMemoryMB)
+	cfg.MaxMemoryMB, cfg.MemoryLimitSource, cfg.DetectedAvailableMemoryMB, cfg.DetectedTotalMemoryMB = resolveMemoryLimitMB(configuredMemoryMB)
 	if cfg.EnableOAST && cfg.OASTSelfHosted == nil && strings.TrimSpace(cfg.OASTServerURL) == "" {
 		cfg.OASTServerURL = config.DefaultOASTServers
 	}
@@ -495,6 +495,7 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 		"memory_limit_mb":              cfg.MaxMemoryMB,
 		"memory_limit_source":          cfg.MemoryLimitSource,
 		"detected_available_memory_mb": cfg.DetectedAvailableMemoryMB,
+		"detected_total_memory_mb":     cfg.DetectedTotalMemoryMB,
 		"oast_enabled":                 cfg.EnableOAST,
 		"browser_enabled":              cfg.EnableHeadlessCrawler,
 		"js_analysis_enabled":          cfg.EnableJSAnalysis,

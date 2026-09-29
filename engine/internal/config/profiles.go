@@ -1,13 +1,13 @@
 package config
 
 const (
-	// The global/module request budget remains unlimited. Crawl traffic is
-	// bounded separately, while the larger endpoint inventory preserves method
-	// variants and hidden routes discovered from forms, JavaScript, and APIs.
+	// The global/module request budget remains unlimited. Crawl traffic and
+	// visited pages are bounded separately, while the endpoint inventory stays
+	// unlimited so method variants and hidden routes are not discarded.
 	FullScanRequestBudget        = 0
 	FullScanCrawlerRequestBudget = 1_500
-	FullScanMaxPages             = 0
-	FullScanMaxEndpoints         = 10_000
+	FullScanMaxPages             = 1_000
+	FullScanMaxEndpoints         = 0
 )
 
 // ApplyScanProfile normalizes every scan to AKCA's single exhaustive Full Scan

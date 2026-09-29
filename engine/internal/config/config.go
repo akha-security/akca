@@ -264,6 +264,7 @@ type ScanConfig struct {
 	MaxMemoryMB                   int                           `json:"max_memory_mb,omitempty"`
 	MemoryLimitSource             string                        `json:"memory_limit_source,omitempty"`
 	DetectedAvailableMemoryMB     int                           `json:"detected_available_memory_mb,omitempty"`
+	DetectedTotalMemoryMB         int                           `json:"detected_total_memory_mb,omitempty"`
 	FollowRedirects               bool                          `json:"follow_redirects"`
 	EnableHeadlessCrawler         bool                          `json:"enable_headless_crawler"`
 	EnableJSAnalysis              bool                          `json:"enable_js_analysis"`

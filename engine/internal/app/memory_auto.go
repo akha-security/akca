@@ -9,18 +9,24 @@ const (
 )
 
 // resolveMemoryLimitMB returns a manual limit unchanged or derives a safe Go
-// heap ceiling from memory currently available to the host/container.
-func resolveMemoryLimitMB(configuredMB int) (limitMB int, source string, availableMB int) {
-	if configuredMB > 0 {
-		return configuredMB, "manual", 0
+// heap ceiling from memory currently available to the host/container. Capacity
+// is still detected for manual limits so the UI can show an unambiguous
+// scan-limit/total-memory pair.
+func resolveMemoryLimitMB(configuredMB int) (limitMB int, source string, availableMB, totalMB int) {
+	totalBytes, availableBytes, detectedSource, err := memoryCapacityBytes()
+	if err == nil {
+		availableMB = int(availableBytes / bytesPerMiB)
+		totalMB = int(totalBytes / bytesPerMiB)
 	}
-	availableBytes, detectedSource, err := availableMemoryBytes()
+	if configuredMB > 0 {
+		return configuredMB, "manual", availableMB, totalMB
+	}
 	if err != nil || availableBytes == 0 {
-		return autoMemoryFallbackMB, "automatic_fallback", 0
+		return autoMemoryFallbackMB, "automatic_fallback", 0, 0
 	}
 	availableMB = int(availableBytes / bytesPerMiB)
 	limitMB = automaticLimitForAvailableBytes(availableBytes)
-	return limitMB, "automatic_" + detectedSource, availableMB
+	return limitMB, "automatic_" + detectedSource, availableMB, totalMB
 }
 
 func automaticLimitForAvailableBytes(availableBytes uint64) int {

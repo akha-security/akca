@@ -242,11 +242,12 @@ func TestScanSessionPanelIsCompactAndUsesStringTargets(t *testing.T) {
 		"memory_limit_mb":              8192,
 		"memory_limit_source":          "automatic_windows",
 		"detected_available_memory_mb": 16384,
+		"detected_total_memory_mb":     32768,
 	})
 	for _, want := range []string{
 		"SCAN SESSION", "ACTIVE", "TARGET", "http://example.test", "PROFILE", "Full Scan",
-		"CRAWL", "1K URLs · 1K endpoints", "OAST", "OAST Ready",
-		"RATE", "50 req/s", "REQUESTS", "Uncapped", "RAM", "8.0G cap · 16.0G avail",
+		"CRAWL", "1,000 pages", "OAST", "OAST Ready",
+		"RATE", "50 req/s", "REQUESTS", "Uncapped", "RAM", "8.0G scan / 32.0G total",
 		"ENGINE", "Browser + JS", "AUTH", "Authenticated", "TRANSPORT", "Direct · TLS on",
 	} {
 		if !strings.Contains(panel, want) {
