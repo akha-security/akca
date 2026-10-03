@@ -491,6 +491,12 @@ func TestSQLiDynamicTimingPayloadsPrioritizeOracleHint(t *testing.T) {
 
 func TestSQLiClassicFallbackRunsWithoutGeneratedPayloads(t *testing.T) {
 	cfg := config.DefaultScanConfig()
+	if payloads := appendSQLiClassicFallbacks(nil, cfg); len(payloads) != len(sqliFallbackPayloadSet) {
+		t.Fatalf("full scan must retain all classic SQLi fallbacks, got %d want %d", len(payloads), len(sqliFallbackPayloadSet))
+	}
+
+	cfg.ScanIntensity = "fast"
+	cfg.AllowedVulnerabilityClasses = []string{"sqli"}
 	payloads := appendSQLiClassicFallbacks(nil, cfg)
 	if len(payloads) != 1 || payloads[0].Value != `'` || payloads[0].ExpectedSignal != "sql_error" {
 		t.Fatalf("fast scan must retain a classic error-based SQLi probe, got %+v", payloads)

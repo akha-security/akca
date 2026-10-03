@@ -214,7 +214,7 @@ func (l *Listener) GenerateBoundURL(binding ProbeBinding) (GeneratedURL, error) 
 	}
 	c := Correlation{
 		ScanID: scanID, PayloadID: binding.PayloadID, CandidateID: binding.CandidateID,
-		CorrelationToken: gen.CorrelationToken, Nonce: nonce,
+		CorrelationToken: gen.CorrelationToken, ProviderDomain: strings.ToLower(strings.TrimSpace(l.provider.Domain())), Nonce: nonce,
 		EndpointURL: binding.EndpointURL, Parameter: binding.Parameter, Location: binding.Location,
 		VulnClass: binding.VulnClass, FindingID: binding.FindingID,
 		CallbackURL: gen.URL, RegisteredAt: time.Now().UTC(),

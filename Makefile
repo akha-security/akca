@@ -1,4 +1,4 @@
-.PHONY: build build-linux build-windows build-api build-policy test benchmark quality clean
+.PHONY: build build-linux build-windows build-api build-policy test benchmark benchmark-release quality clean
 
 # Yerel isletim sisteminize gore derler (Windows'ta akca.exe, Linux/macOS'ta akca olusturur)
 build:
@@ -24,6 +24,10 @@ test:
 benchmark:
 	@tmpdir="$$(mktemp -d)"; trap 'rm -rf "$$tmpdir"' EXIT; \
 	cd engine && go run ./cmd/akca benchmark --db "$$tmpdir/akca-benchmark.db" --output "$$tmpdir/benchmark-quality.json" --strict
+
+benchmark-release:
+	@tmpdir="$$(mktemp -d)"; trap 'rm -rf "$$tmpdir"' EXIT; \
+	cd engine && go run ./cmd/akca benchmark --db "$$tmpdir/akca-release-benchmark.db" --output "$$tmpdir/benchmark-release-quality.json" --complete-corpus
 
 quality:
 	cd engine && test -z "$$(gofmt -l .)"

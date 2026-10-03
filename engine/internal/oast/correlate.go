@@ -56,6 +56,20 @@ func MatchInteraction(interaction Interaction, domain string, correlations map[s
 				return c, true
 			}
 		}
+		// Runtime provider failover changes Provider.Domain(), but callbacks
+		// issued before the switch still arrive with the old domain suffix.
+		// Match against the domain captured when each one-time token was
+		// registered so those delayed interactions remain correlatable.
+		for registeredToken, correlation := range correlations {
+			registeredDomain := strings.ToLower(strings.TrimSpace(correlation.ProviderDomain))
+			if registeredDomain == "" || strings.EqualFold(registeredDomain, domain) {
+				continue
+			}
+			extracted := ExtractCorrelationToken(identifier, registeredDomain)
+			if extracted != "" && strings.EqualFold(extracted, registeredToken) {
+				return correlation, true
+			}
+		}
 	}
 	return Correlation{}, false
 }

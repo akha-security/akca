@@ -51,8 +51,11 @@ func (g *Generator) Run(ctx context.Context, profiles []reflection.ReflectionPro
 		// Start cautiously behind a WAF. A positive signal can trigger deeper
 		// verification later; sending the full library up front increases bans.
 		targetBudget := budget
+		// A WAF presence reduces the budget to avoid bans, but the previous
+		// ceiling of 6 was too restrictive — it left room for only 2-3 offensive
+		// payloads after controls and evasion variants consumed their share.
 		if waf.CautiousModeRecommended || waf.Vendor != "" {
-			targetBudget = lowerPositiveBudget(targetBudget, 6)
+			targetBudget = lowerPositiveBudget(targetBudget, 10)
 		} else {
 			targetBudget = lowerPositiveBudget(targetBudget, 15)
 		}

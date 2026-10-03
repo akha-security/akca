@@ -941,7 +941,7 @@ func (c *Crawler) enqueueCandidate(rawURL, method string, depth int, source Disc
 	}
 	// Low confidence candidates (< 0.50) or low-confidence SPA guesses are recorded for reporting
 	// but not actively fetched to prevent crawling arbitrary noise.
-	if confidence < 0.50 || (source == SourceSPARoute && confidence < 0.65) {
+	if confidence < 0.35 || (source == SourceSPARoute && confidence < 0.50) {
 		c.mu.Lock()
 		delete(c.seen, key)
 		c.mu.Unlock()

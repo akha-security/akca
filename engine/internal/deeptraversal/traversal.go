@@ -101,9 +101,12 @@ func MergeBalanced(linux, windows []Payload) []Payload {
 var (
 	linuxMarkers       = []string{"root:x:0:0:", "root:*:0:0:", "root:", "daemon:", "/bin/bash", "/sbin/nologin", "/bin/sh", "id=debian", "id=ubuntu", "id=alpine"}
 	linuxBase64Markers = []string{"cm9vdDo", "cm9vdDox", "cm9vdDp4"}
-	linuxProcMarkers   = []string{"linux version ", "/proc/version", "swapfile", "sys_clone", "sys_execve"}
-	winMarkers         = []string{"[fonts]", "[extensions]", "for 16-bit app support", "[boot loader]", "[operating systems]"}
-	winHosts           = []string{"127.0.0.1 localhost", "127.0.0.1\tlocalhost", "# localhost name resolution", "::1 localhost"}
+	// These are file-content signatures. Do not include path names such as
+	// /proc/version: applications commonly echo the requested filename and that
+	// is not proof that the file was read.
+	linuxProcMarkers = []string{"linux version ", "swapfile", "sys_clone", "sys_execve"}
+	winMarkers       = []string{"[fonts]", "[extensions]", "for 16-bit app support", "[boot loader]", "[operating systems]"}
+	winHosts         = []string{"127.0.0.1 localhost", "127.0.0.1\tlocalhost", "# localhost name resolution", "::1 localhost"}
 )
 
 // DetectSignal reports whether a traversal probe succeeded against baseline.

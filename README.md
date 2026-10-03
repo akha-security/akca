@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/akha-security/akca/actions/workflows/ci.yml"><img src="https://github.com/akha-security/akca/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/akha-security/akca/releases/tag/v0.2.5"><img src="https://img.shields.io/badge/version-v0.2.5-8b5cf6" alt="Version v0.2.5"></a>
+  <a href="https://github.com/akha-security/akca/releases/tag/v0.2.6"><img src="https://img.shields.io/badge/version-v0.2.6-8b5cf6" alt="Version v0.2.6"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25 or newer"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache License 2.0"></a>
 </p>
@@ -47,7 +47,7 @@ AKCA does not claim feature or detection parity with mature commercial platforms
 <p align="center">
   <img src="docs/assets/scanner.png" alt="AKCA scanner running against a local security testing lab" width="760">
   <br>
-  <sub>AKCA v0.2.5 scan session with live engine status, resource telemetry, and confirmed findings.</sub>
+  <sub>AKCA v0.2.6 scan session with live engine status, resource telemetry, and confirmed findings.</sub>
 </p>
 
 ## Installation
@@ -417,16 +417,14 @@ Discovered URLs are retained even when they cannot be visited. A crawl that exha
 
 Unconfigured rate-limit checks produce observations, not vulnerability findings. A configured threshold proof also requires `window_seconds`; if the requests do not fit inside that window, the check is inconclusive. SQLi does not treat a 400 response or arithmetic evaluation alone as proof. New vendor-specific SQL errors in 400/422 responses must pass the replay and control verification path.
 
-## What's new in v0.2.5
+## What's new in v0.2.6
 
-- Expand SQL, LDAP, XPath, SSTI, command-injection and SSRF coverage with typed replay, boolean, timing, string-transform and protocol-aware probes.
-- Add heuristic IDOR coverage for single-profile scans while retaining strict multi-role BOLA ownership proofs.
-- Improve authenticated crawling, browser dependency discovery, exact captured-request replay and XML, multipart, GraphQL, WebSocket, header, cookie and path mutation surfaces.
-- Add directory-listing detection, broader cloud-takeover fingerprints and cache parameter-cloaking verification.
-- Publish explicit capability, module-completeness and proof-suppression diagnostics in reports without promoting unproven candidates.
-- Improve Ctrl+C behavior and stream large reports through a bounded fast-partial path.
-- Distinguish browser-confirmed reflected XSS from true DOM-based execution.
-- Embed build provenance in the CLI and reports, publish SHA-256 manifests and create signed GitHub build attestations for release binaries.
+- Bound hidden-parameter discovery and parallelize cross-endpoint transfer so full scans finish predictably without silently disabling coverage.
+- Increase full-scan crawling capacity to 1,500 pages and improve automatic memory sizing and terminal resource labels.
+- Expand SSRF fingerprints across AWS, GCP, Azure, Alibaba, DigitalOcean, Oracle, Tencent, Packet, Docker, Consul, Redis and Kubernetes surfaces.
+- Harden OAST with per-probe callback identities, failover-safe correlation, end-to-end health enforcement and corrected PDF/Server-Side JavaScript callbacks.
+- Tighten false-positive controls for blind XSS, SQLi, command injection, LFI, DOM XSS, HTTP smuggling and source-disclosure findings.
+- Strengthen benchmark and CI quality gates while preserving full request/response evidence and coverage diagnostics.
 
 See [CHANGELOG.md](CHANGELOG.md) for release details.
 

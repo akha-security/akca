@@ -3,6 +3,7 @@ package modules
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"github.com/akha-security/akca/engine/internal/config"
 	"github.com/akha-security/akca/engine/internal/httpclient"
@@ -17,6 +18,44 @@ import (
 	"testing"
 	"time"
 )
+
+func TestSmugglingControlFailureIsCoverageError(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawURL := "http://" + listener.Addr().String() + "/"
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	c := auditDoer(func(_ context.Context, method, rawURL string, _ []byte, _ map[string]string) (httpclient.RequestResponse, error) {
+		return httpclient.RequestResponse{
+			Request:  httpclient.RequestRecord{Method: method, URL: rawURL},
+			Response: httpclient.ResponseRecord{StatusCode: 200, Body: "normal"},
+		}, nil
+	})
+	cfg := config.DefaultScanConfig()
+	cfg.Targets = []string{rawURL}
+	status := ""
+	transportErrors := int64(0)
+	r := NewRunner("scan-smuggling-control-failure", c, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+		func(eventType, _ string, payload map[string]interface{}) error {
+			if eventType == "module_target_finished" {
+				status, _ = payload["status"].(string)
+				transportErrors, _ = payload["transport_errors"].(int64)
+			}
+			return nil
+		}, cfg)
+
+	_, err = r.RunModule(context.Background(), "http_smuggling", []ScanTarget{{EndpointURL: rawURL, Method: "GET"}})
+	if !errors.Is(err, ErrModuleCoverageIncomplete) {
+		t.Fatalf("raw control failure must fail coverage, got %v", err)
+	}
+	if status != "error" || transportErrors == 0 {
+		t.Fatalf("raw control failure was reported as status=%q transport_errors=%d", status, transportErrors)
+	}
+}
 
 // The controlled TCP fixture models a queued canary response. It verifies the
 // real transport/verification path, not the vulnerability of a particular proxy.

@@ -62,7 +62,7 @@ func mergeHeaders(base, extra map[string]string) map[string]string {
 func (r *Runner) modulePayloads(target ScanTarget, vulnClass, oastURL string) []payloadgen.Payload {
 	if existing := payloadsForClass(target.Payloads.Payloads, vulnClass); len(existing) > 0 {
 		if isValidOASTURL(oastURL) {
-			generated := payloadgen.GenerateGroupB(vulnClass, oastURL, payloadgen.WAFHints{})
+			generated := r.generatedModulePayloads(target, vulnClass, oastURL)
 			for _, candidate := range generated {
 				if strings.Contains(strings.ToLower(candidate.ExpectedSignal), "oast") {
 					existing = append(existing, candidate)
@@ -71,6 +71,13 @@ func (r *Runner) modulePayloads(target ScanTarget, vulnClass, oastURL string) []
 		}
 		return dedupePayloads(existing)
 	}
+	return r.generatedModulePayloads(target, vulnClass, oastURL)
+}
+
+// generatedModulePayloads deliberately excludes discovered/static payloads.
+// OAST callers use it to regenerate the same WAF variant with a fresh
+// callback URL, preserving a one-to-one callback-to-probe binding.
+func (r *Runner) generatedModulePayloads(target ScanTarget, vulnClass, oastURL string) []payloadgen.Payload {
 	vendor := ""
 	var preferred []string
 	var blockedChars, allowedChars []string

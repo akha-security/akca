@@ -34,11 +34,17 @@ jobs:
           # focused on detecting data races in the remaining test corpus.
           go test -race -skip '^(TestBenchmarkCommandWritesObservedJSON|TestLabRunAll)$' ${packages}
           go test -race -short ./internal/resilience
-      - name: Strict observed benchmark gate
+      - name: Operational observed benchmark gate
         run: go run ./cmd/akca benchmark --db "${RUNNER_TEMP}/akca-benchmark.db" --output benchmark-quality.json --strict
+      - name: Complete-corpus coverage audit
+        if: startsWith(github.ref, 'refs/tags/')
+        continue-on-error: true
+        run: go run ./cmd/akca benchmark --db "${RUNNER_TEMP}/akca-release-benchmark.db" --output benchmark-release-quality.json --complete-corpus
       - name: Upload benchmark evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: akca-benchmark-quality
-          path: engine/benchmark-quality.json
+          path: |
+            engine/benchmark-quality.json
+            engine/benchmark-release-quality.json

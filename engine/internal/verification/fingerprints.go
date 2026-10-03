@@ -89,6 +89,11 @@ func IsSoft404(base, probe ResponseSnapshot) bool {
 	if probe.StatusCode == 404 {
 		return false
 	}
-	return probe.StatusCode == 200 && abs(len(base.Body)-len(probe.Body)) <= 16 &&
-		hashBody(base.Body) == hashBody(probe.Body)
+	// Normalize volatile fields (timestamps, CSRF tokens, UUIDs) before
+	// comparison so that dynamic-but-identical error pages are correctly
+	// identified as soft-404s instead of passing as real endpoints.
+	normBase := NormalizeVolatileFields(base.Body)
+	normProbe := NormalizeVolatileFields(probe.Body)
+	return probe.StatusCode == 200 && abs(len(normBase)-len(normProbe)) <= 64 &&
+		hashBody(normBase) == hashBody(normProbe)
 }

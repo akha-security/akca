@@ -187,3 +187,13 @@ func TestSendOASTProbeReportsTargetEOFWithoutBlockingOAST(t *testing.T) {
 		t.Fatal("one target EOF must not disable OAST delivery for the scan")
 	}
 }
+
+func TestAppendOASTURLPathPreservesSingleScheme(t *testing.T) {
+	got := appendOASTURLPath("http://token.oast.test/", "/ssjs")
+	if got != "http://token.oast.test/ssjs" {
+		t.Fatalf("callback URL = %q", got)
+	}
+	if strings.Contains(got, "http://http://") {
+		t.Fatalf("callback URL duplicated its scheme: %q", got)
+	}
+}

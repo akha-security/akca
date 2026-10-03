@@ -18,8 +18,8 @@ import (
 )
 
 func TestVersionIsStableReleaseString(t *testing.T) {
-	if version != "0.2.5" {
-		t.Fatalf("version=%q, want 0.2.5", version)
+	if version != "0.2.6" {
+		t.Fatalf("version=%q, want 0.2.6", version)
 	}
 }
 
@@ -48,7 +48,7 @@ func TestUsageHelpAndVersionPrintBrandBanner(t *testing.T) {
 			if !strings.Contains(combined, akcaASCII[0]) {
 				t.Fatalf("ASCII wordmark missing for %s: %q", tc.name, combined)
 			}
-			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.5") {
+			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.6") {
 				t.Fatalf("brand/version line missing for %s: %q", tc.name, combined)
 			}
 		})
@@ -247,7 +247,7 @@ func TestScanSessionPanelIsCompactAndUsesStringTargets(t *testing.T) {
 	for _, want := range []string{
 		"SCAN SESSION", "ACTIVE", "TARGET", "http://example.test", "PROFILE", "Full Scan",
 		"CRAWL", "1,000 pages", "OAST", "OAST Ready",
-		"RATE", "50 req/s", "REQUESTS", "Uncapped", "RAM", "8.0G scan / 32.0G total",
+		"RATE", "50 req/s", "REQUESTS", "Uncapped", "RAM", "8.0G Scan / 32.0G Total",
 		"ENGINE", "Browser + JS", "AUTH", "Authenticated", "TRANSPORT", "Direct · TLS on",
 	} {
 		if !strings.Contains(panel, want) {

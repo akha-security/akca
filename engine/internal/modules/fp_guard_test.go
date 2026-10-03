@@ -64,6 +64,21 @@ func TestSSRFSignalsAreProviderSpecific(t *testing.T) {
 		httpclient.ResponseRecord{Body: body, Headers: map[string]string{"Metadata-Flavor": "Google"}}, "gcp_metadata") {
 		t.Fatal("expected provider-specific GCP proof")
 	}
+	gcpDirectory := "instance/id project/project-id service-accounts/default/"
+	if !ssrfSignalConfirmed(gcp, httpclient.ResponseRecord{Body: "ok"},
+		httpclient.ResponseRecord{Body: gcpDirectory}, "gcp_metadata") {
+		t.Fatal("expected multi-marker GCP metadata body to prove SSRF even when upstream headers are not forwarded")
+	}
+	alibaba := payloadgen.Payload{Value: "http://100.100.100.200/latest/meta-data/", ExpectedSignal: "alibaba_metadata"}
+	if !ssrfSignalConfirmed(alibaba, httpclient.ResponseRecord{Body: "ok"},
+		httpclient.ResponseRecord{Body: "owner-account-id\nregion-id"}, "alibaba_metadata") {
+		t.Fatal("expected Alibaba metadata markers to prove SSRF")
+	}
+	docker := payloadgen.Payload{Value: "http://127.0.0.1:2375/version", ExpectedSignal: "docker_api"}
+	if !ssrfSignalConfirmed(docker, httpclient.ResponseRecord{Body: "ok"},
+		httpclient.ResponseRecord{Body: `{"ApiVersion":"1.43","GitCommit":"abcd","GoVersion":"go1.22"}`, StatusCode: 200}, "docker_api") {
+		t.Fatal("expected Docker API version body to prove internal service SSRF")
+	}
 }
 
 func TestSSTIGenericSignalsAreNotExecutionProof(t *testing.T) {

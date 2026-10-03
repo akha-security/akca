@@ -3,7 +3,10 @@ package verification
 import "strings"
 
 func DetectHoneypot(canaries []string, bodies []string) bool {
-	if len(canaries) < 3 || len(bodies) < 3 || len(canaries) != len(bodies) {
+	// Two distinct canary/response pairs are sufficient to detect a parameter
+	// that blindly echoes any input. Requiring three missed honeypots when
+	// the payload budget was tight.
+	if len(canaries) < 2 || len(bodies) < 2 || len(canaries) != len(bodies) {
 		return false
 	}
 	for i, c := range canaries {

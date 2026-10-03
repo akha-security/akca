@@ -123,3 +123,14 @@ func callbackHostFromBlindXSSRequests(requests []httpclient.RequestRecord) strin
 	}
 	return ""
 }
+
+func TestBlindXSSBodyIdentifiersRemainCandidates(t *testing.T) {
+	for _, location := range []string{"body", "json", "form", " JSON "} {
+		if !isLikelyBlindXSSParam("id", location) {
+			t.Fatalf("body identifier was incorrectly filtered for location %q", location)
+		}
+	}
+	if isLikelyBlindXSSParam("id", "query") {
+		t.Fatal("query identifier should remain a low-priority non-candidate")
+	}
+}

@@ -60,3 +60,10 @@ func (db *DB) UpdateScanConfig(scanID, configJSON string) error {
 	)
 	return err
 }
+
+// LatestScanID returns the ID of the most recently created scan in the database.
+func (db *DB) LatestScanID() (string, error) {
+	var id string
+	err := db.conn.QueryRow(`SELECT id FROM scans ORDER BY created_at DESC LIMIT 1`).Scan(&id)
+	return id, err
+}

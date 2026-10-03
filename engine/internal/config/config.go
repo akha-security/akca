@@ -379,7 +379,7 @@ type LoginStep struct {
 
 func DefaultScanConfig() ScanConfig {
 	return ScanConfig{
-		ScanIntensity:                "fast",
+		ScanIntensity:                "normal",
 		GlobalRateLimit:              20,
 		PerHostRateLimit:             10,
 		MaxConcurrency:               16,
@@ -409,7 +409,7 @@ func DefaultScanConfig() ScanConfig {
 		EnableFindingCorrelation:     true,
 		EnableBrowserWorkerPool:      true,
 		BrowserWorkerPoolSize:        3,
-		RedactReports:                true,
+		RedactReports:                false,
 		EnableHealthMonitoring:       true,
 		SmartScanProfile:             "Full Scan",
 		ReportTemplate:               "HackerOne",

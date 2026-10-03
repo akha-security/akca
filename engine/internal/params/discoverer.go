@@ -550,11 +550,16 @@ func (d *Discoverer) crossEndpointTransfer(ctx context.Context, endpoints []stor
 		return
 	}
 
-	totalProbes := 0
+	type transferTask struct {
+		endpoint storage.DiscoveryEndpoint
+		name     string
+	}
+	tasks := make([]transferTask, 0)
 	maxTransferProbes := d.maxTransferProbes
 
+collectTasks:
 	for _, ep := range endpoints {
-		if ctx.Err() != nil || (maxTransferProbes > 0 && totalProbes >= maxTransferProbes) {
+		if ctx.Err() != nil {
 			break
 		}
 		knownRows, err := d.db.Conn().Query(`SELECT name FROM parameters WHERE endpoint_id = ?`, ep.ID)
@@ -571,15 +576,68 @@ func (d *Discoverer) crossEndpointTransfer(ctx context.Context, endpoints []stor
 		knownRows.Close()
 
 		for _, pName := range params {
-			if maxTransferProbes > 0 && totalProbes >= maxTransferProbes {
-				break
+			if maxTransferProbes > 0 && len(tasks) >= maxTransferProbes {
+				break collectTasks
 			}
 			if !known[pName] {
-				totalProbes++
-				d.probeSingleParam(ctx, ep, pName)
+				tasks = append(tasks, transferTask{endpoint: ep, name: pName})
 			}
 		}
 	}
+	if len(tasks) == 0 || ctx.Err() != nil {
+		return
+	}
+
+	_ = d.emit("parameter_transfer_started", "cross-endpoint parameter transfer started", map[string]interface{}{
+		"scan_id": d.scanID, "total": len(tasks),
+	})
+
+	workers := d.parallelism
+	if workers <= 0 {
+		workers = 4
+	}
+	if workers > len(tasks) {
+		workers = len(tasks)
+	}
+	taskCh := make(chan transferTask, workers*2)
+	var wg sync.WaitGroup
+	var progressMu sync.Mutex
+	completed := 0
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range taskCh {
+				if ctx.Err() != nil {
+					return
+				}
+				d.probeSingleParam(ctx, task.endpoint, task.name)
+				progressMu.Lock()
+				completed++
+				current := completed
+				if current%25 == 0 || current == len(tasks) {
+					_ = d.emit("parameter_transfer_progress", "cross-endpoint parameter transfer progress", map[string]interface{}{
+						"scan_id": d.scanID, "completed": current, "total": len(tasks),
+					})
+				}
+				progressMu.Unlock()
+			}
+		}()
+	}
+
+feedTasks:
+	for _, task := range tasks {
+		select {
+		case taskCh <- task:
+		case <-ctx.Done():
+			break feedTasks
+		}
+	}
+	close(taskCh)
+	wg.Wait()
+	_ = d.emit("parameter_transfer_finished", "cross-endpoint parameter transfer finished", map[string]interface{}{
+		"scan_id": d.scanID, "completed": completed, "total": len(tasks),
+	})
 }
 
 func (d *Discoverer) probeSingleParam(ctx context.Context, ep storage.DiscoveryEndpoint, param string) {

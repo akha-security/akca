@@ -19,7 +19,7 @@ func (r *Runner) runCommandInjection(ctx context.Context, target ScanTarget) []M
 	if strings.TrimSpace(target.Parameter) == "" {
 		return nil
 	}
-	if !isLikelyCommandInjectionParam(target.Parameter) {
+	if !r.cfg.FullModuleCoverage() && !isLikelyCommandInjectionParam(target.Parameter) {
 		r.emitSkip("command_injection", target, "parameter is not a command injection candidate")
 		return nil
 	}
@@ -89,7 +89,7 @@ func (r *Runner) runCommandInjection(ctx context.Context, target ScanTarget) []M
 	}
 	earlySignalFound := false
 	for idx, p := range probes {
-		if idx >= fastFailLimit && !earlySignalFound && len(out) == 0 {
+		if r.cfg.ScanIntensity == "fast" && !r.cfg.FullModuleCoverage() && idx >= fastFailLimit && !earlySignalFound && len(out) == 0 {
 			break
 		}
 		probePayload := p

@@ -30,7 +30,7 @@ func (r *Runner) runLFI(ctx context.Context, target ScanTarget) []ModuleFinding 
 	if strings.TrimSpace(target.Parameter) == "" {
 		return nil
 	}
-	if !isLikelyLFIParam(target.Parameter) {
+	if !r.cfg.FullModuleCoverage() && !isLikelyLFIParam(target.Parameter) {
 		r.emitSkip("lfi", target, "parameter is not a file/path candidate")
 		return nil
 	}
@@ -75,7 +75,7 @@ func (r *Runner) runLFI(ctx context.Context, target ScanTarget) []ModuleFinding 
 			break
 		}
 		// Fast-fail: if initial core payloads fail to produce any signal or change, terminate.
-		if coreTested >= 10 && !coreHadSignal && len(proofs) == 0 {
+		if r.cfg.ScanIntensity == "fast" && !r.cfg.FullModuleCoverage() && coreTested >= 10 && !coreHadSignal && len(proofs) == 0 {
 			break
 		}
 		coreTested++

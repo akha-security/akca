@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/akha-security/akca/engine/internal/config"
@@ -305,6 +306,82 @@ func TestCrossEndpointTransferUsesPOSTBodyNotQuery(t *testing.T) {
 	}
 	if count == 0 {
 		t.Fatal("expected transferred parameter to be saved from POST body proof")
+	}
+}
+
+func TestCrossEndpointTransferRespectsCapAndEmitsProgress(t *testing.T) {
+	var candidateProbes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, name := range []string{"transfer_alpha", "transfer_beta", "transfer_gamma"} {
+			if r.URL.Query().Get(name) != "" {
+				candidateProbes.Add(1)
+				break
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("baseline"))
+	}))
+	defer srv.Close()
+
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"127.0.0.1"}
+	scopeEngine := scope.NewEngine(cfg)
+	client, err := httpclient.New(cfg, scopeEngine, ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := storage.Open(t.TempDir() + "/transfer-cap.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	const scanID = "scan-transfer-cap"
+	if err := db.EnsureScan(scanID); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/source", "/target"} {
+		if err := db.SaveDiscoveredEndpoint(scanID, map[string]interface{}{
+			"url": srv.URL + path, "method": http.MethodGet, "normalized_url": srv.URL + path, "source": "test",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sourceID, err := db.GetEndpointID(scanID, srv.URL+"/source", http.MethodGet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"transfer_alpha", "transfer_beta", "transfer_gamma"} {
+		if err := db.SaveParameter(sourceID, name, "query", 90); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var started, finished atomic.Int32
+	d := NewDiscoverer(scanID, client, scopeEngine, db, func(eventType, _ string, _ map[string]interface{}) error {
+		switch eventType {
+		case "parameter_transfer_started":
+			started.Add(1)
+		case "parameter_transfer_finished":
+			finished.Add(1)
+		}
+		return nil
+	})
+	d.SetMaxTransferProbes(2)
+	d.SetParallelism(4)
+	endpoints, err := db.ListDiscoveryEndpoints(scanID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.crossEndpointTransfer(context.Background(), endpoints)
+
+	if got := candidateProbes.Load(); got != 2 {
+		t.Fatalf("candidate probes=%d, want transfer cap 2", got)
+	}
+	if started.Load() != 1 || finished.Load() != 1 {
+		t.Fatalf("transfer lifecycle events missing: started=%d finished=%d", started.Load(), finished.Load())
 	}
 }
 

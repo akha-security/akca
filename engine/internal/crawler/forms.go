@@ -155,19 +155,29 @@ func smartFormValue(name, inputType, defaultValue string) string {
 
 func addSelectValues(values url.Values, name string, selectNode *html.Node) {
 	added := false
-	for option := selectNode.FirstChild; option != nil; option = option.NextSibling {
-		if option.Type != html.ElementNode || option.Data != "option" {
-			continue
-		}
-		if nodeAttr(option, "selected") != "" {
-			value := nodeAttr(option, "value")
-			if value == "" {
-				value = nodeTextContent(option)
+	// Walk all descendant <option> elements, including those nested inside
+	// <optgroup> containers that the previous flat iteration missed.
+	var walkOptions func(*html.Node)
+	walkOptions = func(n *html.Node) {
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			if child.Type == html.ElementNode && child.Data == "optgroup" {
+				walkOptions(child)
+				continue
 			}
-			addFormValue(values, name, value)
-			added = true
+			if child.Type != html.ElementNode || child.Data != "option" {
+				continue
+			}
+			if nodeAttr(child, "selected") != "" {
+				value := nodeAttr(child, "value")
+				if value == "" {
+					value = nodeTextContent(child)
+				}
+				addFormValue(values, name, value)
+				added = true
+			}
 		}
 	}
+	walkOptions(selectNode)
 	if !added {
 		addFormValue(values, name, "akca")
 	}

@@ -153,10 +153,16 @@ func (r *Runner) runHTTPSmuggling(ctx context.Context, target ScanTarget) []Modu
 	}
 	u, err := url.Parse(target.EndpointURL)
 	if err != nil || u.Hostname() == "" || !r.scope.IsInScope(target.EndpointURL) {
+		r.emitSkip("http_smuggling", target, "target URL is invalid or outside scan scope")
 		return nil
 	}
 	baseline, err := r.cachedEmptyProbe(ctx, target)
-	if err != nil || baseline.Response.StatusCode >= 500 {
+	if err != nil {
+		r.emitSkip("http_smuggling", target, "HTTP baseline failed: "+err.Error())
+		return nil
+	}
+	if baseline.Response.StatusCode >= 500 {
+		r.emitSkip("http_smuggling", target, "HTTP baseline returned an unusable server error")
 		return nil
 	}
 	path := u.RequestURI()
@@ -166,7 +172,13 @@ func (r *Runner) runHTTPSmuggling(ctx context.Context, target ScanTarget) []Modu
 	normal := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\n\r\n", path, u.Host)
 	// A clean same-connection sequence is the protocol negative control.
 	control, err := r.rawSmugglingExchange(ctx, target, normal, normal)
-	if err != nil || control.Response.StatusCode < 200 || control.Response.StatusCode >= 400 {
+	noteRawProtocolExchange(ctx, control, err)
+	if err != nil {
+		r.emitSkip("http_smuggling", target, "raw protocol negative control failed: "+err.Error())
+		return nil
+	}
+	if control.Response.StatusCode < 200 || control.Response.StatusCode >= 400 {
+		r.emitSkip("http_smuggling", target, "raw protocol negative control returned an unusable status")
 		return nil
 	}
 	var out []ModuleFinding
@@ -185,6 +197,7 @@ func (r *Runner) runHTTPSmuggling(ctx context.Context, target ScanTarget) []Modu
 			canary := randomProbeToken()
 			attack := variant.buildRawReq(u.Host, path, canary)
 			rr, e := r.rawSmugglingExchange(ctx, target, attack, normal)
+			noteRawProtocolExchange(ctx, rr, e)
 			if e != nil || !strings.Contains(rr.Response.Body, "akca-smuggle-"+canary) {
 				break
 			}
@@ -260,8 +273,14 @@ func (r *Runner) rawSmugglingExchange(ctx context.Context, target ScanTarget, fi
 	if status == 0 {
 		return httpclient.RequestResponse{}, fmt.Errorf("raw protocol follow-up unavailable")
 	}
-	noteExchange(ctx, nil)
 	return httpclient.RequestResponse{Request: httpclient.RequestRecord{Method: "POST", URL: target.EndpointURL, Body: first + second}, Response: httpclient.ResponseRecord{StatusCode: status, Body: body}}, nil
+}
+
+func noteRawProtocolExchange(ctx context.Context, rr httpclient.RequestResponse, err error) {
+	if err == nil {
+		noteResponse(ctx, rr)
+	}
+	noteExchange(ctx, err)
 }
 
 func dialTarget(ctx context.Context, addr string, useTLS bool, serverName string, skipVerify bool) (net.Conn, error) {

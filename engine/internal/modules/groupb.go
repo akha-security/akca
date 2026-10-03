@@ -144,11 +144,11 @@ func (r *Runner) runSSRF(ctx context.Context, target ScanTarget) []ModuleFinding
 		return nil
 	}
 	strongCandidate, _ := ssrfReady(target)
-	oastURL := ""
+	var oastProbes []payloadgen.Payload
 	if r.cfg.EnableOAST {
 		if r.oast != nil {
-			oastURL = strings.TrimSpace(r.oastURL(ctx, "ssrf-"+target.Parameter, target, "ssrf"))
-			if oastURL == "" {
+			oastProbes = r.buildSSRFOASTProbes(ctx, target)
+			if len(oastProbes) == 0 {
 				r.emitOnce("ssrf_oast_url_unavailable", "coverage_gap", "SSRF OAST URL generation failed", map[string]interface{}{
 					"module": "ssrf", "endpoint": target.EndpointURL, "parameter": target.Parameter,
 				})
@@ -162,12 +162,9 @@ func (r *Runner) runSSRF(ctx context.Context, target ScanTarget) []ModuleFinding
 	_ = r.emit("ssrf_probe_started", "SSRF probe coverage started", map[string]interface{}{
 		"scan_id": r.scanID, "endpoint": target.EndpointURL, "parameter": target.Parameter,
 		"mode":         map[bool]string{true: "direct_and_oast", false: "oast_only"}[strongCandidate],
-		"oast_enabled": r.cfg.EnableOAST, "oast_registered": oastURL != "",
+		"oast_enabled": r.cfg.EnableOAST, "oast_registered": len(oastProbes) > 0,
 	})
-	oastSent := 0
-	if oastURL != "" {
-		oastSent = r.sendSSRFOASTProbes(ctx, target, oastURL)
-	}
+	oastSent := r.sendSSRFOASTProbes(ctx, target, oastProbes)
 	if !strongCandidate {
 		// Always attempt OAST probes for weak candidates when available.
 		if oastSent > 0 {
@@ -179,10 +176,10 @@ func (r *Runner) runSSRF(ctx context.Context, target ScanTarget) []ModuleFinding
 		// Also try a lightweight direct response-based check against cloud
 		// metadata endpoints. This ensures weak candidates are not entirely
 		// dependent on OAST for detection.
-		if directFindings := r.ssrfDirectResponseCheck(ctx, target, oastURL); len(directFindings) > 0 {
+		if directFindings := r.ssrfDirectResponseCheck(ctx, target); len(directFindings) > 0 {
 			return directFindings
 		}
-		if oastURL == "" {
+		if len(oastProbes) == 0 {
 			r.emitSkip("ssrf", target, "weak SSRF candidate: OAST unavailable and direct metadata check negative")
 		}
 		return nil
@@ -198,7 +195,7 @@ func (r *Runner) runSSRF(ctx context.Context, target ScanTarget) []ModuleFinding
 	}
 	observations := map[string][]directObservation{}
 	var out []ModuleFinding
-	for _, p := range r.modulePayloads(target, "ssrf", oastURL) {
+	for _, p := range r.modulePayloads(target, "ssrf", "") {
 		if p.ExpectedSignal == "blind_oast" {
 			continue
 		}
@@ -272,7 +269,7 @@ func (r *Runner) runSSRF(ctx context.Context, target ScanTarget) []ModuleFinding
 			}
 		}
 	}
-	if oastURL != "" {
+	if len(oastProbes) > 0 {
 		_ = r.emit("ssrf_oast_probe_coverage", "SSRF OAST probe coverage recorded", map[string]interface{}{
 			"scan_id": r.scanID, "endpoint": target.EndpointURL, "parameter": target.Parameter,
 			"probes_sent": oastSent, "candidate_strength": "strong",
@@ -281,12 +278,41 @@ func (r *Runner) runSSRF(ctx context.Context, target ScanTarget) []ModuleFinding
 	return out
 }
 
-func (r *Runner) sendSSRFOASTProbes(ctx context.Context, target ScanTarget, oastURL string) int {
-	sent := 0
-	for _, p := range r.modulePayloads(target, "ssrf", oastURL) {
-		if p.ExpectedSignal != "blind_oast" {
+func (r *Runner) buildSSRFOASTProbes(ctx context.Context, target ScanTarget) []payloadgen.Payload {
+	const templateURL = "https://akca-oast-template.invalid/"
+	templates := r.generatedModulePayloads(target, "ssrf", templateURL)
+	probes := make([]payloadgen.Payload, 0, len(templates))
+	probeIndex := 0
+	for _, template := range templates {
+		if template.ExpectedSignal != "blind_oast" {
 			continue
 		}
+		probeIndex++
+		callbackURL := strings.TrimSpace(r.oastURL(ctx,
+			fmt.Sprintf("ssrf-%s-%d", target.Parameter, probeIndex), target, "ssrf"))
+		if callbackURL == "" {
+			continue
+		}
+		for _, candidate := range r.generatedModulePayloads(target, "ssrf", callbackURL) {
+			if sameOASTPayloadVariant(template, candidate) {
+				probes = append(probes, candidate)
+				break
+			}
+		}
+	}
+	return probes
+}
+
+func sameOASTPayloadVariant(left, right payloadgen.Payload) bool {
+	return left.ExpectedSignal == "blind_oast" && right.ExpectedSignal == "blind_oast" &&
+		left.Variant == right.Variant && left.Encoding == right.Encoding &&
+		left.WAFAdapted == right.WAFAdapted && left.WAFVendor == right.WAFVendor &&
+		left.Technique == right.Technique && left.TransportEncoding == right.TransportEncoding
+}
+
+func (r *Runner) sendSSRFOASTProbes(ctx context.Context, target ScanTarget, probes []payloadgen.Payload) int {
+	sent := 0
+	for _, p := range probes {
 		if r.sendOASTProbe(ctx, target, strings.TrimSpace(p.Value)) {
 			sent++
 		}
@@ -304,8 +330,7 @@ func ssrfSignal(body, baseline, signal string) bool {
 }
 
 func normalizedSSRFSignal(p payloadgen.Payload) string {
-	signal := strings.TrimSpace(p.ExpectedSignal)
-	if signal != "" && signal != "cloud_metadata" {
+	if signal := canonicalSSRFSignal(p, p.ExpectedSignal); signal != "" {
 		return signal
 	}
 	value := strings.ToLower(p.Value)
@@ -344,10 +369,12 @@ func ssrfHighConfidenceMetadata(body string) bool {
 		"microsoft.compute", "azureenvironment",
 		"subscriptionid", "identity/oauth2/token",
 		// DigitalOcean, Alibaba, Oracle Cloud
-		"droplet_id", "droplet_v2", "alibaba-cloud", "compute_metadata",
+		"droplet_id", "droplet_v2", "owner-account-id", "alibaba-cloud", "compute_metadata",
+		"compartmentid", "canonicalregionname", "ocid1.",
+		"tencentyun", "bonding_mode",
 		// Docker / Consul / Kubernetes
 		"docker engine", "k8s", "consul", "kubernetes.io/serviceaccount",
-		"token/default-token", "ca.crt",
+		"token/default-token", "ca.crt", "redis_version", "+pong",
 	} {
 		if strings.Contains(lower, marker) {
 			return true
@@ -377,7 +404,7 @@ func (r *Runner) probeSSRF(ctx context.Context, target ScanTarget, p payloadgen.
 // check for weak candidates. It sends cloud metadata payloads and checks
 // for known metadata fingerprints in the response body, without requiring
 // OAST callbacks.
-func (r *Runner) ssrfDirectResponseCheck(ctx context.Context, target ScanTarget, oastURL string) []ModuleFinding {
+func (r *Runner) ssrfDirectResponseCheck(ctx context.Context, target ScanTarget) []ModuleFinding {
 	baseline, ok, reason := r.stableNativeBaselineForModule(ctx, "ssrf", target)
 	if !ok {
 		r.emitSkip("ssrf", target, "weak candidate direct check: "+reason)

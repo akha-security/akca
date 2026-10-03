@@ -462,12 +462,13 @@ func observationRoles(items []Observation) map[ObservationRole]int {
 	out := make(map[ObservationRole]int)
 	seen := make(map[string]bool)
 	for _, item := range items {
-		role := item.Role
-		if role == RolePositiveReplay {
-			role = RolePositiveProbe
-		}
+		// Use the original role in the dedup key so that a probe and its
+		// replay are counted independently even when they share a RequestID.
+		// The previous normalisation collapsed both into RolePositiveProbe,
+		// causing replays to be silently dropped and MinimumIndependentRuns
+		// to be unsatisfiable.
 		if item.RequestID != "" {
-			key := string(role) + "|" + item.RequestID
+			key := string(item.Role) + "|" + item.RequestID
 			if seen[key] {
 				continue
 			}

@@ -109,7 +109,7 @@ func TestDefaultScenariosCoverage(t *testing.T) {
 	}
 }
 
-func TestStrictGateIgnoresUnavailableCapability(t *testing.T) {
+func TestStrictGateCountsUnavailableVulnerableCapabilityAsMiss(t *testing.T) {
 	scenarios := []Scenario{
 		{ID: "positive", Vulnerable: true},
 		{ID: "browser", Vulnerable: true, Capability: "browser"},
@@ -121,8 +121,8 @@ func TestStrictGateIgnoresUnavailableCapability(t *testing.T) {
 	cfg := StrictGateConfig()
 	cfg.MaximumFPRUpper95 = 1
 	report := EvaluateQualityGate(scenarios, results, cfg)
-	if !report.Passed || report.Metrics.Recall != 1 {
-		t.Fatalf("unavailable optional capability distorted the release gate: %+v", report)
+	if report.Passed || report.Metrics.Recall != 0.5 {
+		t.Fatalf("skipped vulnerable fixture must reduce recall and fail the gate: %+v", report)
 	}
 }
 

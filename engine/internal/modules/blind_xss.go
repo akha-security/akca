@@ -13,6 +13,7 @@ func (r *Runner) runBlindXSS(ctx context.Context, target ScanTarget) []ModuleFin
 		return nil
 	}
 	if !isLikelyBlindXSSParam(target.Parameter, target.Location) {
+		r.emitSkip("blind_xss", target, "parameter is not a stored XSS candidate")
 		return nil
 	}
 	if !r.cfg.EnableOAST || r.oast == nil {
@@ -52,6 +53,12 @@ func isLikelyBlindXSSParam(param, location string) bool {
 	if p == "" {
 		return false
 	}
+	// Persisted body values are high-priority sinks even when their field name
+	// looks identifier-like (for example a JSON "id" copied into an audit log).
+	switch strings.ToLower(strings.TrimSpace(location)) {
+	case "body", "json", "form":
+		return true
+	}
 	// Skip static/numeric/pagination/tracking parameters
 	switch p {
 	case "page", "p", "pg", "limit", "offset", "size", "per_page", "perpage",
@@ -59,10 +66,6 @@ func isLikelyBlindXSSParam(param, location string) bool {
 		"v", "ver", "version", "_", "t", "ts", "timestamp", "cb", "cache", "nocache",
 		"format", "lang", "locale", "id", "item_id", "user_id", "post_id", "product_id":
 		return false
-	}
-	// Body/JSON parameters or form submissions are always high priority
-	if location == "body" || location == "json" || location == "form" {
-		return true
 	}
 	return true
 }

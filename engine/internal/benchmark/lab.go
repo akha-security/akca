@@ -458,7 +458,16 @@ func EvaluateQualityGate(scenarios []Scenario, results []Result, cfg GateConfig)
 			continue
 		}
 		vulnerable, ok := expected[result.Scenario]
-		if !ok || result.Skipped {
+		if !ok {
+			continue
+		}
+		if result.Skipped {
+			// An unavailable capability is not evidence that a vulnerable fixture
+			// was detected. Count it as a miss so recall cannot be inflated by
+			// silently dropping the hardest scenarios from the denominator.
+			if vulnerable {
+				fn++
+			}
 			continue
 		}
 		synthetic = synthetic || result.Synthetic

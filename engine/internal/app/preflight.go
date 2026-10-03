@@ -9,6 +9,7 @@ import (
 
 	"github.com/akha-security/akca/engine/internal/browserpool"
 	"github.com/akha-security/akca/engine/internal/config"
+	"github.com/akha-security/akca/engine/internal/oast"
 )
 
 // runPreflightValidation prevents a scan from spending its budget on an
@@ -23,20 +24,28 @@ func (e *Engine) runPreflightValidation(ctx context.Context, cfg config.ScanConf
 	if len(cfg.Targets) == 0 {
 		return fmt.Errorf("preflight requires at least one target")
 	}
-	e.emitCapabilityMatrix(cfg)
 	if cfg.EnableOAST {
-		if e.oast == nil {
+		listener := e.OAST()
+		if listener == nil {
 			_ = e.Emit("coverage_gap", "OAST is enabled but no listener is available; blind vulnerability coverage is disabled", map[string]interface{}{
 				"phase": "preflight", "capability": "oast", "affected_modules": []string{"blind_xss", "ssrf", "xxe", "sqli", "ssti", "command_injection", "insecure_deserialization", "pdf_injection", "server_side_js_injection", "llm_injection"},
 			})
-		} else if err := e.oast.HealthCheck(ctx, 5*time.Second); err != nil {
+		} else if err := listener.HealthCheck(ctx, 5*time.Second); err != nil {
 			_ = e.Emit("coverage_gap", "OAST registration succeeded but the end-to-end callback self-test failed", map[string]interface{}{
 				"phase": "preflight", "capability": "oast", "reason": err.Error(), "blind_coverage": false,
 			})
+			_ = e.Emit("oast_failed", "OAST callback path is unavailable; blind probes were disabled for this scan", map[string]interface{}{
+				"phase": "preflight", "capability": "oast", "reason": err.Error(), "blind_coverage": false,
+			})
+			e.disableUnhealthyOAST(listener)
 		} else {
 			_ = e.Emit("capability_ready", "OAST end-to-end callback path verified", map[string]interface{}{"phase": "preflight", "capability": "oast"})
 		}
 	}
+	// Capability readiness is emitted after the end-to-end OAST check so a
+	// successful registration with a broken callback path is never advertised
+	// as ready.
+	e.emitCapabilityMatrix(cfg)
 	if loginSessionGuardEnabled(cfg) {
 		if err := e.ensureAuthenticatedSession(ctx); err != nil {
 			return fmt.Errorf("authentication preflight failed: %w", err)
@@ -51,6 +60,18 @@ func (e *Engine) runPreflightValidation(ctx context.Context, cfg config.ScanConf
 	}
 	_ = e.Emit("preflight_ok", "target and authentication preflight passed", map[string]interface{}{"target": cfg.Targets[0], "status": rr.Response.StatusCode, "authenticated": scanHasConfiguredAuth(cfg)})
 	return nil
+}
+
+func (e *Engine) disableUnhealthyOAST(listener *oast.Listener) {
+	e.mu.Lock()
+	if e.oast == listener {
+		e.oast = nil
+		if e.session != nil {
+			e.session.Config.EnableOAST = false
+		}
+	}
+	e.mu.Unlock()
+	listener.Stop()
 }
 
 func (e *Engine) emitCapabilityMatrix(cfg config.ScanConfig) {

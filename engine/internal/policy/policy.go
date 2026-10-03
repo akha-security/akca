@@ -147,7 +147,7 @@ func confirmed(records []storage.FindingRecord) ([]storage.FindingRecord, int) {
 		if !strings.EqualFold(record.Confidence, "confirmed") {
 			continue
 		}
-		if !report.FindingFromRecord(record, true).HTTPEvidence.ProofSatisfied {
+		if !report.FindingFromRecord(record, false).HTTPEvidence.ProofSatisfied {
 			unproven++
 			continue
 		}
@@ -158,8 +158,8 @@ func confirmed(records []storage.FindingRecord) ([]storage.FindingRecord, int) {
 
 func toFinding(record storage.FindingRecord) Finding {
 	return Finding{
-		ID: record.ID, Title: report.RedactString(record.Title), Severity: strings.ToLower(record.Severity),
-		Class: record.VulnClass, Endpoint: report.RedactString(record.EndpointURL),
+		ID: record.ID, Title: record.Title, Severity: strings.ToLower(record.Severity),
+		Class: record.VulnClass, Endpoint: record.EndpointURL,
 	}
 }
 

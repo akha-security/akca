@@ -58,6 +58,26 @@ func TestParameterDiscoveryBudgetsFollowIntensity(t *testing.T) {
 	}
 }
 
+func TestFullCoverageParameterDiscoveryFollowsIntensity(t *testing.T) {
+	cfg := DefaultScanConfig()
+	if cfg.ScanIntensity != "normal" {
+		t.Fatalf("default full scan intensity=%q, want normal", cfg.ScanIntensity)
+	}
+	if cfg.ParameterMaxProbes() != 320 || cfg.ParameterWordlistCap() != 160 || cfg.ParameterTransferMaxProbes() != 1000 {
+		t.Fatalf("full coverage parameter discovery must retain normal phase bounds: probes=%d words=%d transfers=%d",
+			cfg.ParameterMaxProbes(), cfg.ParameterWordlistCap(), cfg.ParameterTransferMaxProbes())
+	}
+}
+
+func TestFiniteFullScanBudgetPreservesModuleCapacity(t *testing.T) {
+	cfg := DefaultScanConfig()
+	cfg.RequestBudget = 4000
+	if cfg.ParameterMaxProbes() != 320 || cfg.ParameterWordlistCap() != 160 || cfg.ParameterTransferMaxProbes() != 1000 {
+		t.Fatalf("finite full scan must reserve capacity for vulnerability modules: probes=%d words=%d transfers=%d",
+			cfg.ParameterMaxProbes(), cfg.ParameterWordlistCap(), cfg.ParameterTransferMaxProbes())
+	}
+}
+
 func TestParameterDiscoveryWorkersHonorRuntimeConcurrencyCap(t *testing.T) {
 	cfg := DefaultScanConfig()
 	cfg.ScanIntensity = "fast"

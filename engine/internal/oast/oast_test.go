@@ -199,6 +199,27 @@ func TestMatchInteractionRejectsWrongDomainSuffix(t *testing.T) {
 	}
 }
 
+func TestMatchInteractionAcceptsCallbackFromPreFailoverDomain(t *testing.T) {
+	correlations := map[string]Correlation{
+		"unique-token": {
+			CorrelationToken: "unique-token", ProviderDomain: "old-correlation.oast.test",
+			ScanID: "scan-1", PayloadID: "payload-1",
+		},
+	}
+	interaction := Interaction{
+		FullID: "unique-token.old-correlation.oast.test", Protocol: "http",
+	}
+	correlation, ok := MatchInteraction(interaction, "new-correlation.oast.example", correlations)
+	if !ok || correlation.PayloadID != "payload-1" {
+		t.Fatalf("pre-failover callback was not correlated: ok=%v correlation=%+v", ok, correlation)
+	}
+
+	interaction.FullID = "unique-token.old-correlation.oast.test.attacker.example"
+	if forged, matched := MatchInteraction(interaction, "new-correlation.oast.example", correlations); matched {
+		t.Fatalf("forged old-domain suffix was accepted: %+v", forged)
+	}
+}
+
 func TestCallbackDoesNotUpgradeUnrelatedEndpointFinding(t *testing.T) {
 	db, err := storage.Open(t.TempDir() + "/oast-up.db")
 	if err != nil {

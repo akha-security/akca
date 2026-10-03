@@ -58,7 +58,7 @@ func (r *Runner) runSQLi(ctx context.Context, target ScanTarget) []ModuleFinding
 		}
 		// Only an explicitly fast scan may stop the classic family after its
 		// initial scouts. Normal/unlimited scans must reach later dialects.
-		if r.cfg.ScanIntensity == "fast" && idx >= fastFailLimit && !earlySignalFound && len(out) == 0 {
+		if r.cfg.ScanIntensity == "fast" && !r.cfg.FullModuleCoverage() && idx >= fastFailLimit && !earlySignalFound && len(out) == 0 {
 			break
 		}
 		// Content-difference SQLi must be evaluated as a matched true/false
@@ -495,7 +495,7 @@ func appendSQLiClassicFallbacks(existing []payloadgen.Payload, cfg config.ScanCo
 	}
 
 	limit := len(sqliFallbackPayloadSet)
-	if cfg.ScanIntensity == "fast" || cfg.ScanIntensity == "stealth" {
+	if !cfg.FullModuleCoverage() && (cfg.ScanIntensity == "fast" || cfg.ScanIntensity == "stealth") {
 		limit = 1
 	}
 

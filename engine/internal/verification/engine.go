@@ -30,7 +30,7 @@ func (e *Engine) Verify(candidate Candidate) Result {
 		reasons = append(reasons, ReasonOASTMismatch)
 	}
 
-	if len(candidate.HoneypotCanaries) >= 3 && len(candidate.HoneypotBodies) >= 3 && !isOASTConfirmed {
+	if len(candidate.HoneypotCanaries) >= 2 && len(candidate.HoneypotBodies) >= 2 && !isOASTConfirmed {
 		if DetectHoneypot(candidate.HoneypotCanaries, candidate.HoneypotBodies) {
 			reasons = append(reasons, ReasonHoneypotParameter)
 			result.Suppressed = true
@@ -354,7 +354,7 @@ func ScoreConfidence(c Candidate, r Result) (ConfidenceLevel, float64) {
 		score = 1
 	}
 	score = math.Round(score*100) / 100
-	if score >= 0.9 || r.OASTConfirmed && r.StabilityRatio >= 0.8 {
+	if score >= 0.9 || (r.OASTConfirmed && r.StabilityRatio >= 0.8) {
 		return Confirmed, score
 	}
 	if score >= 0.75 {

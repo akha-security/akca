@@ -20,6 +20,7 @@ type Correlation struct {
 	PayloadID        string                   `json:"payload_id"`
 	CandidateID      string                   `json:"candidate_id"`
 	CorrelationToken string                   `json:"correlation_token"`
+	ProviderDomain   string                   `json:"provider_domain,omitempty"`
 	Nonce            string                   `json:"nonce"`
 	EndpointURL      string                   `json:"endpoint_url"`
 	Parameter        string                   `json:"parameter,omitempty"`

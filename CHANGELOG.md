@@ -7,6 +7,35 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.2.6] - 2026-10-03
+
+### Added
+
+- Add provider-specific SSRF response validation for Alibaba Cloud, DigitalOcean, Oracle Cloud, Tencent Cloud and Packet/Equinix Metal metadata, plus stronger Docker, Consul, Redis and Kubernetes signals.
+- Add failover-domain, unhealthy-listener and per-payload OAST regression coverage.
+- Add stricter benchmark, browser and protocol-smuggling regressions, plus an explicit complete-corpus coverage audit for missing module fixtures.
+
+### Changed
+
+- Cap and parallelize hidden-parameter cross-endpoint discovery so full-coverage scans retain useful depth without unbounded request growth.
+- Increase the full-scan crawler limit from 1,000 to 1,500 pages.
+- Improve automatic memory-limit selection across Windows and Linux and simplify the terminal resource labels to `Scan` and `Total`.
+- Preserve endpoint discovery while bounding crawler traffic and improve form, traversal and payload scheduling behavior.
+
+### Fixed
+
+- Preserve callbacks issued before an OAST provider failover by correlating them against the provider domain captured at registration time.
+- Assign a distinct one-time OAST callback identity to every SSRF/WAF payload variant so evidence cannot be overwritten by a later probe.
+- Disable blind OAST coverage when the end-to-end preflight callback fails instead of advertising an unusable listener as ready.
+- Correct malformed double-scheme callback URLs in PDF injection and Server-Side JavaScript probes.
+- Reduce false positives and missed signals across blind XSS, SQL injection, command injection, LFI, SSRF, DOM XSS, HTTP smuggling and source-disclosure verification.
+
+### Validation
+
+- Full Go package tests pass with `go test ./... -count=1`.
+- Static analysis passes with `go vet ./...`.
+- Release assets are built for Windows x64, Linux x64/ARM64 and macOS Intel/Apple Silicon with SHA-256 checksums and GitHub provenance attestations.
+
 ## [v0.2.5] - 2026-09-28
 
 ### Added
@@ -331,7 +360,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - HTML, JSON, Markdown, CSV and SARIF reporting.
 - CWE and OWASP Top 10:2025 report classification.
 
-[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.6...HEAD
+[v0.2.6]: https://github.com/akha-security/akca/compare/v0.2.5...v0.2.6
 [v0.2.5]: https://github.com/akha-security/akca/compare/v0.2.4...v0.2.5
 [v0.2.4]: https://github.com/akha-security/akca/compare/v0.2.3...v0.2.4
 [v0.2.3]: https://github.com/akha-security/akca/compare/v0.2.2...v0.2.3

@@ -609,6 +609,8 @@ func printDetailedUsage() {
 	printHelpSection("Output", []helpEntry{
 		{"-o, --output <path>", "Report destination; use - to write the report to stdout"},
 		{"-f, --format <type>", "html, json, markdown, csv or sarif (default: html)"},
+		{"--no-redact", "Do not redact sensitive data/tokens in reports (default)"},
+		{"--redact", "Redact sensitive data/tokens in reports"},
 		{"-v, --verbose", "Detailed diagnostics and skipped checks"},
 		{"-q, --quiet", "Stable machine-friendly lifecycle and finding output"},
 		{"NO_COLOR=1", "Disable ANSI styling"},
@@ -618,6 +620,7 @@ func printDetailedUsage() {
 	})
 
 	printHelpSection("Commands", []helpEntry{
+		{"report [--scan-id <id>]", "Export report for an existing scan"},
 		{"replay --finding <id>", "Replay and re-verify stored evidence"},
 		{"benchmark [--strict]", "Run the observed quality gate benchmark"},
 		{"help", "Print this command reference"},
@@ -1018,20 +1021,20 @@ func sessionMemorySummary(payload map[string]interface{}) string {
 	total := payloadInt(payload, "detected_total_memory_mb")
 	if limit <= 0 {
 		if total > 0 {
-			return shortMemory(total) + " total"
+			return shortMemory(total) + " Total"
 		}
 		return "System managed"
 	}
 	if total > 0 {
-		return fmt.Sprintf("%s scan / %s total", shortMemory(limit), shortMemory(total))
+		return fmt.Sprintf("%s Scan / %s Total", shortMemory(limit), shortMemory(total))
 	}
 	if available > 0 {
-		return fmt.Sprintf("%s scan / %s free", shortMemory(limit), shortMemory(available))
+		return fmt.Sprintf("%s Scan / %s free", shortMemory(limit), shortMemory(available))
 	}
 	if safeTerminalText(fmt.Sprint(payload["memory_limit_source"])) == "manual" {
-		return shortMemory(limit) + " scan max"
+		return shortMemory(limit) + " Scan max"
 	}
-	return shortMemory(limit) + " scan max"
+	return shortMemory(limit) + " Scan max"
 }
 
 func shortMemory(mb int) string {
@@ -2645,6 +2648,8 @@ func runCLI(args []string) (exitCode int) {
 		switch strings.ToLower(strings.TrimSpace(args[0])) {
 		case "scan":
 			return runScanCommand(args[1:])
+		case "report":
+			return runReportCommand(args[1:])
 		case "replay":
 			return runReplayCommand(args[1:])
 		case "benchmark":
@@ -2696,6 +2701,8 @@ func runScanCommand(args []string) int {
 	var scanMode string
 	var verbose bool
 	var quiet bool
+	var redactReport bool
+	var noRedactReport bool
 
 	fs := flag.NewFlagSet("akca", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -2717,6 +2724,8 @@ func runScanCommand(args []string) int {
 	fs.StringVar(&outputFormat, "f", "html", "")
 	fs.StringVar(&outputFilePath, "output", "", "")
 	fs.StringVar(&outputFilePath, "o", "", "")
+	fs.BoolVar(&redactReport, "redact", false, "")
+	fs.BoolVar(&noRedactReport, "no-redact", false, "")
 	fs.BoolVar(&noOAST, "no-oast", false, "")
 	fs.StringVar(&oastServer, "oast-server", "", "")
 	fs.IntVar(&oastWait, "oast-wait", 60, "")
@@ -2809,6 +2818,10 @@ func runScanCommand(args []string) int {
 	noWAFEvasionSet := flagWasSet(fs, "no-waf-evasion")
 	if wafEvasionSet && noWAFEvasionSet {
 		printCLIError(fmt.Errorf("--waf-evasion and --no-waf-evasion cannot be used together"))
+		return 2
+	}
+	if flagWasSet(fs, "redact") && flagWasSet(fs, "no-redact") {
+		printCLIError(fmt.Errorf("--redact and --no-redact cannot be used together"))
 		return 2
 	}
 	if noOAST && strings.TrimSpace(oastServer) != "" {
@@ -3016,6 +3029,11 @@ func runScanCommand(args []string) int {
 	if includeLinkedAPISubdomains {
 		cfg.IncludeLinkedAPISubdomains = true
 	}
+	if flagWasSet(fs, "redact") {
+		cfg.RedactReports = redactReport
+	} else if flagWasSet(fs, "no-redact") {
+		cfg.RedactReports = !noRedactReport
+	}
 
 	// Browser setup can download a runtime, so do it only after mode/profile
 	// resolution proves that headless coverage is actually enabled. Passive
@@ -3199,6 +3217,98 @@ func runScanCommand(args []string) int {
 	if scanErr != nil && scanErr != context.Canceled {
 		return 1
 	}
+	return 0
+}
+
+func runReportCommand(args []string) int {
+	fs := flag.NewFlagSet("akca report", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var scanID string
+	var outputFormat string
+	var outputFilePath string
+	var redactReport bool
+	var noRedactReport bool
+	var help bool
+	fs.StringVar(&scanID, "scan-id", "", "")
+	fs.StringVar(&outputFormat, "format", "html", "")
+	fs.StringVar(&outputFormat, "f", "html", "")
+	fs.StringVar(&outputFilePath, "output", "", "")
+	fs.StringVar(&outputFilePath, "o", "", "")
+	fs.BoolVar(&redactReport, "redact", false, "")
+	fs.BoolVar(&noRedactReport, "no-redact", false, "")
+	fs.BoolVar(&help, "help", false, "")
+	fs.BoolVar(&help, "h", false, "")
+	if err := fs.Parse(args); err != nil {
+		printCLIError(fmt.Errorf("report: %w", err))
+		return 2
+	}
+	if help {
+		fmt.Fprintln(os.Stderr, "Usage: akca report [--scan-id <id>] [-o <output>] [-f <format>] [--redact / --no-redact]")
+		fmt.Fprintln(os.Stderr, "Exports an assessment report for a stored scan (unredacted by default).")
+		return 0
+	}
+	if flagWasSet(fs, "redact") && flagWasSet(fs, "no-redact") {
+		printCLIError(fmt.Errorf("--redact and --no-redact cannot be used together"))
+		return 2
+	}
+	if _, err := storage.BootstrapDataDir(); err != nil {
+		printCLIError(fmt.Errorf("report data directory: %w", err))
+		return 1
+	}
+	engine, err := app.New(NewConsoleWriterMode("quiet"))
+	if err != nil {
+		printCLIError(fmt.Errorf("report initialization: %w", err))
+		return 1
+	}
+	defer engine.Close()
+
+	scanID = strings.TrimSpace(scanID)
+	if scanID == "" {
+		latest, err := engine.DB().LatestScanID()
+		if err != nil || latest == "" {
+			printCLIError(fmt.Errorf("no scans found in database; specify --scan-id"))
+			return 1
+		}
+		scanID = latest
+	}
+	repFmt, err := normalizeFormat(outputFormat)
+	if err != nil {
+		printCLIError(err)
+		return 2
+	}
+	redact := false
+	if flagWasSet(fs, "redact") {
+		redact = redactReport
+	} else if flagWasSet(fs, "no-redact") {
+		redact = !noRedactReport
+	}
+
+	reportOpts := report.Options{
+		ScanID:   scanID,
+		Template: report.TemplateInternal,
+		Format:   repFmt,
+		Redact:   redact,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	data, err := engine.GenerateReportWithContext(ctx, reportOpts)
+	if err != nil {
+		printCLIError(fmt.Errorf("failed to generate report: %w", err))
+		return 1
+	}
+	outPath := outputFilePath
+	if outPath == "" {
+		ext := string(repFmt)
+		if repFmt == report.FormatMarkdown {
+			ext = "md"
+		}
+		outPath = fmt.Sprintf("akca-report-%s.%s", scanID, ext)
+	}
+	if err := writeReport(outPath, data); err != nil {
+		printCLIError(fmt.Errorf("failed to save report: %w", err))
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "Report written to %s\n", outPath)
 	return 0
 }
 

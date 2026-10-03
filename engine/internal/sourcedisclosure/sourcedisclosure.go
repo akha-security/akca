@@ -111,13 +111,13 @@ func Analyze(body string) []Finding {
 		add("debug_logic", truncate(m, 120), "medium", 0.8)
 	}
 	if m := jwtSecretRe.FindStringSubmatch(body); len(m) > 1 {
-		add("jwt_secret", secretscan.Redact(m[1]), "critical", 0.9)
+		add("jwt_secret", m[1], "critical", 0.9)
 	}
 	if m := dbPassRe.FindStringSubmatch(body); len(m) > 1 {
-		add("database_password_disclosure", secretscan.Redact(m[1]), "critical", 0.95)
+		add("database_password_disclosure", m[1], "critical", 0.95)
 	}
 	if m := envSecretRe.FindStringSubmatch(body); len(m) > 1 {
-		add("app_secret_disclosure", secretscan.Redact(m[1]), "high", 0.9)
+		add("app_secret_disclosure", m[1], "high", 0.9)
 	}
 	return out
 }

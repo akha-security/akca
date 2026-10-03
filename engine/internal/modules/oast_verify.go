@@ -48,6 +48,15 @@ func isValidOASTURL(raw string) bool {
 	return true
 }
 
+func appendOASTURLPath(raw, path string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/" + strings.TrimLeft(path, "/")
+	return u.String()
+}
+
 func (r *Runner) oastURL(ctx context.Context, payloadID string, target ScanTarget, vulnClass string) string {
 	if r.oast == nil {
 		return ""

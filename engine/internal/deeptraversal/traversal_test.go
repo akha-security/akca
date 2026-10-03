@@ -56,3 +56,9 @@ func TestDetectNoFalsePositive(t *testing.T) {
 		t.Fatal("expected no signal on identical bodies")
 	}
 }
+
+func TestDetectSignalRejectsEchoedProcPath(t *testing.T) {
+	if DetectSignal("requested filename: ../../../../proc/version", "welcome", "linux_proc_version") {
+		t.Fatal("echoed traversal path is not file-content evidence")
+	}
+}

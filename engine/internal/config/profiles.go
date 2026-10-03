@@ -6,7 +6,7 @@ const (
 	// unlimited so method variants and hidden routes are not discarded.
 	FullScanRequestBudget        = 0
 	FullScanCrawlerRequestBudget = 1_500
-	FullScanMaxPages             = 1_000
+	FullScanMaxPages             = 1_500
 	FullScanMaxEndpoints         = 0
 )
 

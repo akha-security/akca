@@ -23,7 +23,7 @@ func CalibrateTiming(samples, control []int64) (deltaMs float64, significant boo
 		float64(probeMAD)*1.4826 > math.Max(500, deltaMs*0.60) {
 		return deltaMs, false
 	}
-	threshold := math.Max(750, jitter*4)
+	threshold := math.Max(400, jitter*4)
 	if deltaMs < threshold {
 		return deltaMs, false
 	}

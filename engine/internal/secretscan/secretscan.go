@@ -346,7 +346,7 @@ func lineAt(content string, offset int) int {
 func Redact(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if len(raw) <= 6 {
-		return "[REDACTED]"
+		return raw
 	}
 	keep := len(raw) - 6
 	if keep > 12 {

@@ -389,18 +389,9 @@ func ssrfSignalConfirmed(p payloadgen.Payload, baseline, probe httpclient.Respon
 		strings.Contains(body, "request blocked") || strings.Contains(body, "access denied") {
 		return false
 	}
-	if signal == "" || signal == "cloud_metadata" {
-		switch {
-		case strings.Contains(strings.ToLower(p.Value), "metadata.google"):
-			signal = "gcp_metadata"
-		case strings.Contains(strings.ToLower(p.Value), "metadata/instance"):
-			signal = "azure_metadata"
-		case strings.Contains(strings.ToLower(p.Value), "169.254.169.254"),
-			strings.Contains(strings.ToLower(p.Value), "2852039166"):
-			signal = "aws_metadata"
-		default:
-			signal = p.ExpectedSignal
-		}
+	signal = canonicalSSRFSignal(p, signal)
+	if signal == "" {
+		return false
 	}
 	switch signal {
 	case "aws_metadata":
@@ -409,15 +400,41 @@ func ssrfSignalConfirmed(p payloadgen.Payload, baseline, probe httpclient.Respon
 			"iam/security-credentials", "security-credentials/",
 		}) >= 2
 	case "gcp_metadata":
-		if !strings.EqualFold(headerCI(probe.Headers, "Metadata-Flavor"), "Google") {
-			return false
+		if strings.EqualFold(headerCI(probe.Headers, "Metadata-Flavor"), "Google") {
+			return newMarkerCount(body, base, []string{
+				"project/project-id", "instance/id", "service-accounts/", "hostname",
+			}) >= 1
 		}
 		return newMarkerCount(body, base, []string{
-			"project/project-id", "instance/id", "service-accounts/", "hostname",
-		}) >= 1
+			"computemetadata", "project/project-id", "instance/id", "service-accounts/",
+			"service-accounts/default/token", "email", "scopes",
+		}) >= 2
 	case "azure_metadata":
 		return newMarkerCount(body, base, []string{
 			"compute", "vmid", "subscriptionid", "microsoft.compute", "azureenvironment",
+		}) >= 1
+	case "alibaba_metadata":
+		return newMarkerCount(body, base, []string{
+			"owner-account-id", "region-id", "zone-id", "image-id", "instance/instance-type",
+		}) >= 1
+	case "do_metadata":
+		if strings.Contains(body, "droplet_id") && !strings.Contains(base, "droplet_id") {
+			return true
+		}
+		return newMarkerCount(body, base, []string{
+			"vendor_data", "public_keys", "region", "hostname",
+		}) >= 2
+	case "oracle_metadata":
+		return newMarkerCount(body, base, []string{
+			"compartmentid", "canonicalregionname", "ocid1.", "oraclecloud.com", "shape",
+		}) >= 1
+	case "tencent_metadata":
+		return newMarkerCount(body, base, []string{
+			"app-id", "placement/region", "instance/instance-name", "tencentyun",
+		}) >= 1
+	case "packet_metadata":
+		return newMarkerCount(body, base, []string{
+			"bonding_mode", "facility", "operating_system", "iqn", "metadata.packet.net",
 		}) >= 1
 	case "internal_ip", "protocol_smuggling":
 		// Disallow matching AWS metadata markers on internal IP probes
@@ -431,16 +448,71 @@ func ssrfSignalConfirmed(p payloadgen.Payload, baseline, probe httpclient.Respon
 		// Check for internal service markers
 		for _, marker := range []string{
 			"docker engine", "k8s", "consul", "kubernetes.io/serviceaccount",
-			"redis_version", "root:x:0:0:",
+			"redis_version", "+pong", "role:master", "stat pid", "memcached", "root:x:0:0:",
 		} {
 			if strings.Contains(body, marker) && !strings.Contains(base, marker) {
 				return true
 			}
 		}
+		if newMarkerCount(body, base, []string{"apiversion", "goversion", "gitcommit", "kernelversion"}) >= 2 {
+			return true
+		}
 		return differentialWithStatusGuard(probe.Body, baseline.Body, p.Value, probe.StatusCode, baseline.StatusCode)
 	default:
 		return false
 	}
+}
+
+func canonicalSSRFSignal(p payloadgen.Payload, signal string) string {
+	raw := strings.ToLower(strings.TrimSpace(signal))
+	if raw == "" {
+		raw = strings.ToLower(strings.TrimSpace(p.ExpectedSignal))
+	}
+	if raw == "cloud_metadata" {
+		raw = ""
+	}
+	switch raw {
+	case "aws_metadata", "aws_iam_role", "aws_iam_credentials", "aws_token":
+		return "aws_metadata"
+	case "gcp_metadata", "gcp_token", "gcp_service_account":
+		return "gcp_metadata"
+	case "azure_metadata", "azure_token", "azure_identity_token":
+		return "azure_metadata"
+	case "alibaba_metadata", "do_metadata", "oracle_metadata", "tencent_metadata", "packet_metadata":
+		return raw
+	case "docker_api", "consul_api", "k8s_secrets", "internal_ip":
+		return "internal_ip"
+	case "redis_service", "memcached_service", "protocol_smuggling":
+		return "protocol_smuggling"
+	}
+	value := strings.ToLower(p.Value)
+	switch {
+	case strings.Contains(value, "metadata.google"):
+		return "gcp_metadata"
+	case strings.Contains(value, "metadata/instance") || strings.Contains(value, "identity/oauth2"):
+		return "azure_metadata"
+	case strings.Contains(value, "100.100.100.200"):
+		return "alibaba_metadata"
+	case strings.Contains(value, "metadata/v1.json") || strings.Contains(value, "metadata/v1/"):
+		return "do_metadata"
+	case strings.Contains(value, "192.0.0.192"):
+		return "oracle_metadata"
+	case strings.Contains(value, "metadata.tencentyun.com"):
+		return "tencent_metadata"
+	case strings.Contains(value, "metadata.packet.net"):
+		return "packet_metadata"
+	case strings.Contains(value, "docker"), strings.Contains(value, "2375/version"),
+		strings.Contains(value, "consul"), strings.Contains(value, "8500/v1/agent"),
+		strings.Contains(value, "kubernetes"), strings.Contains(value, "serviceaccount"):
+		return "internal_ip"
+	case strings.HasPrefix(value, "gopher://"), strings.HasPrefix(value, "dict://"),
+		strings.HasPrefix(value, "ldap://"):
+		return "protocol_smuggling"
+	case strings.Contains(value, "169.254.169.254"), strings.Contains(value, "2852039166"),
+		strings.Contains(value, "0xa9fea9fe"), strings.Contains(value, "0251.0372.0251.0372"):
+		return "aws_metadata"
+	}
+	return raw
 }
 
 func newMarkerCount(body, baseline string, markers []string) int {

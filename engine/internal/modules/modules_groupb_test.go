@@ -2,6 +2,7 @@ package modules
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/akha-security/akca/engine/internal/config"
 	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/models"
 	"github.com/akha-security/akca/engine/internal/oast"
 	"github.com/akha-security/akca/engine/internal/reflection"
 	"github.com/akha-security/akca/engine/internal/scope"
@@ -18,6 +20,18 @@ import (
 
 type stubOASTClient struct {
 	url string
+}
+
+type rotatingOASTClient struct {
+	urls []string
+}
+
+func (s *rotatingOASTClient) GenerateURL(payloadID, endpointURL, parameter, vulnClass string, findingID int64) (oast.GeneratedURL, error) {
+	callbackURL := fmt.Sprintf("http://callback-%d.oast.test/", len(s.urls)+1)
+	s.urls = append(s.urls, callbackURL)
+	return oast.GeneratedURL{
+		URL: callbackURL, CorrelationToken: fmt.Sprintf("callback-%d", len(s.urls)), PayloadID: payloadID,
+	}, nil
 }
 
 func (s *stubOASTClient) GenerateURL(payloadID, endpointURL, parameter, vulnClass string, findingID int64) (oast.GeneratedURL, error) {
@@ -229,6 +243,50 @@ func TestSSRFWeakParameterGetsOASTOnlyCoverage(t *testing.T) {
 	}
 }
 
+func TestSSRFWAFVariantsReceiveDistinctOASTCallbacks(t *testing.T) {
+	db, err := storage.Open(t.TempDir() + "/ssrf-oast.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureScan("scan-ssrf-oast"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveWAFProfile("scan-ssrf-oast", models.WAFProfile{
+		Host: "example.com", Vendor: "Akamai", Confidence: 0.95,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.DefaultScanConfig()
+	cfg.EnableOAST = true
+	cfg.EnableWAFBypassHeaders = true
+	oastClient := &rotatingOASTClient{}
+	r := NewRunner(
+		"scan-ssrf-oast", &groupBClient{responses: map[string]string{"__default__": "ok"}},
+		scope.NewEngine(cfg), db, verification.NewEngine(db, nil), oastClient,
+		func(string, string, map[string]interface{}) error { return nil }, cfg,
+	)
+	target := ScanTarget{EndpointURL: "http://example.com/api/fetch", Method: "GET", Parameter: "url", Location: "query"}
+	probes := r.buildSSRFOASTProbes(context.Background(), target)
+	if len(probes) < 2 {
+		t.Fatalf("expected base and WAF-adapted OAST probes, got %d", len(probes))
+	}
+	if len(oastClient.urls) != len(probes) {
+		t.Fatalf("callback registrations=%d probes=%d; every probe must own one token", len(oastClient.urls), len(probes))
+	}
+	seenPayloads := make(map[string]struct{}, len(probes))
+	for _, probe := range probes {
+		if _, exists := seenPayloads[probe.Value]; exists {
+			t.Fatalf("duplicate OAST probe payload reused a callback: %q", probe.Value)
+		}
+		seenPayloads[probe.Value] = struct{}{}
+	}
+}
+
 func TestSSRFSingleProbeHighConfidenceMetadata(t *testing.T) {
 	c := &groupBClient{responses: map[string]string{
 		"": "ok",
@@ -241,6 +299,21 @@ func TestSSRFSingleProbeHighConfidenceMetadata(t *testing.T) {
 	}
 	if findings[0].Confidence != verification.HighConfidence {
 		t.Fatalf("single probe metadata finding confidence should be HighConfidence, got %v", findings[0].Confidence)
+	}
+}
+
+func TestSSRFAdditionalCloudProviderMetadata(t *testing.T) {
+	c := &groupBClient{responses: map[string]string{
+		"": "ok",
+		"http://100.100.100.200/latest/meta-data/": "owner-account-id\nregion-id\nzone-id",
+	}}
+	target := ScanTarget{EndpointURL: "http://example.com/api/fetch", Method: "GET", Parameter: "url"}
+	findings := groupBRunner(t, c).runSSRF(context.Background(), target)
+	if len(findings) != 1 {
+		t.Fatalf("Alibaba metadata SSRF should be reported, got %d findings", len(findings))
+	}
+	if findings[0].Evidence.Signal != "alibaba_metadata" {
+		t.Fatalf("finding signal = %q, want alibaba_metadata", findings[0].Evidence.Signal)
 	}
 }
 

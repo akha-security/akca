@@ -85,8 +85,11 @@ func (r *Runner) runPDFInjection(ctx context.Context, target ScanTarget) []Modul
 	if r.cfg.EnableOAST && r.oast != nil {
 		if oastURL := strings.TrimSpace(r.oastURL(ctx, "pdf-ssrf", target, "pdf_injection")); oastURL != "" {
 			r.sendOASTProbe(ctx, target, oastURL)
-			oastPayload := fmt.Sprintf(`<img src="http://%s/pdf-ssrf">`, oastURL)
-			_, _ = r.probe(ctx, target, oastPayload)
+		}
+		if htmlOASTURL := strings.TrimSpace(r.oastURL(ctx, "pdf-html-ssrf", target, "pdf_injection")); htmlOASTURL != "" {
+			if callback := appendOASTURLPath(htmlOASTURL, "pdf-ssrf"); callback != "" {
+				r.sendOASTProbe(ctx, target, fmt.Sprintf(`<img src="%s">`, callback))
+			}
 		}
 	}
 

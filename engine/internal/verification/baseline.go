@@ -30,6 +30,12 @@ func CompareParameterBaseline(base, probe ResponseSnapshot) bool {
 	if hashBody(NormalizeVolatileFields(base.Body)) != hashBody(NormalizeVolatileFields(probe.Body)) {
 		return false
 	}
+	// Check security-relevant headers so that CRLF, CORS and redirect
+	// injections that leave the body unchanged are not treated as baseline
+	// matches and silently deprioritised.
+	if SignificantHeaderDiff(base, probe) {
+		return false
+	}
 	return true
 }
 
