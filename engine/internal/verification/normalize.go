@@ -3,14 +3,14 @@ package verification
 import "regexp"
 
 var (
-	volatileTimestampRE  = regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b|(?i:(?:timestamp|time|date|created|updated|modified|expires|issued|generated|_at|_on)\s*["':=]\s*)(\d{10,13})\b`)
-	volatileUUIDRE       = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
-	volatileTokenRE      = regexp.MustCompile(`(?i)\b(?:csrf|csrf_?token|xsrf|xsrf_?token|token|request_?id|trace_?id|session_?id|sid|nonce|state|authenticity_token|__RequestVerificationToken|_token|anti_?forgery)\b(['"]?\s*[:=]\s*['"]?)[a-zA-Z0-9._~-]{8,}`)
-	volatileHiddenRE     = regexp.MustCompile(`(?i)<input[^>]+name=["']?(?:csrf|xsrf|_token|nonce|authenticity_token|token)[^>]+value=["']?([a-zA-Z0-9._~-]+)["']?`)
+	volatileTimestampRE = regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b|(?i:(?:timestamp|time|date|created|updated|modified|expires|issued|generated|_at|_on)\s*["':=]\s*)(\d{10,13})\b`)
+	volatileUUIDRE      = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
+	volatileTokenRE     = regexp.MustCompile(`(?i)\b(?:csrf|csrf_?token|xsrf|xsrf_?token|token|request_?id|trace_?id|session_?id|sid|nonce|state|authenticity_token|__RequestVerificationToken|_token|anti_?forgery)\b(['"]?\s*[:=]\s*['"]?)[a-zA-Z0-9._~-]{8,}`)
+	volatileHiddenRE    = regexp.MustCompile(`(?i)<input[^>]+name=["']?(?:csrf|xsrf|_token|nonce|authenticity_token|token)[^>]+value=["']?([a-zA-Z0-9._~-]+)["']?`)
 	// Require a JSON/assignment context or known key prefix so that hex
 	// fragments inside SQL error messages, payload reflections and data
 	// dumps are preserved for differential comparison.
-	volatileHexHashRE = regexp.MustCompile(`(?i)(?:hash|checksum|etag|signature|digest|csrf|nonce|token)["':=\s]+[0-9a-fA-F]{32,64}\b`)
+	volatileHexHashRE    = regexp.MustCompile(`(?i)(?:hash|checksum|etag|signature|digest|csrf|nonce|token)["':=\s]+[0-9a-fA-F]{32,64}\b`)
 	volatileNumericSeqRE = regexp.MustCompile(`(?i)\b(?:count|counter|seq|sequence|rand|random|nonce|ticket|timestamp)\b\s*[:=]\s*\d+\b`)
 )
 
