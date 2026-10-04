@@ -224,6 +224,8 @@ func (b *Builder) buildTrafficSection(scanID string, redact bool) ([]TrafficEntr
 			rawResponse = RedactString(rawResponse)
 			rec.URL = RedactString(rec.URL)
 		}
+		rawRequest, _ = compactReportString(rawRequest, reportRequestEvidenceLimit)
+		rawResponse, _ = compactReportString(rawResponse, reportResponseEvidenceLimit)
 		out = append(out, TrafficEntry{Method: rec.Method, URL: rec.URL, StatusCode: rec.StatusCode, DurationMs: rec.DurationMs, RawRequest: rawRequest, RawResponse: rawResponse})
 	}
 	return out, nil

@@ -77,11 +77,49 @@ func (r *Runner) runCPDoS(ctx context.Context, target ScanTarget) []ModuleFindin
 		}
 	}
 
+	for _, vector := range []struct {
+		name, title string
+		headers     map[string]string
+	}{
+		{name: "hho", title: "Cache-Poisoned Denial of Service via oversized header", headers: map[string]string{"X-Akca-Oversize": strings.Repeat("A", 9*1024)}},
+		{name: "hco", title: "Cache-Poisoned Denial of Service via oversized cookie", headers: map[string]string{"Cookie": "akca_pad=" + strings.Repeat("A", 9*1024)}},
+	} {
+		confirmed, poison, clean, control := r.verifyCPDoSHeadersFlow(ctx, target, vector.headers)
+		if !confirmed {
+			continue
+		}
+		second, _, _, _ := r.verifyCPDoSHeadersFlow(ctx, target, vector.headers)
+		if !second {
+			continue
+		}
+		signal := "cpdos_" + vector.name
+		p := defaultPayload("cpdos", signal, vector.name, signal)
+		f := r.verifyAndBuildWithCandidate(ctx, "cpdos", target, p, baseline, clean, signal, false, false, "", "", func(candidate *verification.Candidate) {
+			candidate.RequestedProofType = verification.ProofContentEvidence
+			candidate.NegativeControlSet, candidate.NegativeControlOK = true, true
+			candidate.Observations = append(candidate.Observations,
+				r.observation("cpdos", target, verification.RolePositiveProbe, 1, poison),
+				r.observation("cpdos", target, verification.RolePositiveReplay, 2, clean),
+				r.observation("cpdos", target, verification.RoleNegativeControl, 1, control))
+		})
+		if f != nil {
+			f.Severity = "high"
+			f.Title = vector.title
+			f.Description = fmt.Sprintf("A backend error (%d) induced by the %s vector was cached and served to a clean request; an independent cache-buster remained healthy.", poison.Response.StatusCode, vector.name)
+			r.recordFinding(ctx, &out, f, "cpdos", signal)
+			return out
+		}
+	}
+
 	return out
 }
 
 // verifyCPDoSFlow executes the strict 4-step verification state machine.
 func (r *Runner) verifyCPDoSFlow(ctx context.Context, target ScanTarget, hName string) (bool, httpclient.RequestResponse, httpclient.RequestResponse, httpclient.RequestResponse) {
+	return r.verifyCPDoSHeadersFlow(ctx, target, map[string]string{hName: "AKCADOSTOKEN"})
+}
+
+func (r *Runner) verifyCPDoSHeadersFlow(ctx context.Context, target ScanTarget, poisonHeaders map[string]string) (bool, httpclient.RequestResponse, httpclient.RequestResponse, httpclient.RequestResponse) {
 	var emptyRR httpclient.RequestResponse
 
 	// -------------------------------------------------------------
@@ -102,7 +140,6 @@ func (r *Runner) verifyCPDoSFlow(ctx context.Context, target ScanTarget, hName s
 	// -------------------------------------------------------------
 	// Adım 2: Poison Probe (Inject Unexpected Override Header)
 	// -------------------------------------------------------------
-	poisonHeaders := map[string]string{hName: "AKCADOSTOKEN"}
 	pRR, err := r.client.Do(ctx, "GET", testURL, nil, poisonHeaders)
 	if err != nil {
 		return false, emptyRR, emptyRR, emptyRR

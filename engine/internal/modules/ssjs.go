@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/verification"
 )
 
 func (r *Runner) runSSJS(ctx context.Context, target ScanTarget) []ModuleFinding {
@@ -30,7 +33,10 @@ func (r *Runner) runSSJS(ctx context.Context, target ScanTarget) []ModuleFinding
 	if err == nil && evalRR.Response.StatusCode == 200 && strings.Contains(evalRR.Response.Body, "60481729") {
 		signal := "ssjs_eval_arithmetic"
 		p := defaultPayload("server_side_js_injection", signal, evalPayload, signal)
-		f := r.verifyAndBuild(ctx, "server_side_js_injection", target, p, baseline, evalRR, signal, false, false, "", "")
+		f := r.verifyAndBuildWithCandidate(ctx, "server_side_js_injection", target, p, baseline, evalRR,
+			signal, false, false, "", "", func(candidate *verification.Candidate) {
+				candidate.RequestedProofType = verification.ProofContentEvidence
+			})
 		if f != nil {
 			f.Severity = "critical"
 			f.Title = "Server-Side JavaScript (Node.js) Code Execution"
@@ -46,7 +52,10 @@ func (r *Runner) runSSJS(ctx context.Context, target ScanTarget) []ModuleFinding
 	if pErr == nil && procRR.Response.StatusCode == 200 && strings.Contains(procRR.Response.Body, "akcassjsmarker") {
 		signal := "ssjs_child_process_exec"
 		p := defaultPayload("server_side_js_injection", signal, processPayload, signal)
-		f := r.verifyAndBuild(ctx, "server_side_js_injection", target, p, baseline, procRR, signal, false, false, "", "")
+		f := r.verifyAndBuildWithCandidate(ctx, "server_side_js_injection", target, p, baseline, procRR,
+			signal, false, false, "", "", func(candidate *verification.Candidate) {
+				candidate.RequestedProofType = verification.ProofContentEvidence
+			})
 		if f != nil {
 			f.Severity = "critical"
 			f.Title = "Server-Side JavaScript (Node.js) RCE via child_process"
@@ -69,29 +78,78 @@ func (r *Runner) runSSJS(ctx context.Context, target ScanTarget) []ModuleFinding
 	}
 
 	// Test 4: Time-delay (Busy-Wait Loop)
+	if !ssjsTimingResponseUsable(baseline.Response) {
+		return out
+	}
 	busyPayload := "var a=new Date(); do{var b=new Date();}while(b-a<5000);"
 	start := time.Now()
 	busyRR, bErr := r.probe(ctx, target, busyPayload)
-	elapsed := time.Since(start)
+	firstBusyMs := measuredResponseMs(busyRR, time.Since(start))
+	if bErr != nil || !ssjsTimingResponseUsable(busyRR.Response) || firstBusyMs < 4500 {
+		return out
+	}
 
-	if bErr == nil && elapsed >= 4500*time.Millisecond && baseline.Response.Duration < 2000*time.Millisecond {
-		// Verify zero-delay control
-		zeroPayload := "var a=new Date(); do{var b=new Date();}while(b-a<0);"
-		zStart := time.Now()
-		_, _ = r.probe(ctx, target, zeroPayload)
-		zElapsed := time.Since(zStart)
+	zeroPayload := "var a=new Date(); do{var b=new Date();}while(b-a<0);"
+	zeroRR, zErr := r.probe(ctx, target, zeroPayload)
+	if zErr != nil || !ssjsTimingResponseUsable(zeroRR.Response) ||
+		!ssjsSameTimingSurface(baseline.Response, busyRR.Response, zeroRR.Response) {
+		return out
+	}
+	firstZeroMs := responseDurationMs(zeroRR)
+	if firstZeroMs <= 0 || firstZeroMs >= 2500 {
+		return out
+	}
 
-		if zElapsed < 2500*time.Millisecond {
-			signal := "ssjs_time_delay"
-			p := defaultPayload("server_side_js_injection", signal, busyPayload, signal)
-			f := r.verifyAndBuild(ctx, "server_side_js_injection", target, p, baseline, busyRR, signal, false, false, "", "")
-			if f != nil {
-				f.Severity = "critical"
-				f.Title = "Server-Side JavaScript (Node.js) Blind Timing Injection"
-				f.Description = fmt.Sprintf("Server-side JavaScript blind timing delay (~5000ms) confirmed on parameter '%s'.", target.Parameter)
-				r.recordFinding(ctx, &out, f, "server_side_js_injection", signal)
-			}
+	busySamples := []int64{firstBusyMs}
+	zeroSamples := []int64{firstZeroMs}
+	busyReplays := make([]httpclient.RequestResponse, 0, 2)
+	zeroControls := []httpclient.RequestResponse{zeroRR}
+	for i := 0; i < 2; i++ {
+		busyReplay, err := r.probe(ctx, target, busyPayload)
+		if err != nil || !ssjsTimingResponseUsable(busyReplay.Response) {
+			return out
 		}
+		zeroControl, err := r.probe(ctx, target, zeroPayload)
+		if err != nil || !ssjsTimingResponseUsable(zeroControl.Response) ||
+			!ssjsSameTimingSurface(baseline.Response, busyReplay.Response, zeroControl.Response) {
+			return out
+		}
+		busyMs, zeroMs := responseDurationMs(busyReplay), responseDurationMs(zeroControl)
+		if busyMs <= 0 || zeroMs <= 0 {
+			return out
+		}
+		busySamples = append(busySamples, busyMs)
+		zeroSamples = append(zeroSamples, zeroMs)
+		busyReplays = append(busyReplays, busyReplay)
+		zeroControls = append(zeroControls, zeroControl)
+	}
+	if _, significant := verification.CalibrateTiming(busySamples, zeroSamples); !significant {
+		return out
+	}
+
+	signal := "ssjs_time_delay"
+	p := defaultPayload("server_side_js_injection", signal, busyPayload, signal)
+	f := r.verifyAndBuildWithCandidate(ctx, "server_side_js_injection", target, p, baseline, busyRR,
+		signal, false, false, "", "", func(candidate *verification.Candidate) {
+			candidate.RequestedProofType = verification.ProofTiming
+			candidate.TimingSamples = append([]int64(nil), busySamples...)
+			candidate.TimingControl = append([]int64(nil), zeroSamples...)
+			candidate.NegativeControlSet = true
+			candidate.NegativeControlOK = true
+			for i, replay := range busyReplays {
+				candidate.Observations = append(candidate.Observations,
+					r.observation("server_side_js_injection", target, verification.RolePositiveReplay, i+2, replay))
+			}
+			for i, control := range zeroControls {
+				candidate.Observations = append(candidate.Observations,
+					r.observation("server_side_js_injection", target, verification.RoleNegativeControl, i+1, control))
+			}
+		})
+	if f != nil {
+		f.Severity = "critical"
+		f.Title = "Server-Side JavaScript (Node.js) Blind Timing Injection"
+		f.Description = fmt.Sprintf("Server-side JavaScript blind timing delay confirmed on parameter '%s' with three delayed probes and three matched zero-delay controls.", target.Parameter)
+		r.recordFinding(ctx, &out, f, "server_side_js_injection", signal)
 	}
 
 	return out
@@ -99,7 +157,8 @@ func (r *Runner) runSSJS(ctx context.Context, target ScanTarget) []ModuleFinding
 
 func ssjsSignalConfirmed(body, baseline, signal string, probeStatus, baseStatus int) bool {
 	if signal == "ssjs_time_delay" {
-		return probeStatus > 0 && probeStatus < 500 && !rateLimitBlockSignal(probeStatus, body)
+		return probeStatus >= 200 && probeStatus < 400 && baseStatus >= 200 && baseStatus < 400 &&
+			!rateLimitBlockSignal(probeStatus, body) && !ssjsBlockPage(body) && !ssjsBlockPage(baseline)
 	}
 	if probeStatus != 200 || body == baseline && probeStatus == baseStatus {
 		return false
@@ -112,4 +171,34 @@ func ssjsSignalConfirmed(body, baseline, signal string, probeStatus, baseStatus 
 	default:
 		return false
 	}
+}
+
+func measuredResponseMs(rr httpclient.RequestResponse, elapsed time.Duration) int64 {
+	if ms := responseDurationMs(rr); ms > 0 {
+		return ms
+	}
+	return elapsed.Milliseconds()
+}
+
+func ssjsTimingResponseUsable(response httpclient.ResponseRecord) bool {
+	return response.StatusCode >= 200 && response.StatusCode < 400 &&
+		!rateLimitBlockSignal(response.StatusCode, response.Body) && !ssjsBlockPage(response.Body)
+}
+
+func ssjsSameTimingSurface(baseline, delayed, control httpclient.ResponseRecord) bool {
+	return baseline.StatusCode == delayed.StatusCode && delayed.StatusCode == control.StatusCode
+}
+
+func ssjsBlockPage(body string) bool {
+	lower := strings.ToLower(body)
+	for _, token := range []string{
+		"request rejected", "requested url was rejected", "please consult with your administrator",
+		"your support id is", "request blocked", "access denied", "web application firewall",
+		"attention required", "cf-browser-verification", "incapsula_resource", "captcha",
+	} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
 }

@@ -67,7 +67,7 @@ func (r *Runner) runFileUpload(ctx context.Context, target ScanTarget) []ModuleF
 		}
 		marker := "AKCA_UPLOAD_" + token
 		expectedContent := []byte(probe.prefix + marker)
-		body, contentType, err := buildUploadBody(filename, probe.contentType, expectedContent)
+		body, contentType, err := buildUploadBodyWithField(uploadFieldName(target.Parameter), filename, probe.contentType, expectedContent)
 		if err != nil {
 			continue
 		}
@@ -179,10 +179,14 @@ func contentDigest(content []byte) string {
 }
 
 func buildUploadBody(filename, contentType string, content []byte) ([]byte, string, error) {
+	return buildUploadBodyWithField("file", filename, contentType, content)
+}
+
+func buildUploadBodyWithField(fieldName, filename, contentType string, content []byte) ([]byte, string, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	header := make(textproto.MIMEHeader)
-	header.Set("Content-Disposition", `form-data; name="file"; filename="`+strings.ReplaceAll(filename, `"`, "")+`"`)
+	header.Set("Content-Disposition", `form-data; name="`+fieldName+`"; filename="`+strings.ReplaceAll(filename, `"`, "")+`"`)
 	header.Set("Content-Type", contentType)
 	part, err := writer.CreatePart(header)
 	if err != nil {
@@ -195,6 +199,16 @@ func buildUploadBody(filename, contentType string, content []byte) ([]byte, stri
 		return nil, "", err
 	}
 	return body.Bytes(), writer.FormDataContentType(), nil
+}
+
+var multipartFieldNameRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
+
+func uploadFieldName(parameter string) string {
+	parameter = strings.TrimSpace(parameter)
+	if multipartFieldNameRE.MatchString(parameter) {
+		return parameter
+	}
+	return "file"
 }
 
 var uploadURLPattern = regexp.MustCompile(`https?://[^\s"'<>]+|/[A-Za-z0-9._~!$&'()*+,;=:@%/-]+`)

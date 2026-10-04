@@ -589,11 +589,11 @@ func printDetailedUsage() {
 		{"--max-depth <n>", "Optional crawl depth cap; 0 means unlimited"},
 		{"--crawler-budget <n>", "Discovery request budget; 0 means unlimited"},
 		{"--request-budget <n>", "Maximum total requests; 0 means unlimited"},
-		{"--requests-per-target <n>", "Module budget: N requests per discovered URL/method; 0 means unlimited"},
+		{"--requests-per-target <n>", "Optional module budget per discovered URL/method; default 0 means unlimited"},
 		{"--time-budget <duration>", "Maximum duration such as 30m or 2h; 0 means unlimited"},
 		{"--memory-limit <mb>", "Process memory limit; 0 means automatic"},
 		{"--include-linked-api-subdomains", "Also crawl linked API/service subdomains under the same root"},
-		{"--scan-id <id>", "Deterministic scan identifier for automation"},
+		{"--scan-id <id>", "Optional deterministic scan identifier for automation; generated automatically by default"},
 	})
 
 	printHelpSection("Engine", []helpEntry{
@@ -2018,11 +2018,25 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 			elapsed = time.Since(started)
 			duration = fmt.Sprintf("  %s%s%s", cGhost, shortDuration(elapsed), rst)
 		}
+		status, _ := e.Payload["status"].(string)
+		if status == "" {
+			status = "completed"
+		}
 		if !cw.interactive {
-			fmt.Fprintf(cw.outputWriter(), "PHASE COMPLETE name=%s duration=%s\n", safeTerminalText(phaseLabel(phase)), shortDuration(elapsed))
+			fmt.Fprintf(cw.outputWriter(), "PHASE %s name=%s duration=%s\n", strings.ToUpper(status), safeTerminalText(phaseLabel(phase)), shortDuration(elapsed))
 			return nil
 		}
 		label := phaseLabel(phase)
+		if status == "partial" {
+			fmt.Fprintf(cw.outputWriter(), "\033[1A\r\033[2K%s%02d%s  %s!%s  %s%s%s  %sPARTIAL%s%s\n",
+				cGhost, phaseIndex, rst, cAmber, rst, bCloud, label, rst, bAmber, rst, duration)
+			return nil
+		}
+		if status == "failed" {
+			fmt.Fprintf(cw.outputWriter(), "\033[1A\r\033[2K%s%02d%s  %s×%s  %s%s%s  %sFAILED%s%s\n",
+				cGhost, phaseIndex, rst, cRose, rst, bCloud, label, rst, bRose, rst, duration)
+			return nil
+		}
 		if !interrupted {
 			fmt.Fprintf(cw.outputWriter(), "\033[1A\r\033[2K%s%02d%s  %s✓%s  %s%s%s  %sCOMPLETED%s%s\n",
 				cGhost, phaseIndex, rst, cMint, rst, bCloud, label, rst, bMint, rst, duration)
@@ -2703,6 +2717,7 @@ func runScanCommand(args []string) int {
 	var quiet bool
 	var redactReport bool
 	var noRedactReport bool
+	var allowConcurrent bool
 
 	fs := flag.NewFlagSet("akca", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -2726,6 +2741,7 @@ func runScanCommand(args []string) int {
 	fs.StringVar(&outputFilePath, "o", "", "")
 	fs.BoolVar(&redactReport, "redact", false, "")
 	fs.BoolVar(&noRedactReport, "no-redact", false, "")
+	fs.BoolVar(&allowConcurrent, "allow-concurrent", false, "")
 	fs.BoolVar(&noOAST, "no-oast", false, "")
 	fs.StringVar(&oastServer, "oast-server", "", "")
 	fs.IntVar(&oastWait, "oast-wait", 60, "")
@@ -2922,6 +2938,10 @@ func runScanCommand(args []string) int {
 		cwMode = "quiet"
 	}
 	cw := NewConsoleWriterMode(cwMode)
+	// Kept as a hidden compatibility flag for existing scripts. Concurrent
+	// scans are safe by default now that every fresh run receives a unique ID.
+	_ = allowConcurrent
+
 	engine, err := app.New(cw)
 	if err != nil {
 		printCLIError(fmt.Errorf("engine initialization failed: %w", err))
@@ -2931,13 +2951,12 @@ func runScanCommand(args []string) int {
 
 	// ── Build scan config ───────────────────────────────────────────────
 	cfg := config.DefaultScanConfig()
-	cfg.ScanID = strings.TrimSpace(scanID)
-	if cfg.ScanID == "" {
-		cfg.ScanID = fmt.Sprintf("scan-%d", time.Now().Unix())
-	}
-
 	initialTargets := []string{targetURL}
 	cfg.Targets = initialTargets
+	cfg.ScanID = strings.TrimSpace(scanID)
+	if cfg.ScanID == "" && resumeID == "" {
+		cfg.ScanID = config.GenerateScanID(cfg.Targets)
+	}
 	cfg.APIImportFiles = append([]string(nil), apiSpecs...)
 	if err := config.ApplyScanModes(&cfg, scanMode); err != nil {
 		printCLIError(err)

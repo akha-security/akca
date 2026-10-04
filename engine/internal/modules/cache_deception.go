@@ -13,6 +13,12 @@ import (
 )
 
 var wcdEmailRe = regexp.MustCompile(`\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`)
+var wcdPrivateValuePatterns = []*regexp.Regexp{
+	wcdEmailRe,
+	regexp.MustCompile(`(?i)\b[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}\b`),
+	regexp.MustCompile(`(?i)"(?:phone|mobile|telephone|address|api_key|access_token|account_number|iban|balance)"\s*:\s*"?[^",}\r\n]{4,160}`),
+	regexp.MustCompile(`(?i)\b(?:sk_live_|pk_live_|AKIA)[A-Za-z0-9_-]{12,64}\b`),
+}
 
 func (r *Runner) runCacheDeception(ctx context.Context, target ScanTarget) []ModuleFinding {
 	if ok, reason := r.shouldRunModule("cache_deception", target); !ok {
@@ -48,9 +54,12 @@ func (r *Runner) runCacheDeception(ctx context.Context, target ScanTarget) []Mod
 	} else {
 		// Heuristic detection: must find structured private identifiers (e.g. an actual email address)
 		// rather than static generic words like "email" or "token" which appear on public pages.
-		m := wcdEmailRe.FindString(privateBaseline.Response.Body)
-		if m != "" && !strings.HasSuffix(m, ".png") && !strings.HasSuffix(m, ".jpg") {
-			canary = m
+		for _, pattern := range wcdPrivateValuePatterns {
+			m := pattern.FindString(privateBaseline.Response.Body)
+			if m != "" && !strings.HasSuffix(strings.ToLower(m), ".png") && !strings.HasSuffix(strings.ToLower(m), ".jpg") {
+				canary = m
+				break
+			}
 		}
 		// In heuristic mode, verify that this canary is truly private by checking
 		// that an unauthenticated (anonymous) request to privateURL does NOT see it.
@@ -99,8 +108,7 @@ func (r *Runner) runCacheDeception(ctx context.Context, target ScanTarget) []Mod
 		var victims []httpclient.RequestResponse
 		for attempt := 0; attempt < 3; attempt++ {
 			victim, victimErr := anonymous.DoWithoutSession(ctx, http.MethodGet, rawURL, nil, nil)
-			if victimErr != nil || victim.Response.StatusCode >= 400 || !strings.Contains(victim.Response.Body, canary) ||
-				!cacheEvidence(victim.Response.Headers) {
+			if victimErr != nil || victim.Response.StatusCode >= 400 || !strings.Contains(victim.Response.Body, canary) {
 				victims = nil
 				break
 			}
@@ -144,5 +152,5 @@ func (r *Runner) cacheDeceptionPolicy(target ScanTarget) (config.CacheDeceptionP
 }
 
 func cacheDeceptionSignal(body, baseline string, headers map[string]string) bool {
-	return body != baseline && cacheEvidence(headers)
+	return body != baseline && !isUncacheableResponse(headers)
 }

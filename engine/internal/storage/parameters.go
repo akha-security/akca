@@ -6,11 +6,14 @@ import (
 )
 
 type DiscoveryRequestTemplate struct {
-	Method      string            `json:"method"`
-	URL         string            `json:"url"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	Body        string            `json:"body,omitempty"`
-	ContentType string            `json:"content_type,omitempty"`
+	Method          string            `json:"method"`
+	URL             string            `json:"url"`
+	Headers         map[string]string `json:"headers,omitempty"`
+	Body            string            `json:"body,omitempty"`
+	ContentType     string            `json:"content_type,omitempty"`
+	ResponseStatus  int               `json:"response_status,omitempty"`
+	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
+	ResponseBody    string            `json:"response_body,omitempty"`
 }
 
 type DiscoveryEndpoint struct {

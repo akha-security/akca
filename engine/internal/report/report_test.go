@@ -484,13 +484,13 @@ func TestModuleSpecificPayloadInResponseIsHighlighted(t *testing.T) {
 func TestHTTPEvidencePreservesLongContentAndExplainsMissingCapture(t *testing.T) {
 	body := strings.Repeat("long response line\n", 9000) + "<script>alert('proof')</script>\nEND-OF-CAPTURE\n\n"
 	html := httpEvidenceHTML(HTTPEvidence{RawResponse: "HTTP/1.1 200 OK\r\n\r\n" + body, BodyTruncated: true})
-	for _, want := range []string{"END-OF-CAPTURE\n\n</pre>", "&lt;script&gt;", "uncaptured remainder is unavailable", "Request: no HTTP request was stored"} {
+	for _, want := range []string{"END-OF-CAPTURE\n\n</pre>", "&lt;script&gt;", "uncaptured remainder is unavailable", "report excerpt truncated", "Request: no HTTP request was stored"} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("HTTP evidence omitted %q", want)
 		}
 	}
-	if strings.Contains(html, "<script>") || strings.Count(html, "long response line\n") != 9000 {
-		t.Fatal("HTTP evidence was truncated or rendered as executable HTML")
+	if strings.Contains(html, "<script>") || strings.Count(html, "long response line\n") >= 9000 {
+		t.Fatal("HTTP evidence was not safely compacted or was rendered as executable HTML")
 	}
 	if !strings.Contains(httpEvidenceHTML(HTTPEvidence{}), "No HTTP request or response was stored") {
 		t.Fatal("missing evidence must be explained, not silently hidden")

@@ -11,6 +11,8 @@ import (
 )
 
 var htpasswdEntryRe = regexp.MustCompile(`(?m)^[a-zA-Z0-9_.-]+:(?:\$apr1\$|\$2[aby]\$|\{SHA\}|[a-zA-Z0-9./]{13})`)
+var envAssignmentRe = regexp.MustCompile(`(?mi)^(?:DATABASE_URL|DB_(?:PASSWORD|PASS|USER|HOST|NAME)|SECRET_KEY|JWT_SECRET|AWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY)|API_KEY|[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PRIVATE_KEY))\s*=\s*\S+`)
+var detachedGitHeadRe = regexp.MustCompile(`(?mi)^\s*[0-9a-f]{40}\s*$`)
 
 type sensitiveFileDef struct {
 	path        string
@@ -169,11 +171,18 @@ func (r *Runner) runSensitiveFiles(ctx context.Context, target ScanTarget) []Mod
 		return nil
 	}
 	origin := u.Scheme + "://" + u.Host
-
-	// Wildcard / SPA check
-	wildcardURL := origin + "/akca-files-check-" + randomProbeToken()
-	wRR, err := r.client.Do(ctx, "GET", wildcardURL, nil, nil)
-	wildcard200 := (err == nil && wRR.Response.StatusCode == 200 && len(wRR.Response.Body) > 100)
+	prefixes := make([]string, 0, 2)
+	if r.moduleWorkOnce("sensitive_file_discovery_root", origin) {
+		prefixes = append(prefixes, "")
+	}
+	if prefix := firstRoutePrefix(u.Path); prefix != "/" {
+		if r.moduleWorkOnce("sensitive_file_discovery_prefix", origin+prefix) {
+			prefixes = append(prefixes, prefix)
+		}
+	}
+	if len(prefixes) == 0 {
+		return nil
+	}
 
 	baseline, baselineErr := r.cachedEmptyProbe(ctx, target)
 	if baselineErr != nil {
@@ -181,50 +190,57 @@ func (r *Runner) runSensitiveFiles(ctx context.Context, target ScanTarget) []Mod
 	}
 
 	var out []ModuleFinding
-	for _, sf := range sensitiveFileDefs {
-		if ctx.Err() != nil {
-			break
-		}
-		// Smooth pacing delay between sensitive file requests to avoid WAF rate-limiting
-		select {
-		case <-ctx.Done():
-			return out
-		case <-time.After(80 * time.Millisecond):
-		}
+	for _, prefix := range prefixes {
+		wildcardURL := origin + prefix + "/akca-files-check-" + randomProbeToken()
+		wRR, wildcardErr := r.client.Do(ctx, "GET", wildcardURL, nil, nil)
+		wildcard200 := wildcardErr == nil && wRR.Response.StatusCode == 200 && len(wRR.Response.Body) > 100
+		for _, sf := range sensitiveFileDefs {
+			if ctx.Err() != nil {
+				break
+			}
+			// Smooth pacing delay between sensitive file requests to avoid WAF rate-limiting
+			select {
+			case <-ctx.Done():
+				return out
+			case <-time.After(80 * time.Millisecond):
+			}
 
-		probeURL := origin + sf.path
-		if !r.scope.IsInScope(probeURL) {
-			continue
-		}
+			probeURL := origin + prefix + sf.path
+			if !r.scope.IsInScope(probeURL) {
+				continue
+			}
 
-		rr, err := r.client.Do(ctx, "GET", probeURL, nil, nil)
-		if err != nil || rr.Response.StatusCode != 200 {
-			continue
-		}
+			rr, err := r.client.Do(ctx, "GET", probeURL, nil, nil)
+			if err != nil || rr.Response.StatusCode != 200 {
+				continue
+			}
 
-		if rr.Response.Redirected && isRedirectedAway(rr, probeURL) {
-			continue
-		}
+			if rr.Response.Redirected && isRedirectedAway(rr, probeURL) {
+				continue
+			}
 
-		body := rr.Response.Body
-		if wildcard200 && bodiesSimilar(body, wRR.Response.Body) {
-			continue
-		}
+			body := rr.Response.Body
+			if wildcard200 && bodiesSimilar(body, wRR.Response.Body) {
+				continue
+			}
 
-		// Reject HTML 200 custom error pages (except for phpinfo which is HTML)
-		if sf.kind != "phpinfo_leak" && sf.kind != "exposed_installer" && isHTMLResponse(rr.Response) {
-			continue
-		}
+			// Reject HTML 200 custom error pages (except for phpinfo which is HTML)
+			if sf.kind != "phpinfo_leak" && sf.kind != "exposed_installer" && isHTMLResponse(rr.Response) {
+				continue
+			}
 
-		if sensitiveFileFingerprintMatches(sf, rr.Response) {
-			signal := sf.kind
-			p := defaultPayload("sensitive_file_discovery", signal, sf.path, signal)
-			f := r.verifyAndBuild(ctx, "sensitive_file_discovery", target, p, baseline, rr, signal, false, false, "", "")
-			if f != nil {
-				f.Severity = sf.severity
-				f.Title = sf.title
-				f.Description = sf.desc
-				r.recordFinding(ctx, &out, f, "sensitive_file_discovery", signal)
+			if sensitiveFileFingerprintMatches(sf, rr.Response) {
+				signal := sf.kind
+				p := defaultPayload("sensitive_file_discovery", signal, prefix+sf.path, signal)
+				probeTarget := target
+				probeTarget.EndpointURL = probeURL
+				f := r.verifyAndBuild(ctx, "sensitive_file_discovery", probeTarget, p, baseline, rr, signal, false, false, "", "")
+				if f != nil {
+					f.Severity = sf.severity
+					f.Title = sf.title
+					f.Description = sf.desc
+					r.recordFinding(ctx, &out, f, "sensitive_file_discovery", signal)
+				}
 			}
 		}
 	}
@@ -250,6 +266,12 @@ func sensitiveFileFingerprintMatches(sf sensitiveFileDef, response httpclient.Re
 	}
 	if sf.kind == "docker_compose_leak" {
 		return strings.Contains(body, "services:") && (strings.Contains(body, "version:") || strings.Contains(body, "image:"))
+	}
+	if sf.kind == "env_file_leak" {
+		return envAssignmentRe.MatchString(body)
+	}
+	if sf.kind == "git_head_leak" {
+		return strings.Contains(body, "ref: refs/") || detachedGitHeadRe.MatchString(body)
 	}
 	return sf.fingerprint == "" || strings.Contains(body, sf.fingerprint)
 }

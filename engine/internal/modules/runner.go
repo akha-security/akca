@@ -38,6 +38,17 @@ type BrowserRenderer interface {
 	Render(ctx context.Context, rawURL string) (string, error)
 }
 
+// BrowserHTMLRenderer verifies executable markup returned by non-GET probes
+// without pretending that a browser can replay an arbitrary captured write.
+// Implementations render the exact response body in an isolated document.
+type BrowserHTMLRenderer interface {
+	RenderHTML(ctx context.Context, source string) (string, error)
+}
+
+type BrowserExpressionEvaluator interface {
+	EvaluatePage(ctx context.Context, rawURL, expression string) (string, error)
+}
+
 type TLSInspector interface {
 	Inspect(ctx context.Context, rawURL string) (TLSInspection, error)
 }
@@ -64,6 +75,8 @@ type ScanTarget struct {
 	Priority           int
 	BodyTemplate       string
 	RequestTemplate    reflection.RequestTemplate
+	ObservedResponse   *httpclient.RequestResponse
+	ObservedComplete   bool
 }
 
 type Evidence struct {
@@ -174,6 +187,16 @@ func (r *Runner) ProbeCount() int64 {
 		return 0
 	}
 	return r.probeCount.Load()
+}
+
+// Close releases optional long-lived module resources.
+func (r *Runner) Close() {
+	if r == nil || r.browser == nil {
+		return
+	}
+	if closer, ok := r.browser.(interface{ Close() }); ok {
+		closer.Close()
+	}
 }
 
 func NewRunner(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *storage.DB,
@@ -544,9 +567,18 @@ func normalizeRoutePattern(path string) string {
 // the route/resource, not on an individual injection surface.
 func (r *Runner) endpointModuleOnce(module string, target ScanTarget) bool {
 	raw := target.EndpointURL
+	method := strings.ToUpper(strings.TrimSpace(target.Method))
 	if parsed, err := url.Parse(raw); err == nil {
 		if originScopedModule(module) {
 			raw = parsed.Scheme + "://" + parsed.Host
+			method = "GET"
+		} else if routePrefixScopedModule(module) {
+			// These probes depend on the concrete application mount/path.  Collapsing
+			// them to the origin lets an early visit to "/" permanently starve every
+			// protected or static sub-route.  One run per first path segment keeps the
+			// request budget bounded while preserving coverage for mounted apps.
+			raw = parsed.Scheme + "://" + parsed.Host + firstRoutePrefix(parsed.Path)
+			method = "GET"
 		} else if module == "cors" {
 			parsed.RawQuery = ""
 			parsed.Fragment = ""
@@ -557,7 +589,7 @@ func (r *Runner) endpointModuleOnce(module string, target ScanTarget) bool {
 			raw = parsed.String()
 		}
 	}
-	key := module + "::" + strings.ToUpper(strings.TrimSpace(target.Method)) + "::" + raw
+	key := module + "::" + method + "::" + raw
 	r.moduleSeenMu.Lock()
 	defer r.moduleSeenMu.Unlock()
 	if _, exists := r.moduleSeen[key]; exists {
@@ -585,19 +617,54 @@ func (r *Runner) contentModuleOnce(module string, target ScanTarget) bool {
 	return true
 }
 
+// moduleWorkOnce deduplicates a concrete, method-independent unit of module
+// work. It is intentionally separate from endpointModuleOnce: discovery may
+// reach the same origin/path through many methods and parameters, while probes
+// such as a root archive lookup still address the exact same resource.
+func (r *Runner) moduleWorkOnce(module, work string) bool {
+	key := module + "::work::" + strings.TrimSpace(work)
+	r.moduleSeenMu.Lock()
+	defer r.moduleSeenMu.Unlock()
+	if _, exists := r.moduleSeen[key]; exists {
+		return false
+	}
+	r.moduleSeen[key] = struct{}{}
+	return true
+}
+
 func originScopedModule(module string) bool {
 	switch module {
-	case "actuator", "devops_exposure", "backup_archives", "security_headers", "tls_misconfig", "cloud_takeover",
+	case "actuator", "devops_exposure", "security_headers", "tls_misconfig", "cloud_takeover",
 		"iis_discovery", "firebase_misconfig", "spring_cloud_jolokia", "saas_exposure", "grpc_scan",
 		"cicd_exposure", "git_recovery", "source_code_disclosure", "cloud_storage", "cloud_posture",
-		"cloud_native_exposure", "host_poisoning", "wordpress_fuzz", "nginx_alias",
-		"nextjs_bypass", "framework_debug", "cpdos", "proxy_path_confusion", "ws_cswsh", "react_rsc_rce",
-		"swagger_exposure", "sensitive_file_discovery", "http_smuggling", "debug_admin",
+		"cloud_native_exposure", "host_poisoning", "wordpress_fuzz",
+		"framework_debug", "cpdos", "ws_cswsh", "react_rsc_rce",
+		"swagger_exposure", "http_smuggling", "debug_admin",
 		"vulnerable_components", "known_cve", "cors_oast":
 		return true
 	default:
 		return false
 	}
+}
+
+func routePrefixScopedModule(module string) bool {
+	switch module {
+	case "nginx_alias", "nextjs_bypass", "proxy_path_confusion", "backup_archives", "sensitive_file_discovery":
+		return true
+	default:
+		return false
+	}
+}
+
+func firstRoutePrefix(path string) string {
+	path = strings.Trim(path, "/")
+	if path == "" {
+		return "/"
+	}
+	if index := strings.IndexByte(path, '/'); index >= 0 {
+		path = path[:index]
+	}
+	return "/" + path
 }
 
 func originScanTarget(target ScanTarget) (ScanTarget, bool) {

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"golang.org/x/net/html"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"golang.org/x/net/html"
 
 	"github.com/akha-security/akca/engine/internal/deserialization"
 	"github.com/akha-security/akca/engine/internal/httpclient"
@@ -29,10 +31,12 @@ func (r *Runner) runBrowserCSTI(ctx context.Context, target ScanTarget, module s
 		r.emitSkip(module, target, "browser execution is unavailable; reflection alone is not proof")
 		return nil
 	}
-	if (target.Location != "" && target.Location != "query") || strings.ToUpper(target.Method) != "" && strings.ToUpper(target.Method) != "GET" {
-		r.emitClientSSTIGap(target, "browser confirmation currently requires a GET/query surface", false, false)
-		r.emitSkip(module, target, "browser confirmation currently requires a GET/query surface")
-		return nil
+	if !strings.EqualFold(target.Method, "GET") {
+		if _, ok := r.browser.(BrowserHTMLRenderer); !ok {
+			r.emitClientSSTIGap(target, "browser cannot render non-GET response bodies", false, false)
+			r.emitSkip(module, target, "browser cannot render non-GET response bodies")
+			return nil
+		}
 	}
 	baseline, err := r.probe(ctx, target, "akca-base")
 	if err != nil {
@@ -49,12 +53,12 @@ func (r *Runner) runBrowserCSTI(ctx context.Context, target ScanTarget, module s
 		if err != nil {
 			continue
 		}
-		dom, renderErr := r.browser.Render(ctx, rr.Request.URL)
+		dom, renderErr := r.renderProbeInBrowser(ctx, rr)
 		if renderErr != nil || !rootDOMMarker(dom, "data-akca-csti", marker) || rootDOMMarker(rr.Response.Body, "data-akca-csti", marker) {
 			continue
 		}
-		controlDOM, controlErr := r.browser.Render(ctx, baseline.Request.URL)
-		replayDOM, replayErr := r.browser.Render(ctx, rr.Request.URL)
+		controlDOM, controlErr := r.renderProbeInBrowser(ctx, baseline)
+		replayDOM, replayErr := r.renderProbeInBrowser(ctx, rr)
 		if controlErr != nil || replayErr != nil || rootDOMMarker(controlDOM, "data-akca-csti", marker) || !rootDOMMarker(replayDOM, "data-akca-csti", marker) {
 			continue
 		}
@@ -226,50 +230,185 @@ func (r *Runner) runPrototypePollution(ctx context.Context, target ScanTarget) [
 		r.emitSkip("prototype_pollution", target, reason)
 		return nil
 	}
-	baseline, err := r.probeWithBody(ctx, target, `{"name":"akca"}`, "application/json", nil)
-	if err != nil {
-		return nil
-	}
 	var out []ModuleFinding
-	for _, pr := range sspp.Probes() {
-		if ctx.Err() != nil {
-			break
-		}
-		rr, err := r.probeWithBody(ctx, target, pr.Body, "application/json", nil)
+	var baseline httpclient.RequestResponse
+	baselineReady := false
+
+	// Server-side prototype pollution requires a request body carrier. Sending
+	// JSON bodies to every discovered GET/query parameter adds traffic without
+	// exercising the surface represented by that target.
+	if serverPrototypeEligible(target) {
+		var err error
+		baseline, err = r.probeWithBody(ctx, target, `{"name":"akca"}`, "application/json", nil)
 		if err != nil {
-			continue
+			return nil
 		}
-		ok, signal := sspp.Analyze(baseline.Response.Body, baseline.Response.StatusCode, rr.Response.Body, rr.Response.StatusCode, pr)
-		if !ok {
-			continue
-		}
-		p := defaultPayload("prototype_pollution", pr.Name, pr.Body, signal)
-		f := r.verifyAndBuild(ctx, "prototype_pollution", target, p, baseline, rr, signal, false, false, "", "")
-		if f != nil {
-			f.Title = "Server-side prototype pollution (" + signal + ")"
-			r.recordFinding(ctx, &out, f, "prototype_pollution", signal)
-		}
-		if len(out) >= 3 {
-			break
+		baselineReady = true
+		for _, pr := range sspp.Probes() {
+			if ctx.Err() != nil {
+				break
+			}
+			rr, probeErr := r.probeWithBody(ctx, target, pr.Body, "application/json", nil)
+			if probeErr != nil {
+				continue
+			}
+			ok, signal := sspp.Analyze(baseline.Response.Body, baseline.Response.StatusCode, rr.Response.Body, rr.Response.StatusCode, pr)
+			if !ok {
+				continue
+			}
+			p := defaultPayload("prototype_pollution", pr.Name, pr.Body, signal)
+			f := r.verifyAndBuild(ctx, "prototype_pollution", target, p, baseline, rr, signal, false, false, "", "")
+			if f != nil {
+				f.Title = "Server-side prototype pollution (" + signal + ")"
+				r.recordFinding(ctx, &out, f, "prototype_pollution", signal)
+			}
+			if len(out) >= 3 {
+				break
+			}
 		}
 	}
 
-	// Client-side prototype pollution probe on parameters
-	if len(out) == 0 && target.Parameter != "" {
+	// Client-side payloads are URL-level (__proto__/constructor keys), so one
+	// browser proof per concrete route/query shape covers all parameters on that
+	// page. Server-side parameter probes above remain parameter-specific.
+	if len(out) == 0 && clientPrototypeEligible(target) &&
+		r.moduleWorkOnce("prototype_pollution_browser", clientPrototypeWorkKey(target.EndpointURL)) {
+		evaluator, browserOK := r.browser.(BrowserExpressionEvaluator)
+		if !browserOK {
+			r.emitSkip("prototype_pollution", target, "browser expression evaluation is unavailable for client-side proof")
+			return out
+		}
+		if !baselineReady {
+			var baselineErr error
+			baseline, baselineErr = r.cachedEmptyProbe(ctx, target)
+			if baselineErr != nil {
+				return out
+			}
+			baselineReady = true
+		}
+		if !isHTMLResponse(baseline.Response) &&
+			!strings.Contains(strings.ToLower(headerValue(baseline.Response.Headers, "Content-Type")), "html") {
+			r.emitSkip("prototype_pollution", target, "client-side proof requires an HTML response")
+			return out
+		}
+		baselineURL := target.EndpointURL
+		baselineEvidence, baselineErr := evaluator.EvaluatePage(ctx, baselineURL, prototypeStateExpression)
+		if baselineErr != nil {
+			return out
+		}
 		for _, pr := range sspp.ClientSideProbes() {
 			if ctx.Err() != nil {
 				break
 			}
-			rr, err := r.probe(ctx, target, pr.Body)
-			if err != nil {
+			probeURL, err := clientPrototypeProbeURL(target.EndpointURL, pr.Body)
+			if err != nil || !r.scope.IsInScope(probeURL) {
 				continue
 			}
-			if ok, signal := sspp.Analyze(baseline.Response.Body, baseline.Response.StatusCode, rr.Response.Body, rr.Response.StatusCode, pr); ok {
-				r.emitDiscovery("prototype_pollution", target, signal, "Response text changed; Object.prototype mutation in a browser has not been demonstrated")
+			var evidence []string
+			var probeResponses []httpclient.RequestResponse
+			for attempt := 0; attempt < 2; attempt++ {
+				rr, requestErr := r.client.Do(ctx, http.MethodGet, probeURL, nil,
+					r.wafHeadersForModule("prototype_pollution", probeURL))
+				if requestErr != nil {
+					evidence = nil
+					break
+				}
+				value, evalErr := evaluator.EvaluatePage(ctx, probeURL, prototypeStateExpression)
+				if evalErr != nil || !clientPrototypeEvidence(pr, value, baselineEvidence) {
+					evidence = nil
+					break
+				}
+				evidence = append(evidence, value)
+				probeResponses = append(probeResponses, rr)
+			}
+			if len(evidence) != 2 {
+				continue
+			}
+			p := defaultPayload("prototype_pollution", pr.Name, pr.Body, "client_prototype_pollution")
+			p.SelectionReason = "Chromium Object.prototype evidence: " + evidence[0]
+			finding := r.verifyAndBuildWithCandidate(ctx, "prototype_pollution", target, p, baseline, probeResponses[0],
+				"client_prototype_pollution", true, true, "", evidence[0], func(candidate *verification.Candidate) {
+					candidate.RequestedProofType = verification.ProofDOMExecution
+					candidate.NegativeControlSet, candidate.NegativeControlOK = true, true
+					candidate.TypedReplayHits = []bool{true, true}
+					candidate.Observations = append(candidate.Observations,
+						r.observation("prototype_pollution", target, verification.RoleNegativeControl, 1, baseline),
+						r.observation("prototype_pollution", target, verification.RolePositiveReplay, 2, probeResponses[1]))
+				})
+			if finding != nil {
+				finding.Title = "Client-side prototype pollution confirmed in Chromium"
+				finding.Severity = "high"
+				finding.Description = "Two isolated Chromium documents observed the injected property on Object.prototype; the native URL did not contain it."
+				r.recordFinding(ctx, &out, finding, "prototype_pollution", "client_prototype_pollution")
+				return out
 			}
 		}
 	}
 	return out
+}
+
+func serverPrototypeEligible(target ScanTarget) bool {
+	method := strings.ToUpper(strings.TrimSpace(target.Method))
+	contentType := strings.ToLower(target.Profile.ContentType + " " + target.RequestTemplate.ContentType)
+	location := strings.ToLower(strings.TrimSpace(target.Location))
+	return method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch ||
+		location == "body" || location == "json" || strings.Contains(contentType, "json")
+}
+
+func clientPrototypeEligible(target ScanTarget) bool {
+	method := strings.ToUpper(strings.TrimSpace(target.Method))
+	location := strings.ToLower(strings.TrimSpace(target.Location))
+	return method == http.MethodGet && target.Parameter != "" && (location == "" || location == "query")
+}
+
+func clientPrototypeWorkKey(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	values := parsed.Query()
+	for name := range values {
+		values[name] = []string{"{value}"}
+	}
+	parsed.RawQuery = values.Encode()
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+const prototypeStateExpression = `JSON.stringify({polluted:Object.prototype.polluted||null,src:Object.prototype.src||null,innerHTML:Object.prototype.innerHTML||null,url:Object.prototype.url||null})`
+
+func clientPrototypeProbeURL(rawURL, queryPayload string) (string, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	if parsed.RawQuery == "" {
+		parsed.RawQuery = queryPayload
+	} else {
+		parsed.RawQuery += "&" + queryPayload
+	}
+	return parsed.String(), nil
+}
+
+func clientPrototypeEvidence(probe sspp.Probe, value, baseline string) bool {
+	if strings.TrimSpace(value) == "" || value == baseline {
+		return false
+	}
+	switch probe.Name {
+	case "client_proto_bracket", "client_proto_dot", "client_constructor_bracket":
+		return strings.Contains(value, `"polluted":"akca_dom_polluted"`) &&
+			!strings.Contains(baseline, `"polluted":"akca_dom_polluted"`)
+	case "client_proto_script_src":
+		return strings.Contains(value, `"src":"data:,alert(1)"`) && !strings.Contains(baseline, `"src":"data:,alert(1)"`)
+	case "client_proto_innerhtml":
+		return strings.Contains(value, `"innerHTML":"<img/src/onerror=alert(1)>"`) &&
+			!strings.Contains(baseline, `"innerHTML":"<img/src/onerror=alert(1)>"`)
+	case "client_proto_url_sink":
+		return strings.Contains(value, `"url":"javascript:alert(1)"`) &&
+			!strings.Contains(baseline, `"url":"javascript:alert(1)"`)
+	default:
+		return false
+	}
 }
 
 func (r *Runner) runLDAPXPathInjection(ctx context.Context, target ScanTarget) []ModuleFinding {

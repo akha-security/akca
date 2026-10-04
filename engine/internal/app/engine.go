@@ -2,9 +2,6 @@ package app
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +9,6 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -78,7 +74,7 @@ func New(writer events.Writer) (*Engine, error) {
 	}
 
 	cfg := config.DefaultScanConfig()
-	cfg.ScanID = fmt.Sprintf("scan-%d", time.Now().Unix())
+	cfg.ScanID = config.GenerateScanID(nil)
 	scopeEngine := scope.NewEngine(cfg)
 	limiter := ratelimit.New(cfg.GlobalRateLimit, cfg.PerHostRateLimit)
 	client, err := httpclient.New(cfg, scopeEngine, limiter)
@@ -125,6 +121,9 @@ func (e *Engine) Close() error {
 			<-doneCh
 		}
 
+		if e.moduleRunner != nil {
+			e.moduleRunner.Close()
+		}
 		e.shutdownPlatform()
 		if e.oast != nil {
 			e.oast.Stop()
@@ -206,7 +205,7 @@ func (e *Engine) startScan(cfg config.ScanConfig, completed map[string]bool) err
 		cfg.IncludeDomains = deriveIncludeDomains(cfg.Targets)
 	}
 	if cfg.ScanID == "" {
-		cfg.ScanID = deriveTargetScanID(cfg.Targets)
+		cfg.ScanID = config.GenerateScanID(cfg.Targets)
 	}
 
 	e.mu.Lock()
@@ -268,6 +267,9 @@ func (e *Engine) startScan(cfg config.ScanConfig, completed map[string]bool) err
 	// Module phases A-D are one logical scan. Reset the shared runner here so
 	// state such as stored/second-order markers survives phase boundaries but
 	// never leaks into a later scan.
+	if e.moduleRunner != nil {
+		e.moduleRunner.Close()
+	}
 	e.moduleRunner = nil
 	e.resetScanQueues()
 	e.session.Start()
@@ -1096,19 +1098,6 @@ func uniqueURLSeeds(urls []string) []string {
 		add(u.String())
 	}
 	return out
-}
-
-func deriveTargetScanID(targets []string) string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	targetPrefix := ""
-	if len(targets) > 0 {
-		sorted := append([]string(nil), targets...)
-		sort.Strings(sorted)
-		hash := sha256.Sum256([]byte(strings.Join(sorted, "|")))
-		targetPrefix = hex.EncodeToString(hash[:4]) + "-"
-	}
-	return fmt.Sprintf("scan-%s%d-%s", targetPrefix, time.Now().UnixNano(), hex.EncodeToString(b))
 }
 
 func ConfigDir() (string, error) {

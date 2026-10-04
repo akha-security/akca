@@ -7,27 +7,29 @@ import (
 )
 
 var (
-	reFetchURL      = regexp.MustCompile(`(?i)fetch\s*\(\s*["']([^"']+)["']`)
-	reXHRURL        = regexp.MustCompile(`(?i)\.open\s*\(\s*["'](GET|POST|PUT|DELETE|PATCH)["']\s*,\s*["']([^"']+)["']`)
-	reAxiosURL      = regexp.MustCompile(`(?i)axios\.(get|post|put|delete|patch)\s*\(\s*["']([^"']+)["']`)
-	reGraphQLPath   = regexp.MustCompile(`(?i)["'](/graphql[^"']*)["']`)
-	reWebSocketURL  = regexp.MustCompile(`(?i)new\s+WebSocket\s*\(\s*["']([^"']+)["']`)
-	reDynamicImport = regexp.MustCompile(`(?i)import\s*\(\s*["']([^"']+)["']\s*\)`)
-	reChunkManifest = regexp.MustCompile(`(?i)["']([^"']+\.chunk\.js)["']`)
+	reFetchURL      = regexp.MustCompile("(?i)fetch\\s*\\(\\s*[\\\"'`]([^\\\"'`]+)[\\\"'`]")
+	reXHRURL        = regexp.MustCompile("(?i)\\.open\\s*\\(\\s*[\\\"'`](GET|POST|PUT|DELETE|PATCH)[\\\"'`]\\s*,\\s*[\\\"'`]([^\\\"'`]+)[\\\"'`]")
+	reAxiosURL      = regexp.MustCompile("(?i)axios\\.(get|post|put|delete|patch)\\s*\\(\\s*[\\\"'`]([^\\\"'`]+)[\\\"'`]")
+	reGraphQLPath   = regexp.MustCompile("(?i)[\\\"'`](/graphql[^\\\"'`]*)[\\\"'`]")
+	reWebSocketURL  = regexp.MustCompile("(?i)new\\s+WebSocket\\s*\\(\\s*[\\\"'`]([^\\\"'`]+)[\\\"'`]")
+	reDynamicImport = regexp.MustCompile("(?i)import\\s*\\(\\s*[\\\"'`]([^\\\"'`]+)[\\\"'`]\\s*\\)")
+	reChunkManifest = regexp.MustCompile("(?i)[\\\"'`]([^\\\"'`]+\\.chunk\\.js)[\\\"'`]")
 	reNextRoute     = regexp.MustCompile(`(?i)__NEXT_DATA__[^}]*"pathname"\s*:\s*"([^"]+)"`)
-	reServiceWorker = regexp.MustCompile(`(?i)navigator\.serviceWorker\.register\s*\(\s*["']([^"']+)["']`)
+	reServiceWorker = regexp.MustCompile("(?i)navigator\\.serviceWorker\\.register\\s*\\(\\s*[\\\"'`]([^\\\"'`]+)[\\\"'`]")
 	reManifest      = regexp.MustCompile(`(?i)<link[^>]+rel=["']manifest["'][^>]+href=["']([^"']+)["']`)
-	reURLWithParams = regexp.MustCompile(`(?i)["'](/[a-zA-Z0-9_./-]+\?[a-zA-Z0-9_&=%-]+)["']`)
-	reRouterConfig  = regexp.MustCompile(`(?i)(?:path|route|to)\s*:\s*["'](/[a-zA-Z0-9_/{}:\[\]-]+)["']`)
+	reURLWithParams = regexp.MustCompile("(?i)[\\\"'`](/[a-zA-Z0-9_./{}$-]+\\?[a-zA-Z0-9_&={}$%-]+)[\\\"'`]")
+	reRouterConfig  = regexp.MustCompile("(?i)(?:path|route|to)\\s*:\\s*[\\\"'`](/[a-zA-Z0-9_/{}:$\\[\\].-]+)[\\\"'`]")
 	reReactRoute    = regexp.MustCompile(`(?i)<(?:Route|NavLink|Link)\s+[^>]*(?:path|to)=["'](/[a-zA-Z0-9_/{}:\[\]-]+)["']`)
-	reRouterCall    = regexp.MustCompile(`(?i)(?:navigate|navigateByUrl|history\.pushState|router\.(?:push|replace|get|post))\s*\(\s*["'](/[a-zA-Z0-9_/{}:\[\]-]+)["']`)
-	reApiRoute      = regexp.MustCompile(`(?i)["'](/api/(?:v[0-9]+/|v[0-9]+)?[a-zA-Z0-9_./:-]{2,100})["']`)
+	reRouterCall    = regexp.MustCompile("(?i)(?:navigate|navigateByUrl|history\\.pushState|router\\.(?:push|replace|get|post))\\s*\\(\\s*[\\\"'`](/[a-zA-Z0-9_/{}:$\\[\\].-]+)[\\\"'`]")
+	reApiRoute      = regexp.MustCompile("(?i)[\\\"'`](/api/(?:v[0-9]+/|v[0-9]+)?[a-zA-Z0-9_./:{}$-]{2,160})[\\\"'`]")
+	reTemplateExpr  = regexp.MustCompile(`\$\{[^{}]{1,120}\}`)
 )
 
 // ExtractFromJSBundle extracts endpoints from minified or normal JavaScript.
 func ExtractFromJSBundle(baseURL, js string) []DiscoveredEndpoint {
 	var out []DiscoveredEndpoint
 	add := func(raw, method string, kind EndpointKind, source DiscoverySource, confidence float64, why string) {
+		raw = reTemplateExpr.ReplaceAllString(raw, "{param}")
 		if !looksLikeRoute(raw) && !strings.HasPrefix(strings.ToLower(raw), "http://") && !strings.HasPrefix(strings.ToLower(raw), "https://") && !strings.HasPrefix(strings.ToLower(raw), "ws://") && !strings.HasPrefix(strings.ToLower(raw), "wss://") {
 			return
 		}

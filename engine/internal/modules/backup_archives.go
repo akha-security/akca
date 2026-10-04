@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
@@ -14,6 +15,16 @@ import (
 type binaryMagic struct {
 	name       string
 	magicBytes []byte
+}
+
+type archiveProbeTask struct {
+	path string
+	ext  string
+}
+
+type archiveProbeResult struct {
+	finding *ModuleFinding
+	signal  string
 }
 
 var archiveMagicSignatures = []binaryMagic{
@@ -62,8 +73,10 @@ func (r *Runner) runBackupArchives(ctx context.Context, target ScanTarget) []Mod
 
 	currentYear := fmt.Sprintf("%d", time.Now().Year())
 
-	// Dynamic FILENAME candidates
-	fileCandidates := []string{
+	// Root candidates are intentionally scanned once per origin. Repeating this
+	// dictionary for every discovered route prefix was the dominant source of
+	// archive-scan amplification.
+	rootCandidates := []string{
 		hostname,
 		domainName,
 		subdomainName,
@@ -78,6 +91,7 @@ func (r *Runner) runBackupArchives(ctx context.Context, target ScanTarget) []Mod
 		"includes", "middleware", "handlers", "views",
 	}
 
+	routeCandidates := make(map[string]struct{})
 	var directPathCandidates []string
 
 	// Dynamic Path Segment & Subpath Extraction (e.g., /v1/checkout/main.js -> "v1", "checkout", "main")
@@ -93,11 +107,9 @@ func (r *Runner) runBackupArchives(ctx context.Context, target ScanTarget) []Mod
 			if dotIdx := strings.LastIndex(cleanSeg, "."); dotIdx > 0 {
 				rawName = cleanSeg[:dotIdx]
 			}
-			fileCandidates = append(fileCandidates, rawName)
-			fileCandidates = append(fileCandidates, cleanSeg)
-			fileCandidates = append(fileCandidates, rawName+"_backup")
-			fileCandidates = append(fileCandidates, rawName+"-old")
-			fileCandidates = append(fileCandidates, rawName+"."+currentYear)
+			for _, candidate := range []string{rawName, cleanSeg, rawName + "_backup", rawName + "-old", rawName + "." + currentYear} {
+				routeCandidates[candidate] = struct{}{}
+			}
 
 			accumulated += "/" + cleanSeg
 			directPathCandidates = append(directPathCandidates, accumulated)
@@ -111,80 +123,151 @@ func (r *Runner) runBackupArchives(ctx context.Context, target ScanTarget) []Mod
 	}
 
 	baseURL := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+	runRootDictionary := r.moduleWorkOnce("backup_archives_root", baseURL)
+	routePrefix := firstRoutePrefix(u.Path)
 	baseline, baselineErr := r.cachedEmptyProbe(ctx, originTarget)
 	if baselineErr != nil {
 		return nil
 	}
-	var out []ModuleFinding
 	seenPath := map[string]struct{}{}
-
-	probePath := func(path string, ext string) {
-		if _, exists := seenPath[path]; exists || ctx.Err() != nil {
+	probeTasks := make([]archiveProbeTask, 0, len(rootCandidates)*len(extensions))
+	addProbe := func(path, ext string) {
+		if _, exists := seenPath[path]; exists {
 			return
 		}
 		seenPath[path] = struct{}{}
-
 		targetURL := baseURL + path
-		probeTarget := originTarget
-		probeTarget.EndpointURL = targetURL
-		probeTarget.Parameter = ""
-		probeTarget.Location = ""
+		// Path candidates can overlap (for example /news.zip may be derived both
+		// from a segment and from its accumulated path). Deduplicate them across
+		// every route and HTTP method handled by this runner.
+		if !r.moduleWorkOnce("backup_archives_probe", targetURL) {
+			return
+		}
+		probeTasks = append(probeTasks, archiveProbeTask{path: path, ext: ext})
+	}
 
-		rr, err := r.probe(ctx, probeTarget, "")
-		if err != nil || rr.Response.StatusCode != 200 {
-			return
+	// 1. Queue the broad root-level archive dictionary exactly once per origin.
+	if runRootDictionary {
+		for _, fname := range rootCandidates {
+			for _, ext := range extensions {
+				addProbe(fmt.Sprintf("/%s.%s", fname, ext), ext)
+			}
 		}
-		if rr.Response.Redirected && isRedirectedAway(rr, targetURL) {
-			return
-		}
-		if isHTMLResponse(rr.Response) {
-			return
-		}
+	}
 
-		// Strict Binary Magic Bytes Matching (Zero False Positive Proof Contract)
-		bodyBytes := []byte(rr.Response.Body)
-		if len(bodyBytes) < 4 {
-			return
+	// 2. Route-derived candidates remain covered, but they stay under their
+	// application prefix instead of multiplying the origin-wide root list.
+	if routePrefix != "/" {
+		for fname := range routeCandidates {
+			for _, ext := range extensions {
+				addProbe(fmt.Sprintf("%s/%s.%s", routePrefix, fname, ext), ext)
+			}
 		}
+		for _, subPath := range directPathCandidates {
+			for _, ext := range extensions {
+				addProbe(fmt.Sprintf("%s.%s", subPath, ext), ext)
+			}
+		}
+	}
+	if len(probeTasks) == 0 {
+		return nil
+	}
 
-		var matchedMagic *binaryMagic
-		for _, m := range archiveMagicSignatures {
-			if len(m.magicBytes) > 0 && len(bodyBytes) >= len(m.magicBytes) {
-				if bytesHasPrefix(bodyBytes, m.magicBytes) || bytesContains(bodyBytes[:minInt(len(bodyBytes), 512)], m.magicBytes) {
-					matchedMagic = &m
-					break
+	// Archive candidates are independent reads. Probe a bounded number in
+	// parallel so a slow 404 path does not serialize the entire dictionary.
+	// The HTTP client's global/per-host rate limits and the module allocation
+	// still cap traffic; this changes wall-clock time, not coverage or volume.
+	workers := r.cfg.PerHostConcurrency
+	if workers <= 0 {
+		workers = 8
+	}
+	workers = min(min(workers, 16), len(probeTasks))
+	jobs := make(chan archiveProbeTask, workers)
+	results := make(chan archiveProbeResult, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				if result := r.probeArchiveCandidate(ctx, originTarget, baseURL, task, baseline); result.finding != nil {
+					results <- result
 				}
 			}
+		}()
+	}
+	go func() {
+		defer close(results)
+		for _, task := range probeTasks {
+			select {
+			case <-ctx.Done():
+				close(jobs)
+				wg.Wait()
+				return
+			case jobs <- task:
+			}
 		}
+		close(jobs)
+		wg.Wait()
+	}()
 
-		if matchedMagic != nil {
-			signal := fmt.Sprintf("compressed_backup_disclosure_%s", strings.ReplaceAll(strings.ToLower(ext), ".", "_"))
-			p := defaultPayload("backup_archives", path, path, signal)
-			f := r.verifyAndBuild(ctx, "backup_archives", probeTarget, p, baseline, rr, signal, false, false, "", "")
-			if f != nil {
-				f.Title = fmt.Sprintf("Exposed Compressed Backup File (%s - %s)", path, matchedMagic.name)
-				f.Severity = "critical"
-				f.Description = fmt.Sprintf("A compressed backup archive '%s' was publicly accessible and verified via binary magic byte signature (%s).", path, matchedMagic.name)
-				r.recordFinding(ctx, &out, f, "backup_archives", signal)
+	var out []ModuleFinding
+	for result := range results {
+		r.recordFinding(ctx, &out, result.finding, "backup_archives", result.signal)
+	}
+	return out
+}
+
+func (r *Runner) probeArchiveCandidate(ctx context.Context, originTarget ScanTarget, baseURL string,
+	task archiveProbeTask, baseline httpclient.RequestResponse) archiveProbeResult {
+	targetURL := baseURL + task.path
+	probeTarget := originTarget
+	probeTarget.EndpointURL = targetURL
+	probeTarget.Parameter = ""
+	probeTarget.Location = ""
+
+	rr, err := r.probe(ctx, probeTarget, "")
+	if err != nil || rr.Response.StatusCode != 200 {
+		return archiveProbeResult{}
+	}
+	if rr.Response.Redirected && isRedirectedAway(rr, targetURL) {
+		return archiveProbeResult{}
+	}
+	if isHTMLResponse(rr.Response) {
+		return archiveProbeResult{}
+	}
+
+	// Strict Binary Magic Bytes Matching (Zero False Positive Proof Contract)
+	bodyBytes := []byte(rr.Response.Body)
+	if len(bodyBytes) < 4 {
+		return archiveProbeResult{}
+	}
+
+	var matchedMagic *binaryMagic
+	for _, m := range archiveMagicSignatures {
+		if len(m.magicBytes) > 0 && len(bodyBytes) >= len(m.magicBytes) {
+			if bytesHasPrefix(bodyBytes, m.magicBytes) || bytesContains(bodyBytes[:minInt(len(bodyBytes), 512)], m.magicBytes) {
+				matchedMagic = &m
+				break
 			}
 		}
 	}
 
-	// 1. Probe root-level archive files
-	for _, fname := range fileCandidates {
-		for _, ext := range extensions {
-			probePath(fmt.Sprintf("/%s.%s", fname, ext), ext)
+	if matchedMagic != nil {
+		signal := fmt.Sprintf("compressed_backup_disclosure_%s", strings.ReplaceAll(strings.ToLower(task.ext), ".", "_"))
+		p := defaultPayload("backup_archives", task.path, task.path, signal)
+		f := r.verifyAndBuild(ctx, "backup_archives", probeTarget, p, baseline, rr, signal, false, false, "", "")
+		if f != nil {
+			f.Title = fmt.Sprintf("Exposed Compressed Backup File (%s - %s)", task.path, matchedMagic.name)
+			f.Severity = "critical"
+			f.Description = fmt.Sprintf("A compressed backup archive '%s' was publicly accessible and verified via binary magic byte signature (%s).", task.path, matchedMagic.name)
+			return archiveProbeResult{finding: f, signal: signal}
 		}
 	}
-
-	// 2. Probe direct hierarchical subpaths (e.g. /v1/checkout.zip, /app/static.tar.gz)
-	for _, subPath := range directPathCandidates {
-		for _, ext := range extensions {
-			probePath(fmt.Sprintf("%s.%s", subPath, ext), ext)
-		}
-	}
-
-	return out
+	return archiveProbeResult{}
 }
 
 func bytesHasPrefix(s, prefix []byte) bool {

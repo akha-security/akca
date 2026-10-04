@@ -2,6 +2,7 @@ package modules
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html"
 	"net/url"
@@ -282,7 +283,54 @@ func payloadReflectedAnyEncoding(payload, body, baseline string) bool {
 func sqliBodiesEquivalent(left, right string) bool {
 	left = normalizeVolatileFields(left)
 	right = normalizeVolatileFields(right)
-	return left == right || (left != "" && right != "" && bodyDiffRatio(left, right) <= 0.02)
+	if left == right {
+		return true
+	}
+	if left == "" || right == "" {
+		return false
+	}
+	if leftShape, ok := jsonResponseShape(left); ok {
+		if rightShape, rightOK := jsonResponseShape(right); rightOK && leftShape == rightShape {
+			return true
+		}
+	}
+	return bodyDiffRatio(left, right) <= 0.08
+}
+
+func jsonResponseShape(body string) (string, bool) {
+	var value interface{}
+	if json.Unmarshal([]byte(body), &value) != nil {
+		return "", false
+	}
+	var shape func(interface{}) interface{}
+	shape = func(current interface{}) interface{} {
+		switch typed := current.(type) {
+		case map[string]interface{}:
+			out := make(map[string]interface{}, len(typed))
+			for key, child := range typed {
+				out[key] = shape(child)
+			}
+			return out
+		case []interface{}:
+			out := make([]interface{}, len(typed))
+			for i, child := range typed {
+				out[i] = shape(child)
+			}
+			return out
+		case string:
+			return "string"
+		case float64:
+			return "number"
+		case bool:
+			return "boolean"
+		case nil:
+			return "null"
+		default:
+			return "value"
+		}
+	}
+	raw, err := json.Marshal(shape(value))
+	return string(raw), err == nil
 }
 
 func medianInt64(vals []int64) int64 {

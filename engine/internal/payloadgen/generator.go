@@ -1755,6 +1755,7 @@ func shouldIncludeNoSQLi(in Input) bool {
 func xxePayloads(oastURL string) []Payload {
 	out := []Payload{
 		groupBPayload("xxe", "classic_entity", `<!DOCTYPE foo [<!ENTITY xxe "AKCA_XXE_TEST">]><root>&xxe;</root>`, "classic_entity", 84, 2),
+		groupBPayload("xxe", "error_based_file_entity", `<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///akca-xxe-proof-file">]><root>&xxe;</root>`, "error_based_file_entity", 82, 2),
 		// SOAP XXE payload must be standard-compliant. DOCTYPE must be placed before the root soap:Envelope element.
 		groupBPayload("xxe", "soap_xxe", `<?xml version="1.0"?><!DOCTYPE soap:Envelope [<!ENTITY xxe "AKCA_XXE_TEST">]><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><foo>&xxe;</foo></soap:Body></soap:Envelope>`, "soap_xxe", 78, 2),
 		groupBPayload("xxe", "svg_xxe", `<?xml version="1.0" standalone="yes"?><!DOCTYPE test [ <!ENTITY xxe "AKCA_XXE_TEST" > ]><svg width="128px" height="128px" xmlns="http://www.w3.org/2000/svg" version="1.1"><text font-size="16" x="0" y="16">&xxe;</text></svg>`, "classic_entity", 80, 2),

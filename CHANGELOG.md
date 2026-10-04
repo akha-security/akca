@@ -7,6 +7,15 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.2.7] - 2026-10-04
+
+### Changed
+
+- Generate collision-resistant scan identifiers automatically and allow independent scan processes to share the WAL-backed SQLite store without a machine-wide scan lock.
+- Remove the implicit per-URL module budget from Full Scan so SQL injection and other finite module workflows are not silently truncated; explicit operator budgets remain supported.
+- Bound hidden-parameter discovery around prioritized Arjun-style probing instead of promoting every observed value into a parameter candidate.
+- Reject HTTP 200 WAF block pages as Server-Side JavaScript timing evidence and require three statistically consistent delayed probes against three matched zero-delay controls.
+
 ## [v0.2.6] - 2026-10-03
 
 ### Added
@@ -360,7 +369,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - HTML, JSON, Markdown, CSV and SARIF reporting.
 - CWE and OWASP Top 10:2025 report classification.
 
-[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.7...HEAD
+[v0.2.7]: https://github.com/akha-security/akca/compare/v0.2.6...v0.2.7
 [v0.2.6]: https://github.com/akha-security/akca/compare/v0.2.5...v0.2.6
 [v0.2.5]: https://github.com/akha-security/akca/compare/v0.2.4...v0.2.5
 [v0.2.4]: https://github.com/akha-security/akca/compare/v0.2.3...v0.2.4

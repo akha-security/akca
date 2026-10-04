@@ -170,7 +170,10 @@ func cachePoisonCandidate(baseline, body, marker string) bool {
 }
 
 func cachePoisonPersisted(baseline, body string, headers map[string]string, marker string) bool {
-	return cachePoisonCandidate(baseline, body, marker) && !isUncacheableResponse(headers) && cacheEvidence(headers)
+	// Reappearance of a unique attacker marker on clean anonymous requests is
+	// direct persistence evidence. Diagnostic cache headers are optional and
+	// must not be required from nginx/mod_cache deployments that omit them.
+	return cachePoisonCandidate(baseline, body, marker) && !isUncacheableResponse(headers)
 }
 
 func cacheEvidence(headers map[string]string) bool {

@@ -275,7 +275,7 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cfg.ScanID == "" {
-		cfg.ScanID = fmt.Sprintf("api-scan-%d", time.Now().UnixNano())
+		cfg.ScanID = config.GenerateScanID(cfg.Targets)
 	}
 	cfg.SkipAutoReport = true
 	if err := s.engine.StartScan(cfg); err != nil {

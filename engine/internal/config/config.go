@@ -389,6 +389,7 @@ func DefaultScanConfig() ScanConfig {
 		MaxEndpoints:                 FullScanMaxEndpoints,
 		MaxMemoryMB:                  0,
 		RequestBudget:                FullScanRequestBudget,
+		RequestsPerTarget:            FullScanRequestsPerTarget,
 		CrawlerRequestBudget:         FullScanCrawlerRequestBudget,
 		TimeBudget:                   0,
 		PayloadBudget:                PayloadBudgetUnlimited,

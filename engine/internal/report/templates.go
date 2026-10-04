@@ -1754,6 +1754,7 @@ func findingMetaHTML(f FindingEntry) string {
 }
 
 func httpEvidenceHTML(ev HTTPEvidence) string {
+	ev = compactHTTPEvidence(ev)
 	if ev.RawRequest == "" && ev.RawResponse == "" && ev.RespBody == "" && ev.CurlCommand == "" && ev.Payload == "" {
 		return `<h4>HTTP Evidence</h4><p class="evidence-notice">No HTTP request or response was stored for this finding.</p>`
 	}
@@ -1807,6 +1808,9 @@ func httpEvidenceHTML(ev HTTPEvidence) string {
 	}
 	if ev.BodyTruncated {
 		b.WriteString(`<p class="evidence-notice">The response exceeded the capture limit. All stored content is shown below; the uncaptured remainder is unavailable.</p>`)
+	}
+	if ev.ReportTruncated {
+		b.WriteString(`<p class="evidence-notice">The report contains a compact response excerpt. The complete stored transaction remains available in the local evidence database.</p>`)
 	}
 	if ev.RawRequest == "" {
 		b.WriteString(`<p class="evidence-notice">Request: no HTTP request was stored for this finding.</p>`)

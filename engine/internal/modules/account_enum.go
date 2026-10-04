@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -17,8 +18,7 @@ func (r *Runner) runAccountEnum(ctx context.Context, target ScanTarget) []Module
 		return nil
 	}
 	if len(r.cfg.KnownAccounts) == 0 || strings.TrimSpace(r.cfg.KnownAccounts[0]) == "" {
-		r.emitSkip("account_enum", target, "known real account is required; result is inconclusive")
-		return nil
+		return r.runAutonomousAccountEnum(ctx, target)
 	}
 	known := strings.TrimSpace(r.cfg.KnownAccounts[0])
 	unknown := "akca-unknown-" + randomAccountNonce() + "@example.invalid"
@@ -110,6 +110,105 @@ func (r *Runner) runAccountEnum(ctx context.Context, target ScanTarget) []Module
 	return nil
 }
 
+func (r *Runner) runAutonomousAccountEnum(ctx context.Context, target ScanTarget) []ModuleFinding {
+	for _, candidateAccount := range autonomousAccountCandidates(target) {
+		unknownAccount := matchingUnknownAccount(candidateAccount)
+		var candidateResponses, unknownResponses []httpclient.RequestResponse
+		for attempt := 0; attempt < 3; attempt++ {
+			ordered := []struct {
+				value     string
+				candidate bool
+			}{{candidateAccount, true}, {unknownAccount, false}}
+			if attempt%2 == 1 {
+				ordered[0], ordered[1] = ordered[1], ordered[0]
+			}
+			for _, sample := range ordered {
+				if ctx.Err() != nil {
+					return nil
+				}
+				rr, err := r.probe(ctx, target, sample.value)
+				if err != nil {
+					continue
+				}
+				if sample.candidate {
+					candidateResponses = append(candidateResponses, rr)
+				} else {
+					unknownResponses = append(unknownResponses, rr)
+				}
+			}
+		}
+		if len(candidateResponses) != 3 || len(unknownResponses) != 3 ||
+			stableResponseClass(candidateResponses) == "" || stableResponseClass(unknownResponses) == "" ||
+			stableResponseClass(candidateResponses) == stableResponseClass(unknownResponses) ||
+			!accountEnumErrorDiff(candidateResponses[0], unknownResponses[0]) {
+			continue
+		}
+
+		payload := defaultPayload("account_enum", "autonomous_error_message_diff", candidateAccount, "error_message_diff")
+		finding := r.verifyAndBuildWithCandidate(ctx, "account_enum", target, payload,
+			unknownResponses[0], candidateResponses[0], "error_message_diff", false, false, "", "",
+			func(proof *verification.Candidate) {
+				proof.RequestedProofType = verification.ProofDifferentialReplay
+				proof.NegativeControlSet, proof.NegativeControlOK = true, true
+				proof.TypedReplayHits = []bool{true, true, true}
+				for index, rr := range candidateResponses[1:] {
+					proof.Observations = append(proof.Observations,
+						r.observation("account_enum", target, verification.RolePositiveReplay, index+2, rr))
+				}
+				for index, rr := range unknownResponses {
+					proof.Observations = append(proof.Observations,
+						r.observation("account_enum", target, verification.RoleNegativeControl, index+1, rr))
+				}
+			})
+		if finding == nil {
+			continue
+		}
+		finding.Description = "A same-format randomized account consistently received an explicit nonexistent-account response, while the candidate account produced a stable, distinct response across three interleaved rounds."
+		finding.Severity = "medium"
+		var out []ModuleFinding
+		r.recordFinding(ctx, &out, finding, "account_enum", "error_message_diff")
+		return out
+	}
+	r.emitSkip("account_enum", target, "no stable explicit nonexistent-account differential was proven")
+	return nil
+}
+
+func autonomousAccountCandidates(target ScanTarget) []string {
+	seen := map[string]struct{}{}
+	var candidates []string
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || len(value) > 254 {
+			return
+		}
+		if _, exists := seen[value]; exists {
+			return
+		}
+		seen[value] = struct{}{}
+		candidates = append(candidates, value)
+	}
+	parsed, err := url.Parse(target.EndpointURL)
+	if err == nil {
+		add(parsed.Query().Get(target.Parameter))
+		host := strings.TrimPrefix(strings.ToLower(parsed.Hostname()), "www.")
+		if strings.Contains(host, ".") {
+			add("admin@" + host)
+			add("support@" + host)
+		}
+	}
+	add("admin")
+	add("administrator")
+	return candidates
+}
+
+func matchingUnknownAccount(candidate string) string {
+	nonce := "akca-unknown-" + randomAccountNonce()
+	if at := strings.LastIndex(candidate, "@"); at > 0 && at < len(candidate)-1 {
+		return nonce + candidate[at:]
+	}
+	return nonce
+}
+
 func accountEnumErrorDiff(validRR, invalidRR httpclient.RequestResponse) bool {
 	validBody := validRR.Response.Body
 	invalidBody := invalidRR.Response.Body
@@ -118,9 +217,19 @@ func accountEnumErrorDiff(validRR, invalidRR httpclient.RequestResponse) bool {
 	}
 	lowerValid := strings.ToLower(validBody)
 	lowerInvalid := strings.ToLower(invalidBody)
-	return (strings.Contains(lowerInvalid, "not found") || strings.Contains(lowerInvalid, "invalid user") ||
-		strings.Contains(lowerInvalid, "no account") || strings.Contains(lowerInvalid, "does not exist")) &&
-		!strings.Contains(lowerValid, "not found")
+	return explicitUnknownAccountMessage(lowerInvalid) && !explicitUnknownAccountMessage(lowerValid)
+}
+
+func explicitUnknownAccountMessage(body string) bool {
+	for _, marker := range []string{
+		"user not found", "account not found", "unknown user", "invalid user",
+		"no account", "does not exist", "is not registered", "email not registered",
+	} {
+		if strings.Contains(body, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func stableResponseClass(responses []httpclient.RequestResponse) string {

@@ -8,6 +8,11 @@ import (
 
 const embeddedEvidenceMarker = "\n\nevidence: "
 
+const (
+	reportRequestEvidenceLimit  = 32 << 10
+	reportResponseEvidenceLimit = 96 << 10
+)
+
 func stripEmbeddedEvidence(description string) string {
 	idx := strings.Index(description, embeddedEvidenceMarker)
 	if idx < 0 {
@@ -87,5 +92,35 @@ func httpEvidenceFromRecord(rec storage.FindingRecord) HTTPEvidence {
 			out.ExternalProof = append(out.ExternalProof, record)
 		}
 	}
-	return out
+	return compactHTTPEvidence(out)
+}
+
+func compactHTTPEvidence(ev HTTPEvidence) HTTPEvidence {
+	var truncated bool
+	ev.RawRequest, truncated = compactReportString(ev.RawRequest, reportRequestEvidenceLimit)
+	ev.ReportTruncated = ev.ReportTruncated || truncated
+	ev.RawResponse, truncated = compactReportString(ev.RawResponse, reportResponseEvidenceLimit)
+	ev.ReportTruncated = ev.ReportTruncated || truncated
+	ev.RespBody, truncated = compactReportString(ev.RespBody, reportResponseEvidenceLimit)
+	ev.ReportTruncated = ev.ReportTruncated || truncated
+	return ev
+}
+
+// compactReportString keeps both the beginning (status line/headers and common
+// proof location) and the tail while the complete transaction remains in the
+// local evidence database.
+func compactReportString(value string, limit int) (string, bool) {
+	if limit <= 0 || len(value) <= limit {
+		return value, false
+	}
+	const marker = "\n...[report excerpt truncated; full value remains in the local database]...\n"
+	head := (limit - len(marker)) * 3 / 4
+	if head < 0 {
+		head = 0
+	}
+	tail := limit - len(marker) - head
+	if tail < 0 {
+		tail = 0
+	}
+	return value[:head] + marker + value[len(value)-tail:], true
 }

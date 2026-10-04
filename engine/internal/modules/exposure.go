@@ -23,7 +23,10 @@ func (r *Runner) runSensitiveData(ctx context.Context, target ScanTarget) []Modu
 		r.emitSkip("sensitive_data", target, reason)
 		return nil
 	}
-	rr, err := r.cachedEmptyProbe(ctx, target)
+	if !r.contentModuleOnce("sensitive_data", target) {
+		return nil
+	}
+	rr, err := r.cachedPassiveContentProbe(ctx, "sensitive_data", target)
 	if err != nil {
 		return nil
 	}
@@ -35,27 +38,9 @@ func (r *Runner) runSensitiveData(ctx context.Context, target ScanTarget) []Modu
 	if len(findings) == 0 {
 		return nil
 	}
-	// Directory indexes are passive, typed content evidence. Mutating a query
-	// parameter is neither a meaningful negative control nor safe proof here;
-	// for parameterless paths it simply fetched the same listing and suppressed
-	// a genuine finding as a baseline match.
-	needsDifferentialBaseline := false
-	for _, hit := range findings {
-		if hit.Kind != "directory_listing" {
-			needsDifferentialBaseline = true
-			break
-		}
-	}
-	differentialBaselineReady := r.cfg.PassiveMode || !needsDifferentialBaseline
-	if !r.cfg.PassiveMode && needsDifferentialBaseline {
-		candidateBaseline, baselineErr := r.probe(ctx, target, "akca-sensitive-base")
-		if baselineErr == nil && candidateBaseline.Response.StatusCode == rr.Response.StatusCode &&
-			candidateBaseline.Response.Redirected == rr.Response.Redirected {
-			baselineRR = candidateBaseline
-			differentialBaselineReady = true
-		}
-	}
-	baseFindings := sensitivedata.Analyze(baselineRR.Response.Body)
+	// This is a passive exposure detector. A second request returning the same
+	// secret confirms persistence; it is not a negative control that should
+	// suppress the leak. Typed content is compared with an empty safe baseline.
 	var out []ModuleFinding
 	for _, hit := range findings {
 		if len(out) >= 3 {
@@ -67,11 +52,6 @@ func (r *Runner) runSensitiveData(ctx context.Context, target ScanTarget) []Modu
 		proofBaseline := baselineRR
 		if hit.Kind == "directory_listing" {
 			proofBaseline = httpclient.RequestResponse{Response: httpclient.ResponseRecord{StatusCode: 200, Headers: map[string]string{}}}
-		} else if !differentialBaselineReady {
-			continue
-		}
-		if hit.Kind != "directory_listing" && sensitiveDataFindingExists(baseFindings, hit.Kind, hit.Match) {
-			continue
 		}
 		p := defaultPayload("sensitive_data", hit.Kind, hit.Match, hit.Kind)
 		f := r.verifyAndBuild(ctx, "sensitive_data", target, p, proofBaseline, rr, hit.Kind, false, false, "", "")
@@ -192,6 +172,12 @@ func (r *Runner) cachedPassiveContentProbe(ctx context.Context, module string, t
 		return rr, nil
 	}
 	r.baselineMu.Unlock()
+	if rr, ok := observedResponse(ctx, target, true); ok {
+		r.baselineMu.Lock()
+		r.baselineCache[key] = rr
+		r.baselineMu.Unlock()
+		return rr, nil
+	}
 
 	rr, err := r.probeWithoutInjectedPayload(ctx, module, target)
 	if err != nil {

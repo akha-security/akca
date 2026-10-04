@@ -18,7 +18,9 @@ func (r *Runner) runHPP(ctx context.Context, target ScanTarget) []ModuleFinding 
 	}
 	policy, ok := r.hppPolicy(target)
 	if !ok {
-		r.runHPPQueryCoverage(ctx, target)
+		if findings := r.runHPPQueryCoverage(ctx, target); len(findings) > 0 {
+			return findings
+		}
 		r.emitStatefulProofGap("hpp", target, "explicit invariant, state and cleanup policy is required")
 		r.emitSkip("hpp", target, "explicit invariant, state and cleanup policy is required")
 		return nil
@@ -118,37 +120,101 @@ func (r *Runner) hppPolicy(target ScanTarget) (config.HPPProofPolicy, bool) {
 	return config.HPPProofPolicy{}, false
 }
 
-func (r *Runner) runHPPQueryCoverage(ctx context.Context, target ScanTarget) {
+func (r *Runner) runHPPQueryCoverage(ctx context.Context, target ScanTarget) []ModuleFinding {
 	if !strings.EqualFold(target.Method, "GET") || strings.TrimSpace(target.Parameter) == "" {
-		return
+		return nil
 	}
 	parsed, err := url.Parse(target.EndpointURL)
 	if err != nil || !r.scope.IsInScope(parsed.String()) {
-		return
+		return nil
 	}
 	query := parsed.Query()
-	if _, ok := query[target.Parameter]; !ok {
-		return
+	nativeValues, ok := query[target.Parameter]
+	if !ok || len(nativeValues) == 0 || strings.TrimSpace(nativeValues[0]) == "" {
+		return nil
 	}
-	query.Add(target.Parameter, "akca-hpp-"+randomAccountNonce())
-	parsed.RawQuery = query.Encode()
-	if !r.scope.IsInScope(parsed.String()) {
-		return
-	}
-	headers := r.wafHeadersForModule("hpp", parsed.String())
-	rr, err := r.client.Do(ctx, "GET", parsed.String(), nil, headers)
+	native := nativeValues[0]
+	baseline, err := r.client.Do(ctx, "GET", parsed.String(), nil, r.wafHeadersForModule("hpp", parsed.String()))
 	if err != nil {
-		return
+		return nil
 	}
+	adminControl, err := r.doHPPQuery(ctx, target, []string{"admin"})
+	if err != nil || hppSignal(adminControl.Response.Body, baseline.Response.Body) {
+		return nil
+	}
+
+	orders := [][]string{{native, "admin"}, {"admin", native}}
+	for orderIndex, values := range orders {
+		probe, probeErr := r.doHPPQuery(ctx, target, values)
+		if probeErr != nil || !hppSignal(probe.Response.Body, baseline.Response.Body) {
+			continue
+		}
+		reverse, reverseErr := r.doHPPQuery(ctx, target, orders[1-orderIndex])
+		if reverseErr != nil || hppSignal(reverse.Response.Body, baseline.Response.Body) {
+			continue
+		}
+		var replays []httpclient.RequestResponse
+		for attempt := 0; attempt < 2; attempt++ {
+			replay, replayErr := r.doHPPQuery(ctx, target, values)
+			if replayErr != nil || !hppSignal(replay.Response.Body, baseline.Response.Body) {
+				replays = nil
+				break
+			}
+			replays = append(replays, replay)
+		}
+		if len(replays) != 2 {
+			continue
+		}
+
+		payloadValue := strings.Join(values, ",")
+		payload := defaultPayload("hpp", "duplicate_parameter_privilege_differential", payloadValue,
+			"privilege_response_differential")
+		finding := r.verifyAndBuildWithCandidate(ctx, "hpp", target, payload, baseline, probe,
+			"privilege_response_differential", false, false, "", "", func(candidate *verification.Candidate) {
+				candidate.RequestedProofType = verification.ProofDifferentialReplay
+				candidate.NegativeControlSet, candidate.NegativeControlOK = true, true
+				candidate.TypedReplayHits = []bool{true, true, true}
+				candidate.Observations = append(candidate.Observations,
+					r.observation("hpp", target, verification.RoleNegativeControl, 1, adminControl),
+					r.observation("hpp", target, verification.RoleNegativeControl, 2, reverse),
+					r.observation("hpp", target, verification.RolePositiveReplay, 2, replays[0]),
+					r.observation("hpp", target, verification.RolePositiveReplay, 3, replays[1]))
+			})
+		if finding != nil {
+			finding.Title = "HTTP Parameter Pollution privilege differential"
+			finding.Severity = "high"
+			finding.Description = "A duplicated query parameter reproducibly produced an elevated server response. The native request, a single privileged value, and the reverse duplicate order did not; no persistent state mutation is claimed."
+			var out []ModuleFinding
+			r.recordFinding(ctx, &out, finding, "hpp", "privilege_response_differential")
+			return out
+		}
+	}
+
 	_ = r.emit("hpp_probe_coverage", "HPP duplicate-parameter coverage probe delivered", map[string]interface{}{
 		"module":                    "hpp",
 		"endpoint":                  target.EndpointURL,
 		"parameter":                 target.Parameter,
 		"method":                    "GET",
-		"status":                    rr.Response.StatusCode,
-		"content_signal_observed":   hppSignal(rr.Response.Body, ""),
+		"status":                    baseline.Response.StatusCode,
+		"content_signal_observed":   false,
 		"finding_requires_stateful": true,
 	})
+	return nil
+}
+
+func (r *Runner) doHPPQuery(ctx context.Context, target ScanTarget, values []string) (httpclient.RequestResponse, error) {
+	parsed, err := url.Parse(target.EndpointURL)
+	if err != nil {
+		return httpclient.RequestResponse{}, err
+	}
+	query := parsed.Query()
+	query.Del(target.Parameter)
+	for _, value := range values {
+		query.Add(target.Parameter, value)
+	}
+	parsed.RawQuery = query.Encode()
+	headers := r.wafHeadersForModule("hpp", parsed.String())
+	return r.client.Do(ctx, "GET", parsed.String(), nil, headers)
 }
 
 func (r *Runner) probeHPPAsProfile(ctx context.Context, client profiledHTTPDoer, profile config.AuthProfile,

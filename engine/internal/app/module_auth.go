@@ -29,6 +29,11 @@ func (e *Engine) moduleRunnerOpts() []modules.RunnerOption {
 		)
 		headers, cookies := browserSession(e.session.Config)
 		renderer.SetSession(headers, cookies)
+		// Module browser proofs are serialized through one persistent Chromium
+		// process. Each navigation gets a new document/JS realm, while avoiding
+		// thousands of process launches during client-side verification.
+		renderer.SetPersistent(true)
+		renderer.SetConcurrency(1)
 		if e.client != nil {
 			renderer.SetRequestGuard(e.client.ReserveExternal)
 		}

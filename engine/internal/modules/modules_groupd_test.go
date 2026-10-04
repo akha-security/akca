@@ -214,8 +214,7 @@ func TestKnownCVEDetection(t *testing.T) {
 
 func TestSensitiveDataExposure(t *testing.T) {
 	c := &groupDClient{responses: map[string]string{
-		"akca-sensitive-base": "public profile page",
-		"":                    "patient ssn 123-45-6789",
+		"/profile": "patient ssn 123-45-6789",
 	}}
 	target := ScanTarget{EndpointURL: "http://example.com/profile", Method: "GET", Parameter: "q"}
 	findings := groupDRunner(t, c).runSensitiveData(context.Background(), target)
@@ -343,7 +342,7 @@ func TestGraphQLIntrospection(t *testing.T) {
 
 func TestScriptSourceBrokenCDN(t *testing.T) {
 	c := &groupDClient{responses: map[string]string{
-		"":                              `<html><script src="https://cdn.vendor.com/app.js"></script></html>`,
+		"/page":                         `<html><script src="https://cdn.vendor.com/app.js"></script></html>`,
 		"https://cdn.vendor.com/app.js": "There isn't a GitHub Pages site here.",
 	}}
 	target := ScanTarget{

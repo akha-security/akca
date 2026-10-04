@@ -70,9 +70,8 @@ func ProbesForTarget(param, endpointURL, contentType, method string) []Probe {
 				continue
 			}
 		case "bracket_query":
-			if !jsonSurface && !loginSurface {
-				continue
-			}
+			// Express/qs and similar parsers turn bracketed query keys into
+			// objects on ordinary catalogue/search GET routes too.
 		}
 		out = append(out, p)
 	}

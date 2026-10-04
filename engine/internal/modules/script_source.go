@@ -14,7 +14,10 @@ func (r *Runner) runScriptSource(ctx context.Context, target ScanTarget) []Modul
 		r.emitSkip("script_source", target, reason)
 		return nil
 	}
-	pageRR, err := r.cachedEmptyProbe(ctx, target)
+	if !r.contentModuleOnce("script_source", target) {
+		return nil
+	}
+	pageRR, err := r.cachedPassiveContentProbe(ctx, "script_source", target)
 	if err != nil || pageRR.Response.Body == "" {
 		return nil
 	}

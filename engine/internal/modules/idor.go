@@ -25,6 +25,9 @@ func (r *Runner) runIDOR(ctx context.Context, target ScanTarget) []ModuleFinding
 				return out
 			}
 		}
+		if out := r.runIDORHeuristic(ctx, target); len(out) > 0 {
+			return out
+		}
 		r.runIDORHeuristicCoverage(ctx, target)
 		r.emitOnce("coverage_gap:idor:ownership_contract", "coverage_gap", "BOLA ownership proof contract unavailable or unsatisfied", map[string]interface{}{
 			"module": "idor", "endpoint": target.EndpointURL, "required_role_profiles": 2,
@@ -122,6 +125,9 @@ func (r *Runner) runIDORHeuristicCoverage(ctx context.Context, target ScanTarget
 }
 
 func (r *Runner) runIDORHeuristic(ctx context.Context, target ScanTarget) []ModuleFinding {
+	if strings.ContainsAny(target.EndpointURL, "{}") {
+		return nil
+	}
 	paramLower := strings.ToLower(target.Parameter)
 	isIDParam := false
 	for _, kw := range []string{"id", "user_id", "uid", "account", "account_id", "doc", "document", "order", "order_id", "profile", "profile_id", "file_id", "uuid", "user", "member", "ref", "key", "number", "item", "record", "obj", "object", "entity", "resource", "invoice", "ticket", "patient", "customer", "employee", "pid", "cid", "tenant_id", "org_id", "workspace_id", "team_id", "project_id", "company_id", "organization_id", "group_id", "folder_id", "channel_id"} {
@@ -174,25 +180,32 @@ func (r *Runner) runIDORHeuristic(ctx context.Context, target ScanTarget) []Modu
 		}
 		// Must return valid object data with distinct fingerprint from baseline
 		if resourceFingerprint(probeRR.Response.Body) != resourceFingerprint(baseline.Response.Body) {
-			lengthDiff := len(probeRR.Response.Body) - len(baseline.Response.Body)
-			if lengthDiff < 0 {
-				lengthDiff = -lengthDiff
-			}
-			// Must return sensitive private user/account attributes or tenant-specific records
-			hasSensitiveRecord := strings.Contains(bodyLower, `"email"`) || strings.Contains(bodyLower, `"password"`) ||
-				strings.Contains(bodyLower, `"token"`) || strings.Contains(bodyLower, `"credit_card"`) ||
-				strings.Contains(bodyLower, `"ssn"`) || strings.Contains(bodyLower, `"billing"`) ||
-				strings.Contains(bodyLower, `"api_key"`) || strings.Contains(bodyLower, `"secret"`) ||
-				strings.Contains(bodyLower, `"phone"`) || strings.Contains(bodyLower, `"address"`) ||
-				strings.Contains(bodyLower, `"user_id"`) || strings.Contains(bodyLower, `"account_number"`)
-
-			if hasSensitiveRecord && !strings.Contains(strings.ToLower(baseline.Response.Body), `"email"`) {
+			// A private record may legitimately contain the same field names as the
+			// caller's own baseline object.  What matters is a stable, distinct object
+			// value plus a negative control, not absence of the word "email".
+			if privateObjectRecordSignal(bodyLower) {
+				replay, replayErr := r.probeForModule(ctx, "idor", target, val)
+				if replayErr != nil || replay.Response.StatusCode != probeRR.Response.StatusCode ||
+					resourceFingerprint(replay.Response.Body) != resourceFingerprint(probeRR.Response.Body) {
+					continue
+				}
+				negativeValue := "akca-nonexistent-" + randomProbeToken()
+				negative, negativeErr := r.probeForModule(ctx, "idor", target, negativeValue)
+				if negativeErr != nil || (negative.Response.StatusCode == http.StatusOK &&
+					resourceFingerprint(negative.Response.Body) == resourceFingerprint(probeRR.Response.Body)) {
+					continue
+				}
 				p := defaultPayload("idor", "parameter_manipulation", val, "unauthenticated_object_access")
 				f := r.verifyAndBuildWithCandidate(ctx, "idor", target, p, baseline, probeRR,
 					"unauthenticated_object_access", false, false, "", "", func(candidate *verification.Candidate) {
 						candidate.RequestedProofType = verification.ProofDifferentialReplay
+						candidate.NegativeControlSet = true
+						candidate.NegativeControlOK = true
+						candidate.TypedReplayHits = []bool{true, true}
 						candidate.Observations = append(candidate.Observations,
 							r.observation("idor", target, verification.RolePositiveProbe, 1, probeRR),
+							r.observation("idor", target, verification.RolePositiveReplay, 2, replay),
+							r.observation("idor", target, verification.RoleNegativeControl, 1, negative),
 						)
 					})
 				if f != nil {
@@ -212,6 +225,8 @@ func privateObjectRecordSignal(bodyLower string) bool {
 	for _, marker := range []string{
 		`"email"`, `"password"`, `"token"`, `"credit_card"`, `"ssn"`, `"billing"`,
 		`"api_key"`, `"secret"`, `"phone"`, `"address"`, `"user_id"`, `"account_number"`,
+		`"invoice_id"`, `"invoice"`, `"amount"`, `"balance"`, `"order_id"`, `"orders"`,
+		`"message"`, `"messages"`, `"patient"`, `"medical"`, `"tenant_id"`, `"organization_id"`,
 	} {
 		if strings.Contains(bodyLower, marker) {
 			return true
@@ -227,6 +242,9 @@ func (r *Runner) runBFLA(ctx context.Context, target ScanTarget) []ModuleFinding
 	}
 	policy, ok := r.bflaPolicy(target)
 	if !ok {
+		if findings := r.runBFLAReadOnlyHeuristic(ctx, target); len(findings) > 0 {
+			return findings
+		}
 		r.emitStatefulProofGap("bfla", target, "explicit authorization policy with state and cleanup proof is required")
 		r.emitSkip("bfla", target, "explicit authorization policy with state and cleanup proof is required")
 		return nil
@@ -335,6 +353,105 @@ func (r *Runner) runBFLA(ctx context.Context, target ScanTarget) []ModuleFinding
 	var out []ModuleFinding
 	r.recordFinding(ctx, &out, finding, "bfla", "protected_state_mutation")
 	return out
+}
+
+func (r *Runner) runBFLAReadOnlyHeuristic(ctx context.Context, target ScanTarget) []ModuleFinding {
+	method := strings.ToUpper(strings.TrimSpace(target.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+	if method != http.MethodGet && method != http.MethodHead || !looksLikePrivilegedRoute(target.EndpointURL) {
+		return nil
+	}
+	client, profileCapable := r.client.(profiledHTTPDoer)
+	anonymousClient, anonymousCapable := r.client.(sessionlessHTTPDoer)
+	if !profileCapable || !anonymousCapable {
+		return nil
+	}
+	privileged, unprivileged, ok := r.heuristicPrivilegeProfiles()
+	if !ok {
+		return nil
+	}
+	high, err := client.DoWithAuthProfile(ctx, method, target.EndpointURL, nil, nil, privileged)
+	if err != nil || !successfulResourceResponse(high.Response) || !privateAuthResourceEvidence(high.Response.Body) {
+		return nil
+	}
+	low, err := client.DoWithAuthProfile(ctx, method, target.EndpointURL, nil, nil, unprivileged)
+	if err != nil || !successfulResourceResponse(low.Response) ||
+		!sameResourceFingerprint(high.Response.Body, low.Response.Body) {
+		return nil
+	}
+	anonymous, err := anonymousClient.DoWithoutSession(ctx, method, target.EndpointURL, nil, nil)
+	if err != nil || anonymousExposesSameResource(anonymous.Response, high.Response) {
+		return nil
+	}
+	highReplay, err := client.DoWithAuthProfile(ctx, method, target.EndpointURL, nil, nil, privileged)
+	if err != nil || !sameResourceFingerprint(high.Response.Body, highReplay.Response.Body) {
+		return nil
+	}
+	lowReplay, err := client.DoWithAuthProfile(ctx, method, target.EndpointURL, nil, nil, unprivileged)
+	if err != nil || !sameResourceFingerprint(low.Response.Body, lowReplay.Response.Body) {
+		return nil
+	}
+
+	payload := defaultPayload("bfla", "read_only_role_boundary", unprivileged.ID, "privileged_read_access")
+	finding := r.verifyAndBuildWithCandidate(ctx, "bfla", target, payload, anonymous, low,
+		"privileged_read_access", false, false, "", "", func(candidate *verification.Candidate) {
+			candidate.RequestedProofType = verification.ProofIdentityBoundary
+			candidate.NegativeControlSet, candidate.NegativeControlOK = true, true
+			candidate.TypedReplayHits = []bool{true, true}
+			candidate.Observations = append(candidate.Observations,
+				r.identityObservation("bfla", target, verification.RoleIdentityA, 1, privileged.ID, high),
+				r.identityObservation("bfla", target, verification.RoleIdentityA, 2, privileged.ID, highReplay),
+				r.identityObservation("bfla", target, verification.RoleIdentityB, 1, unprivileged.ID, low),
+				r.identityObservation("bfla", target, verification.RoleIdentityB, 2, unprivileged.ID, lowReplay),
+				r.identityObservation("bfla", target, verification.RoleAnonymousControl, 1, "anonymous", anonymous))
+		})
+	if finding == nil {
+		return nil
+	}
+	finding.Title = "BFLA: low-privilege role read a privileged endpoint"
+	finding.Severity = "high"
+	finding.Description = "A role explicitly identified as non-privileged retrieved the same stable private resource as the privileged role across independent GET/HEAD replays, while the anonymous control was denied. No state-changing request was sent."
+	var out []ModuleFinding
+	r.recordFinding(ctx, &out, finding, "bfla", "privileged_read_access")
+	return out
+}
+
+func (r *Runner) heuristicPrivilegeProfiles() (config.AuthProfile, config.AuthProfile, bool) {
+	var privileged, unprivileged config.AuthProfile
+	for _, role := range r.cfg.RoleProfiles {
+		profile, ok := r.resolveAuthProfile(role.AuthProfileID)
+		if !ok {
+			continue
+		}
+		label := strings.ToLower(role.ID + " " + role.Name + " " + profile.ID + " " + profile.Name)
+		if strings.Contains(label, "admin") || strings.Contains(label, "superuser") ||
+			strings.Contains(label, "privileged") || strings.Contains(label, "high") {
+			if privileged.ID == "" {
+				privileged = profile
+			}
+			continue
+		}
+		if unprivileged.ID == "" {
+			unprivileged = profile
+		}
+	}
+	return privileged, unprivileged, privileged.ID != "" && unprivileged.ID != "" && privileged.ID != unprivileged.ID
+}
+
+func looksLikePrivilegedRoute(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	path := strings.ToLower(parsed.Path)
+	for _, marker := range []string{"/admin", "/manage", "/management", "/internal", "/staff", "/superuser"} {
+		if strings.Contains(path, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Runner) bflaPolicy(target ScanTarget) (config.AuthorizationPolicy, bool) {

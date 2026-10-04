@@ -7,8 +7,8 @@ func TestDefaultUsesSingleFullScanProfile(t *testing.T) {
 	if cfg.SmartScanProfile != "Full Scan" {
 		t.Fatalf("default profile = %q, want Full Scan", cfg.SmartScanProfile)
 	}
-	if cfg.RequestBudget != 0 || cfg.CrawlerRequestBudget != 1_500 {
-		t.Fatalf("unexpected request budgets: total=%d crawler=%d", cfg.RequestBudget, cfg.CrawlerRequestBudget)
+	if cfg.RequestBudget != 0 || cfg.RequestsPerTarget != 0 || cfg.CrawlerRequestBudget != 1_500 {
+		t.Fatalf("unexpected request budgets: total=%d per_target=%d crawler=%d", cfg.RequestBudget, cfg.RequestsPerTarget, cfg.CrawlerRequestBudget)
 	}
 	if cfg.MaxPages != 1_500 || cfg.MaxEndpoints != 0 || cfg.MaxDepth != 0 {
 		t.Fatalf("unexpected full scan coverage limits: pages=%d endpoints=%d depth=%d", cfg.MaxPages, cfg.MaxEndpoints, cfg.MaxDepth)
@@ -21,7 +21,7 @@ func TestDefaultUsesSingleFullScanProfile(t *testing.T) {
 func TestLegacyProfilesNormalizeToFullScan(t *testing.T) {
 	for _, legacy := range []string{"Balanced", "QuickRecon", "FullBugBounty", "APIDeepScan", "JavaScriptHeavySPA"} {
 		cfg := ApplyScanProfile(ScanConfig{SmartScanProfile: legacy})
-		if cfg.SmartScanProfile != "Full Scan" || cfg.RequestBudget != 0 || cfg.CrawlerRequestBudget != 1_500 || cfg.MaxPages != 1_500 || cfg.MaxEndpoints != 0 {
+		if cfg.SmartScanProfile != "Full Scan" || cfg.RequestBudget != 0 || cfg.RequestsPerTarget != 0 || cfg.CrawlerRequestBudget != 1_500 || cfg.MaxPages != 1_500 || cfg.MaxEndpoints != 0 {
 			t.Fatalf("legacy profile %q was not normalized: %+v", legacy, cfg)
 		}
 	}
@@ -50,6 +50,16 @@ func TestFullScanHonorsExplicitTrafficLimitsAndFeatureDisables(t *testing.T) {
 	}
 	if cfg.EnableOAST || cfg.EnableFuzzing || cfg.EnableJSAnalysis {
 		t.Fatalf("explicit feature disables were overwritten: %+v", cfg)
+	}
+}
+
+func TestFullScanAllowsExplicitUnlimitedModuleBudget(t *testing.T) {
+	cfg := DefaultScanConfig()
+	cfg.RequestsPerTarget = 0
+	cfg.Explicit.RequestsPerTarget = true
+	cfg = ApplyScanProfile(cfg)
+	if cfg.RequestsPerTarget != 0 {
+		t.Fatalf("explicit unlimited module budget was overwritten: %d", cfg.RequestsPerTarget)
 	}
 }
 

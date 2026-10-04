@@ -101,6 +101,46 @@ func TestExtractPassiveDoesNotParseHTMLAsXML(t *testing.T) {
 	}
 }
 
+func TestPassiveDOMAndResponseFieldsRemainHints(t *testing.T) {
+	eps := ExtractPassive("https://example.com/article", "GET", "text/html",
+		`<form action="/search"><input name="q"><input id="tracking" data-event="open"></form>`,
+		map[string]string{"User-Agent": "browser"})
+	for _, parameter := range eps {
+		if confirmedPassiveParameter(parameter) {
+			t.Fatalf("DOM/header hint was promoted to a confirmed parameter: %+v", parameter)
+		}
+	}
+	jsonHints := ExtractPassive("https://example.com/api", "GET", "application/json",
+		`{"user":{"profile":{"email":"a@example.test"}}}`, nil)
+	for _, parameter := range jsonHints {
+		if confirmedPassiveParameter(parameter) {
+			t.Fatalf("response JSON field was promoted to a confirmed parameter: %+v", parameter)
+		}
+	}
+}
+
+func TestDifferentialCandidatesEnforcesFinalCap(t *testing.T) {
+	hints := make([]DiscoveredParameter, 100)
+	learned := make([]string, 100)
+	for i := range hints {
+		hints[i] = DiscoveredParameter{Name: "hint_" + itoa(i), Priority: 80}
+		learned[i] = "learned_" + itoa(i)
+	}
+	got := DifferentialCandidates("https://example.com/", hints, learned, nil, 20)
+	if len(got) != 20 {
+		t.Fatalf("candidate list bypassed cap: got %d want 20", len(got))
+	}
+	foundDebug := false
+	for _, name := range got {
+		if name == "debug" {
+			foundDebug = true
+		}
+	}
+	if !foundDebug {
+		t.Fatalf("core Arjun-style names were crowded out by hints: %v", got)
+	}
+}
+
 func TestMethodDependentPriority(t *testing.T) {
 	p := DiscoveredParameter{
 		Name: "debug", Location: LocationQuery, MethodDependent: true,

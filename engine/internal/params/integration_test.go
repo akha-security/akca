@@ -447,6 +447,172 @@ func TestGenericUnknownPOSTFieldsAreNotDiscovered(t *testing.T) {
 	}
 }
 
+func TestDOMHintsAreNotPersistedAsEndpointParameters(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, `<html><form action="/search"><input name="search"><input type="hidden" name="csrf"></form><input id="tracking" data-event="open"></html>`)
+	}))
+	defer srv.Close()
+
+	db, err := storage.Open(filepath.Join(t.TempDir(), "params-dom-hints.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err = db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	const scanID = "scan-dom-hints"
+	if err = db.EnsureScan(scanID); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.SaveDiscoveredEndpoint(scanID, map[string]interface{}{
+		"url": srv.URL + "/article", "method": http.MethodGet, "normalized_url": srv.URL + "/article", "source": "test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	endpointID, err := db.GetEndpointID(scanID, srv.URL+"/article", http.MethodGet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"127.0.0.1"}
+	scopeEngine := scope.NewEngine(cfg)
+	client, err := httpclient.New(cfg, scopeEngine, ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := NewDiscoverer(scanID, client, scopeEngine, db, nil)
+	d.SetWordlistCap(4)
+	d.SetMaxProbes(12)
+	if _, err = d.DiscoverEndpoint(context.Background(), endpointID, srv.URL+"/article", http.MethodGet); err != nil {
+		t.Fatal(err)
+	}
+	count, err := db.CountParameters(endpointID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("DOM/form hints were persisted on the viewing page: count=%d", count)
+	}
+}
+
+func TestDifferentialHitRequiresIndependentReplay(t *testing.T) {
+	var debugCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("debug") == "akca_probe" && debugCalls.Add(1) == 1 {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(w, "one-off debug response")
+			return
+		}
+		_, _ = io.WriteString(w, "baseline")
+	}))
+	defer srv.Close()
+
+	db, err := storage.Open(filepath.Join(t.TempDir(), "params-replay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err = db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	const scanID = "scan-param-replay"
+	if err = db.EnsureScan(scanID); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.SaveDiscoveredEndpoint(scanID, map[string]interface{}{
+		"url": srv.URL, "method": http.MethodGet, "normalized_url": srv.URL, "source": "test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	endpointID, err := db.GetEndpointID(scanID, srv.URL, http.MethodGet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"127.0.0.1"}
+	scopeEngine := scope.NewEngine(cfg)
+	client, err := httpclient.New(cfg, scopeEngine, ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := NewDiscoverer(scanID, client, scopeEngine, db, nil)
+	d.SetWordlistCap(4)
+	d.SetMaxProbes(12)
+	found, err := d.DiscoverEndpoint(context.Background(), endpointID, srv.URL, http.MethodGet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, parameter := range found {
+		if parameter.Name == "debug" && parameter.Source == "differential" {
+			t.Fatalf("one-off response became a hidden parameter: %+v", parameter)
+		}
+	}
+}
+
+func TestDifferentialHitFloodIsCappedPerEndpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for name := range r.URL.Query() {
+			if strings.HasPrefix(name, "__akca_rand_ctrl_") {
+				_, _ = io.WriteString(w, "baseline")
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = fmt.Fprintf(w, "accepted %s", name)
+			return
+		}
+		_, _ = io.WriteString(w, "baseline")
+	}))
+	defer srv.Close()
+
+	db, err := storage.Open(filepath.Join(t.TempDir(), "params-hit-cap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err = db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	const scanID = "scan-param-hit-cap"
+	if err = db.EnsureScan(scanID); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.SaveDiscoveredEndpoint(scanID, map[string]interface{}{
+		"url": srv.URL, "method": http.MethodGet, "normalized_url": srv.URL, "source": "test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	endpointID, err := db.GetEndpointID(scanID, srv.URL, http.MethodGet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"127.0.0.1"}
+	scopeEngine := scope.NewEngine(cfg)
+	client, err := httpclient.New(cfg, scopeEngine, ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := NewDiscoverer(scanID, client, scopeEngine, db, nil)
+	d.SetWordlistCap(20)
+	d.SetMaxProbes(80)
+	d.SetMaxHits(3)
+	found, err := d.DiscoverEndpoint(context.Background(), endpointID, srv.URL, http.MethodGet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	differential := 0
+	for _, parameter := range found {
+		if parameter.Source == "differential" {
+			differential++
+		}
+	}
+	if differential != 3 {
+		t.Fatalf("differential hit flood was not capped: got %d want 3 (%+v)", differential, found)
+	}
+}
+
 func TestGETDiscoveryPreservesCapturedAuthenticationHeaders(t *testing.T) {
 	var unauthenticatedProbe bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

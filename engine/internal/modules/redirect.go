@@ -67,10 +67,21 @@ func redirectDestinationIsCanary(location string) bool {
 		location = "https://" + strings.TrimLeft(location, "/")
 	}
 	u, err := url.Parse(location)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+	if err != nil {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSuffix(u.Hostname(), "."), "evil.example")
+	switch strings.ToLower(u.Scheme) {
+	case "javascript":
+		// Match only the scanner's inert, exact canary rather than treating every
+		// application-specific javascript URL as proof.
+		return strings.EqualFold(strings.TrimSpace(u.Opaque), "alert(1)")
+	case "data":
+		return strings.EqualFold(location, "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==")
+	case "http", "https":
+		return strings.EqualFold(strings.TrimSuffix(u.Hostname(), "."), "evil.example")
+	default:
+		return false
+	}
 }
 
 func (r *Runner) runHostHeader(ctx context.Context, target ScanTarget) []ModuleFinding {

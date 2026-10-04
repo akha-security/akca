@@ -31,8 +31,9 @@ func (r *Runner) runMassAssignment(ctx context.Context, target ScanTarget) []Mod
 		r.emitSkip("mass_assignment", target, "active mutation disabled: a restorable JSON body template is required")
 		return nil
 	}
-	// Only mutate privilege fields already present in the captured request. An
-	// original value is required so the exact request can be replayed as cleanup.
+	// PATCH requires an original value for exact cleanup. PUT is a full-resource
+	// replacement, so an omitted privileged field can be added and then removed
+	// safely by replaying the original representation.
 	privilegeValues := map[string]interface{}{
 		"is_admin": true, "role": "admin", "roles": []string{"admin"}, "admin": true,
 		"verified": true, "is_verified": true, "discount_percent": 100,
@@ -52,7 +53,8 @@ func (r *Runner) runMassAssignment(ctx context.Context, target ScanTarget) []Mod
 	var out []ModuleFinding
 
 	for key, privilegedValue := range privilegeValues {
-		if _, restorable := original[key]; !restorable || ctx.Err() != nil {
+		_, restorable := original[key]
+		if (!restorable && method != http.MethodPut) || ctx.Err() != nil {
 			continue
 		}
 		injected := make(map[string]interface{}, len(original))

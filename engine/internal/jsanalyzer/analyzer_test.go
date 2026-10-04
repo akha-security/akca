@@ -138,8 +138,8 @@ func TestLargeFilePreviewHandling(t *testing.T) {
 	if !truncated || !previewOnly {
 		t.Fatalf("expected truncated preview, truncated=%v previewOnly=%v", truncated, previewOnly)
 	}
-	if len(content) != DefaultPreviewBytes {
-		t.Fatalf("expected preview bytes %d, got %d", DefaultPreviewBytes, len(content))
+	if len(content) != DefaultMaxJSBytes {
+		t.Fatalf("expected full analysis budget %d, got %d", DefaultMaxJSBytes, len(content))
 	}
 }
 

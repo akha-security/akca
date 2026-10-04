@@ -147,6 +147,7 @@ func TestUnlimitedProductionLoaderReachesVulnerableEndpoint(t *testing.T) {
 	}
 	cfg := config.DefaultScanConfig()
 	cfg.RequestBudget = 0
+	cfg.RequestsPerTarget = 0
 	cfg.PerHostConcurrency = 1
 	cfg.EnableOAST = false
 	client := &budgetSurfaceClient{calls: map[string]int{}}
@@ -235,7 +236,10 @@ func TestURLDerivedBudgetAndParameterFairness(t *testing.T) {
 	parameterless := a
 	parameterless.Parameter = ""
 	allocation := r.allocateModuleBudget("xss", []ScanTarget{a, a2, b, parameterless})
-	if allocation.allocated != 80 || allocation.remaining[0] != 20 || allocation.remaining[1] != 20 || allocation.remaining[2] != 40 || allocation.remaining[3] != 0 {
+	if allocation.allocated != 80 || len(allocation.remaining) != 3 ||
+		allocation.remaining[allocation.targetGroup[0]] != 20 ||
+		allocation.remaining[allocation.targetGroup[1]] != 20 ||
+		allocation.remaining[allocation.targetGroup[2]] != 40 || allocation.targetGroup[3] != -1 {
 		t.Fatalf("URL allocation inflated by parameters: %+v", allocation)
 	}
 	for i := 0; i < 20; i++ {
@@ -249,6 +253,54 @@ func TestURLDerivedBudgetAndParameterFairness(t *testing.T) {
 	allocation.release(1)
 	if err := allocation.reserve(0); err != nil {
 		t.Fatal("unused reservation not recycled", err)
+	}
+}
+
+func TestDefaultFullScanDoesNotTruncateSQLiAcrossManyInsertionPoints(t *testing.T) {
+	cfg := config.ApplyScanProfile(config.DefaultScanConfig())
+	cfg.AllowedVulnerabilityClasses = []string{"sqli"}
+	r := NewRunner("unbounded-sqli", nil, nil, nil, nil, nil, nil, cfg)
+	targets := make([]ScanTarget, 0, 250)
+	for i := 0; i < 250; i++ {
+		targets = append(targets, ScanTarget{
+			EndpointURL: fmt.Sprintf("https://example.test/items/%d?q=%d", i, i),
+			Method:      "GET",
+			Parameter:   "q",
+			Location:    "query",
+		})
+	}
+	if allocation := r.allocateModuleBudget("sqli", targets); allocation != nil {
+		t.Fatalf("default Full Scan imposed an implicit SQLi allocation: %+v", allocation)
+	}
+}
+
+func TestDeduplicatedOriginWorkSharesOneReservation(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.RequestBudget = 60
+	cfg.RequestsPerTarget = 0
+	cfg.AllowedVulnerabilityClasses = []string{"backup_archives"}
+	r := NewRunner("origin-budget", nil, nil, nil, nil, nil, nil, cfg)
+	targets := []ScanTarget{
+		{EndpointURL: "https://example.com/a?q=1", Method: "GET", Parameter: "q"},
+		{EndpointURL: "https://example.com/b", Method: "POST", Parameter: "body", Location: "json"},
+		{EndpointURL: "https://example.com/c?x=2", Method: "GET", Parameter: "x"},
+	}
+	allocation := r.allocateModuleBudget("backup_archives", targets)
+	if allocation.allocated != 60 || len(allocation.remaining) != 1 || allocation.remaining[0] != 60 {
+		t.Fatalf("origin work was split across duplicate rows: %+v", allocation)
+	}
+	for i, group := range allocation.targetGroup {
+		if group != 0 {
+			t.Fatalf("target %d mapped to group %d, want shared group 0", i, group)
+		}
+	}
+	allocation.release(0)
+	allocation.release(1)
+	if allocation.shared != 0 || allocation.remaining[0] != 60 {
+		t.Fatalf("duplicate rows released the winner's budget early: %+v", allocation)
+	}
+	if err := allocation.reserve(2); err != nil {
+		t.Fatalf("winning duplicate could not use shared work reservation: %v", err)
 	}
 }
 

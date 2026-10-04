@@ -2,6 +2,7 @@ package params
 
 import (
 	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -62,6 +63,70 @@ func DifferentialWordlist(endpointURL string, maxItems int) []string {
 		return full
 	}
 	return full[:maxItems]
+}
+
+// DifferentialCandidates merges endpoint-local passive hints and a small set
+// of already proven names with the built-in list, then applies the cap to the
+// final list. Applying the cap last is important: the former implementation
+// prepended every learned name after truncation and silently bypassed it.
+func DifferentialCandidates(endpointURL string, hints []DiscoveredParameter, learned []string, known map[string]struct{}, maxItems int) []string {
+	orderedHints := append([]DiscoveredParameter(nil), hints...)
+	sort.SliceStable(orderedHints, func(i, j int) bool { return orderedHints[i].Priority > orderedHints[j].Priority })
+	seen := make(map[string]struct{}, len(known)+len(orderedHints)+len(learned))
+	for name := range known {
+		seen[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
+	}
+	capacity := maxItems
+	if capacity < 0 {
+		capacity = 0
+	}
+	out := make([]string, 0, capacity)
+	add := func(name string) bool {
+		name = strings.TrimSpace(name)
+		key := strings.ToLower(name)
+		if !validCandidateName(name) {
+			return true
+		}
+		if _, exists := seen[key]; exists {
+			return true
+		}
+		seen[key] = struct{}{}
+		out = append(out, name)
+		return maxItems <= 0 || len(out) < maxItems
+	}
+	base := PrioritizedWordlist(endpointURL)
+	coreCount := 32
+	if maxItems > 0 && coreCount > maxItems {
+		coreCount = maxItems
+	}
+	if coreCount > len(base) {
+		coreCount = len(base)
+	}
+	for _, name := range base[:coreCount] {
+		if !add(name) {
+			return out
+		}
+	}
+	hintLimit := len(orderedHints)
+	if maxItems > 0 && hintLimit > maxItems/2 {
+		hintLimit = maxItems / 2
+	}
+	for _, hint := range orderedHints[:hintLimit] {
+		if !add(hint.Name) {
+			return out
+		}
+	}
+	for _, name := range learned {
+		if !add(name) {
+			return out
+		}
+	}
+	for _, name := range base[coreCount:] {
+		if !add(name) {
+			return out
+		}
+	}
+	return out
 }
 
 func primaryProbeMethod(method string) string {

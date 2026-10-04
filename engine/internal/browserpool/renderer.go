@@ -58,6 +58,18 @@ func (r *HeadlessRenderer) SetConcurrency(n int) {
 	r.sem = make(chan struct{}, n)
 }
 
+// SetPersistent reuses one Chromium process across sequential, isolated page
+// documents. Navigation creates a fresh JavaScript realm while avoiding a full
+// browser process launch for every proof attempt.
+func (r *HeadlessRenderer) SetPersistent(enabled bool) {
+	if r == nil {
+		return
+	}
+	r.crawlMu.Lock()
+	defer r.crawlMu.Unlock()
+	r.persistent = enabled
+}
+
 func findBrowserBinary() string {
 	for _, candidate := range windowsBrowserCandidates() {
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
@@ -120,6 +132,42 @@ func (r *HeadlessRenderer) Render(ctx context.Context, rawURL string) (string, e
 	}
 	defer os.RemoveAll(profileDir)
 	cmd := exec.CommandContext(ctx, r.binary, r.commandArgs(rawURL, profileDir)...)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return "", fmt.Errorf("browser returned an empty DOM")
+	}
+	return string(out), nil
+}
+
+// RenderHTML renders an exact response body in an isolated local document. It
+// is used for browser confirmation of POST/PUT/JSON responses where navigating
+// the request URL with GET would test different application behaviour.
+func (r *HeadlessRenderer) RenderHTML(ctx context.Context, source string) (string, error) {
+	if !r.Available() {
+		return "", fmt.Errorf("no Chromium-compatible browser found")
+	}
+	if r.sem != nil {
+		select {
+		case r.sem <- struct{}{}:
+			defer func() { <-r.sem }()
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	profileDir, err := os.MkdirTemp("", "akca-browser-html-profile-*")
+	if err != nil {
+		return "", fmt.Errorf("create isolated browser profile: %w", err)
+	}
+	defer os.RemoveAll(profileDir)
+	documentPath := filepath.Join(profileDir, "response.html")
+	if err := os.WriteFile(documentPath, []byte(source), 0o600); err != nil {
+		return "", fmt.Errorf("write isolated response document: %w", err)
+	}
+	documentURL := (&url.URL{Scheme: "file", Path: filepath.ToSlash(documentPath)}).String()
+	cmd := exec.CommandContext(ctx, r.binary, r.commandArgs(documentURL, profileDir)...)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err

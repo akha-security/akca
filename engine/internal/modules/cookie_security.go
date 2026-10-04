@@ -26,12 +26,20 @@ func (r *Runner) runCookieSecurity(ctx context.Context, target ScanTarget) []Mod
 		r.emitSkip("cookie_security", target, reason)
 		return nil
 	}
-	if !r.endpointModuleOnce("cookie_security", target) {
+	// Cookie flags belong to the concrete HTTP response, not to each parameter
+	// surface discovered on that response. Keep distinct URL/method responses so
+	// login and callback routes are covered without re-requesting one page for
+	// every query, form, JSON, or path parameter.
+	if !r.contentModuleOnce("cookie_security", target) {
 		return nil
 	}
-	rr, err := r.cachedEmptyProbe(ctx, target)
-	if err != nil {
-		return nil
+	rr, captured := observedResponse(ctx, target, false)
+	if !captured {
+		var err error
+		rr, err = r.cachedEmptyProbe(ctx, target)
+		if err != nil {
+			return nil
+		}
 	}
 	u, err := url.Parse(target.EndpointURL)
 	if err != nil {

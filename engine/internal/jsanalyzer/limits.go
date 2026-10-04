@@ -11,9 +11,9 @@ func PrepareContent(body string, maxBytes, previewBytes int) (content string, tr
 	if len(body) <= maxBytes {
 		return body, false, false
 	}
-	truncated = true
-	if len(body) > previewBytes {
-		return body[:previewBytes], true, true
-	}
-	return body[:maxBytes], true, false
+	// previewBytes is retained for configuration compatibility, but it must not
+	// reduce a multi-megabyte bundle to a tiny runtime-only prefix. Analyse the
+	// entire configured budget and mark the result as a truncated preview.
+	_ = previewBytes
+	return body[:maxBytes], true, true
 }

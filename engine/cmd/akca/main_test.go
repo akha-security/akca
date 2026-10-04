@@ -18,8 +18,8 @@ import (
 )
 
 func TestVersionIsStableReleaseString(t *testing.T) {
-	if version != "0.2.6" {
-		t.Fatalf("version=%q, want 0.2.6", version)
+	if version != "0.2.7" {
+		t.Fatalf("version=%q, want 0.2.7", version)
 	}
 }
 
@@ -48,7 +48,7 @@ func TestUsageHelpAndVersionPrintBrandBanner(t *testing.T) {
 			if !strings.Contains(combined, akcaASCII[0]) {
 				t.Fatalf("ASCII wordmark missing for %s: %q", tc.name, combined)
 			}
-			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.6") {
+			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.7") {
 				t.Fatalf("brand/version line missing for %s: %q", tc.name, combined)
 			}
 		})
@@ -783,5 +783,31 @@ func TestPhaseLifecycleTransitionsRunningToCompleted(t *testing.T) {
 	}
 	if !strings.Contains(fullOutput, "\033[1A") {
 		t.Fatalf("phase finished did not replace RUNNING line in-place: %q", fullOutput)
+	}
+}
+
+func TestPhaseLifecycleShowsPartialInsteadOfCompleted(t *testing.T) {
+	var output bytes.Buffer
+	cw := NewConsoleWriter()
+	cw.out = &output
+	cw.interactive = true
+	cw.scanActive = true
+
+	if err := cw.WriteEvent(events.Event{
+		Type:    "phase_started",
+		Payload: map[string]interface{}{"phase": "vuln_module_backup_archives"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cw.WriteEvent(events.Event{
+		Type: "phase_finished",
+		Payload: map[string]interface{}{
+			"phase": "vuln_module_backup_archives", "status": "partial",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "PARTIAL") || strings.Contains(got, "COMPLETED") {
+		t.Fatalf("partial module status was hidden: %q", got)
 	}
 }

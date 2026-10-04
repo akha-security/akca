@@ -37,11 +37,12 @@ func TestParameterDiscoveryBudgetsFollowIntensity(t *testing.T) {
 		intensity        string
 		maxProbes        int
 		wordlistCap      int
+		maxHits          int
 		maxTransferProbe int
 	}{
-		{intensity: "fast", maxProbes: 96, wordlistCap: 64, maxTransferProbe: 256},
-		{intensity: "normal", maxProbes: 320, wordlistCap: 160, maxTransferProbe: 1000},
-		{intensity: "stealth", maxProbes: 60, wordlistCap: 40, maxTransferProbe: 100},
+		{intensity: "fast", maxProbes: 96, wordlistCap: 64, maxHits: 12, maxTransferProbe: 256},
+		{intensity: "normal", maxProbes: 320, wordlistCap: 160, maxHits: 24, maxTransferProbe: 1000},
+		{intensity: "stealth", maxProbes: 60, wordlistCap: 40, maxHits: 8, maxTransferProbe: 100},
 	}
 	for _, tt := range tests {
 		cfg := DefaultScanConfig()
@@ -51,6 +52,9 @@ func TestParameterDiscoveryBudgetsFollowIntensity(t *testing.T) {
 		}
 		if got := cfg.ParameterWordlistCap(); got != tt.wordlistCap {
 			t.Errorf("%s wordlist cap=%d want %d", tt.intensity, got, tt.wordlistCap)
+		}
+		if got := cfg.ParameterMaxHits(); got != tt.maxHits {
+			t.Errorf("%s max hits=%d want %d", tt.intensity, got, tt.maxHits)
 		}
 		if got := cfg.ParameterTransferMaxProbes(); got != tt.maxTransferProbe {
 			t.Errorf("%s transfer probes=%d want %d", tt.intensity, got, tt.maxTransferProbe)
@@ -63,9 +67,9 @@ func TestFullCoverageParameterDiscoveryFollowsIntensity(t *testing.T) {
 	if cfg.ScanIntensity != "normal" {
 		t.Fatalf("default full scan intensity=%q, want normal", cfg.ScanIntensity)
 	}
-	if cfg.ParameterMaxProbes() != 320 || cfg.ParameterWordlistCap() != 160 || cfg.ParameterTransferMaxProbes() != 1000 {
-		t.Fatalf("full coverage parameter discovery must retain normal phase bounds: probes=%d words=%d transfers=%d",
-			cfg.ParameterMaxProbes(), cfg.ParameterWordlistCap(), cfg.ParameterTransferMaxProbes())
+	if cfg.ParameterMaxProbes() != 320 || cfg.ParameterWordlistCap() != 160 || cfg.ParameterMaxHits() != 24 || cfg.ParameterTransferMaxProbes() != 1000 {
+		t.Fatalf("full coverage parameter discovery must retain normal phase bounds: probes=%d words=%d hits=%d transfers=%d",
+			cfg.ParameterMaxProbes(), cfg.ParameterWordlistCap(), cfg.ParameterMaxHits(), cfg.ParameterTransferMaxProbes())
 	}
 }
 

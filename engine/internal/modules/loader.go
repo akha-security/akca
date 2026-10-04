@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/learning"
 	"github.com/akha-security/akca/engine/internal/payloadgen"
 	"github.com/akha-security/akca/engine/internal/planner"
@@ -82,6 +83,10 @@ func (r *Runner) LoadTargetsWithEndpointsFromDB(limit int) ([]ScanTarget, error)
 	if err != nil {
 		return nil, err
 	}
+	observedResponses := make(map[string]struct {
+		rr       *httpclient.RequestResponse
+		complete bool
+	})
 	for _, endpoint := range endpoints {
 		if !r.scope.IsInScope(endpoint.URL) {
 			continue
@@ -89,6 +94,25 @@ func (r *Runner) LoadTargetsWithEndpointsFromDB(limit int) ([]ScanTarget, error)
 		method := strings.ToUpper(strings.TrimSpace(endpoint.Method))
 		if method == "" {
 			method = http.MethodGet
+		}
+		if endpoint.RequestTemplate.ResponseStatus > 0 {
+			rr := &httpclient.RequestResponse{
+				Request: httpclient.RequestRecord{
+					Method: method, URL: endpoint.URL, Headers: endpoint.RequestTemplate.Headers,
+					Body: endpoint.RequestTemplate.Body,
+				},
+				Response: httpclient.ResponseRecord{
+					StatusCode: endpoint.RequestTemplate.ResponseStatus,
+					Headers:    endpoint.RequestTemplate.ResponseHeaders,
+					Body:       endpoint.RequestTemplate.ResponseBody,
+					FinalURL:   endpoint.URL,
+				},
+			}
+			complete := !strings.HasSuffix(endpoint.RequestTemplate.ResponseBody, "...[truncated]")
+			observedResponses[targetSurfaceKey(endpoint.URL, method)] = struct {
+				rr       *httpclient.RequestResponse
+				complete bool
+			}{rr: rr, complete: complete}
 		}
 		// Extract URL query parameters for endpoints discovered during crawling
 		params := paramsFromURL(endpoint.URL)
@@ -181,6 +205,12 @@ func (r *Runner) LoadTargetsWithEndpointsFromDB(limit int) ([]ScanTarget, error)
 					ScanID: r.scanID, EndpointURL: endpoint.URL, Method: method,
 				},
 			})
+		}
+	}
+	for i := range targets {
+		if observed, ok := observedResponses[targetSurfaceKey(targets[i].EndpointURL, targets[i].Method)]; ok {
+			targets[i].ObservedResponse = observed.rr
+			targets[i].ObservedComplete = observed.complete
 		}
 	}
 	selected, err := r.planAndCapBalancedTargets(targets, limit)

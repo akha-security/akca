@@ -51,7 +51,7 @@ func (r *Runner) enrichVerification(ctx context.Context, module string, target S
 		return candidate
 	}
 	lowBudget := r.cfg.PayloadBudget == config.PayloadBudgetLow
-	if strings.Contains(strings.ToLower(signal), "timing") {
+	if timingVerificationSignal(signal) {
 		// Timing evidence has its own paired control and statistical replay path.
 		// Replaying it as a body-difference probe would both waste time and turn
 		// the negative control into another artificial delay signal.
@@ -118,12 +118,23 @@ func (r *Runner) enrichVerification(ctx context.Context, module string, target S
 	return candidate
 }
 
+func timingVerificationSignal(signal string) bool {
+	lower := strings.ToLower(signal)
+	return strings.Contains(lower, "timing") || strings.Contains(lower, "time_delay")
+}
+
 func usesModuleManagedProof(module string) bool {
 	switch module {
 	case "csti_detection", "jsonp_callback", "ws_cswsh", "parser_differential", "cors", "second_order", "http_smuggling", "route_auth_bypass", "client_ssti", "idor", "bfla", "mass_assignment", "jwt", "oauth",
 		"rate_limit", "account_enum", "race_condition", "business_logic", "file_upload",
 		"cache_poisoning", "cache_deception", "cpdos", "broken_auth", "csrf", "smuggling", "websocket", "http_methods",
-		"account_recovery", "webhook_security", "tenant_isolation", "session_lifecycle", "secret_exposure":
+		"account_recovery", "webhook_security", "tenant_isolation", "session_lifecycle",
+		// These modules prove a property of one captured response or transport
+		// inspection. Generic payload/control replays neither strengthen that
+		// evidence nor test the same property, and can multiply one page into many
+		// redundant requests when it exposes several cookies or missing headers.
+		"security_headers", "cookie_security", "tls_misconfig", "api_exposure", "api_versioning",
+		"secret_exposure", "sensitive_data", "script_source", "vulnerable_components":
 		return true
 	case "hpp":
 		return true

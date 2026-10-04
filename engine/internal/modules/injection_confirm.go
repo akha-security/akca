@@ -25,7 +25,8 @@ func sqliSignalConfirmed(p payloadgen.Payload, body, baseline, signal string) bo
 	if signal == "" || body == "" {
 		return false
 	}
-	if injectionPayloadReflected(p.Value, body, baseline) && signal != "error_based" && signal != "timing_differential" && signal != "stacked_timing" && signal != "delayed_timing_confirmed" {
+	if injectionPayloadReflected(p.Value, body, baseline) && signal != "union_signal" && signal != "error_based" &&
+		signal != "timing_differential" && signal != "stacked_timing" && signal != "delayed_timing_confirmed" {
 		return false
 	}
 	// Normalize volatile fields (timestamps, UUIDs, CSRF tokens) before
@@ -81,9 +82,6 @@ func xssSignalConfirmed(p payloadgen.Payload, body, baseline, signal string) boo
 
 func cmdInjSignalConfirmed(p payloadgen.Payload, body, baseline, signal string) bool {
 	if signal == "" {
-		return false
-	}
-	if injectionPayloadReflected(p.Value, body, baseline) {
 		return false
 	}
 	switch signal {

@@ -220,6 +220,16 @@ func TestCentralContentHelpersPreserveSpecificProof(t *testing.T) {
 	) {
 		t.Fatal("smuggling canary must still confirm HTTP desync")
 	}
+	if !moduleSignalConfirmed("http_smuggling",
+		defaultPayload("http_smuggling", "cl_te", "akca-smuggle-canary", "http_desync_status_cl_te"),
+		"http_desync_status_cl_te",
+		httpclient.ResponseRecord{Body: "normal", StatusCode: 200},
+		httpclient.ResponseRecord{Body: "not found", StatusCode: 404},
+		false,
+		"",
+	) {
+		t.Fatal("reproducible queued error status must confirm HTTP desync without path reflection")
+	}
 
 	if !moduleSignalConfirmed("file_upload",
 		defaultPayload("file_upload", "marker", "AKCA_UPLOAD_canary", "retrieved_hash_confirmed"),

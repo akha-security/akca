@@ -2,8 +2,11 @@ package modules
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"strings"
 
+	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/oast"
 	"github.com/akha-security/akca/engine/internal/payloadgen"
 	"github.com/akha-security/akca/engine/internal/reflection"
@@ -55,9 +58,9 @@ func (r *Runner) runXSS(ctx context.Context, target ScanTarget) []ModuleFinding 
 		domPayload := verification.DOMXSSPayload()
 		domRR, domErr := r.probeForModule(ctx, "xss", target, domPayload)
 		browserCanaryReflected := false
-		if domErr == nil && r.browser != nil && domRR.Request.Method == "GET" && domRR.Request.URL != "" {
+		if domErr == nil && r.browser != nil && domRR.Request.URL != "" {
 			browserCanaryReflected = verification.CheckDOMPresence(domRR.Response.Body, domPayload)
-			rendered, renderErr := r.browser.Render(ctx, domRR.Request.URL)
+			rendered, renderErr := r.renderProbeInBrowser(ctx, domRR)
 			domExecuted = renderErr == nil && verification.CheckDOMExecution(rendered)
 		}
 		if domExecuted && !sqliErrorRe.MatchString(domRR.Response.Body) {
@@ -77,11 +80,16 @@ func (r *Runner) runXSS(ctx context.Context, target ScanTarget) []ModuleFinding 
 			domPresent = browserCanaryReflected
 		}
 		marker := ""
+		writeLike := !strings.EqualFold(target.Method, http.MethodGet) && !strings.EqualFold(target.Method, http.MethodHead)
+		if domErr == nil && domRR.Response.StatusCode >= 200 && domRR.Response.StatusCode < 400 &&
+			(writeLike || target.Profile.Stable && target.Profile.ReflectionKind == reflection.ReflectionRaw) {
+			// Stored payloads commonly return only 2xx/3xx and do not reflect at the
+			// injection point. Track successful write surfaces as well as stable raw
+			// reflections so later pages can provide independent execution proof.
+			marker = domPayload
+			r.trackStoredMarker(target.EndpointURL, target.Parameter, marker)
+		}
 		if target.Profile.Stable && target.Profile.ReflectionKind == reflection.ReflectionRaw {
-			if domErr == nil {
-				marker = domPayload
-				r.trackStoredMarker(target.EndpointURL, target.Parameter, marker)
-			}
 			if signal == "reflected" {
 				signal = "stored_tracking"
 			}
@@ -99,6 +107,19 @@ func (r *Runner) runXSS(ctx context.Context, target ScanTarget) []ModuleFinding 
 		}
 	}
 	return out
+}
+
+func (r *Runner) renderProbeInBrowser(ctx context.Context, rr httpclient.RequestResponse) (string, error) {
+	if r.browser == nil {
+		return "", fmt.Errorf("browser execution is unavailable")
+	}
+	if strings.EqualFold(rr.Request.Method, "GET") {
+		return r.browser.Render(ctx, rr.Request.URL)
+	}
+	if renderer, ok := r.browser.(BrowserHTMLRenderer); ok {
+		return renderer.RenderHTML(ctx, rr.Response.Body)
+	}
+	return "", fmt.Errorf("browser does not support isolated response rendering")
 }
 
 func detectXSSSignal(p payloadgen.Payload, body, baseline string) string {

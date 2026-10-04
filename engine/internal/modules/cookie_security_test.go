@@ -138,7 +138,9 @@ func TestCookieAndSecurityHeaderDeduplication(t *testing.T) {
 }
 
 func TestRunSingleModuleDoesNotConsumeCookieGuardTwice(t *testing.T) {
+	calls := 0
 	c := &activeDynamicClient{handler: func(method, rawURL string, headers map[string]string) httpclient.ResponseRecord {
+		calls++
 		return httpclient.ResponseRecord{
 			StatusCode: 200,
 			Body:       "normal page",
@@ -150,7 +152,38 @@ func TestRunSingleModuleDoesNotConsumeCookieGuardTwice(t *testing.T) {
 	if findings := r.runSingleModule(context.Background(), "cookie_security", target); len(findings) == 0 {
 		t.Fatal("single-module dispatcher consumed the endpoint guard before cookie module execution")
 	}
+	firstRunCalls := calls
 	if findings := r.runSingleModule(context.Background(), "cookie_security", target); len(findings) != 0 {
-		t.Fatalf("cookie module should remain origin-deduplicated, got %d additional findings", len(findings))
+		t.Fatalf("cookie module should remain response-deduplicated, got %d additional findings", len(findings))
+	}
+	if calls != firstRunCalls {
+		t.Fatalf("same response repeated cookie verification work: calls %d->%d", firstRunCalls, calls)
+	}
+}
+
+func TestCookieSecurityReusesCrawlerResponse(t *testing.T) {
+	calls := 0
+	c := &activeDynamicClient{handler: func(method, rawURL string, headers map[string]string) httpclient.ResponseRecord {
+		calls++
+		return httpclient.ResponseRecord{StatusCode: 500, Body: "unexpected network request"}
+	}}
+	r := newActiveRunner(t, c)
+	observed := &httpclient.RequestResponse{
+		Request: httpclient.RequestRecord{Method: "GET", URL: "https://example.com/login"},
+		Response: httpclient.ResponseRecord{
+			StatusCode: 200,
+			Headers:    map[string]string{"Set-Cookie": "session_id=abc123; Path=/; Secure"},
+			Body:       "login",
+		},
+	}
+	target := ScanTarget{
+		EndpointURL: "https://example.com/login", Method: "GET",
+		ObservedResponse: observed, ObservedComplete: true,
+	}
+	if findings := r.runCookieSecurity(context.Background(), target); len(findings) == 0 {
+		t.Fatal("crawler response headers were not analyzed")
+	}
+	if calls != 0 {
+		t.Fatalf("cookie analysis repeated the crawler request %d time(s)", calls)
 	}
 }

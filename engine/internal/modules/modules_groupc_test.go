@@ -25,6 +25,21 @@ type thresholdDiscoveryClient struct {
 	count   int
 }
 
+type autonomousAccountEnumClient struct{}
+
+func (autonomousAccountEnumClient) Do(_ context.Context, method, rawURL string, body []byte,
+	headers map[string]string) (httpclient.RequestResponse, error) {
+	parsed, _ := url.Parse(rawURL)
+	responseBody := "user not found"
+	if parsed.Query().Get("user") == "admin@example.com" {
+		responseBody = "password reset instructions sent"
+	}
+	return httpclient.RequestResponse{
+		Request:  httpclient.RequestRecord{Method: method, URL: rawURL, Body: string(body), Headers: headers},
+		Response: httpclient.ResponseRecord{StatusCode: 200, Body: responseBody, Headers: map[string]string{"Content-Type": "text/plain"}},
+	}, nil
+}
+
 func (c *thresholdDiscoveryClient) Do(_ context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
 	u, _ := url.Parse(rawURL)
 	account := u.Query().Get("user")
@@ -689,6 +704,17 @@ func TestAccountEnumeration(t *testing.T) {
 	}
 }
 
+func TestAccountEnumerationAutonomousExplicitNegativeDifferential(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	runner := NewRunner("scan-account-enum", autonomousAccountEnumClient{}, scope.NewEngine(cfg), nil,
+		verification.NewEngine(nil, nil), nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
+	target := ScanTarget{EndpointURL: "http://example.com/login", Method: "GET", Parameter: "user"}
+	findings := runner.runAccountEnum(context.Background(), target)
+	if len(findings) != 1 || findings[0].VulnClass != "account_enum" {
+		t.Fatalf("expected one autonomous account-enumeration finding, got %+v", findings)
+	}
+}
+
 func TestParameterPollution(t *testing.T) {
 	c := &groupCClient{responses: map[string]string{
 		"user":       "role is user",
@@ -698,6 +724,20 @@ func TestParameterPollution(t *testing.T) {
 	findings := groupCRunner(t, c).runHPP(context.Background(), target)
 	if len(findings) != 0 {
 		t.Fatal("HPP lead must remain manual until a server-side effect is proven")
+	}
+}
+
+func TestParameterPollutionReadOnlyPrivilegeDifferential(t *testing.T) {
+	c := &groupCClient{responses: map[string]string{
+		"user":       "role is user",
+		"admin":      "role is user",
+		"user+admin": "role is admin elevated",
+		"admin+user": "role is user",
+	}}
+	target := ScanTarget{EndpointURL: "http://example.com/api/profile?role=user", Method: "GET", Parameter: "role"}
+	findings := groupCRunner(t, c).runHPP(context.Background(), target)
+	if len(findings) != 1 || findings[0].Evidence.Signal != "privilege_response_differential" {
+		t.Fatalf("expected one read-only HPP differential finding, got %+v", findings)
 	}
 }
 

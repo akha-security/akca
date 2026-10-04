@@ -182,7 +182,7 @@ func isLikelyLFIParam(param string) bool {
 	}
 	switch p {
 	case "_", "t", "ts", "timestamp", "cb", "cache", "nocache", "v", "ver", "version",
-		"format", "lang", "locale", "theme", "sort", "order", "dir", "asc", "desc",
+		"format", "sort", "order", "dir", "asc", "desc",
 		"limit", "offset", "page_size", "per_page", "count", "qty", "quantity",
 		"price", "amount", "total", "id", "user_id", "product_id", "item_id", "category_id",
 		"account_id", "org_id", "role_id", "status", "state", "is_active", "enabled",

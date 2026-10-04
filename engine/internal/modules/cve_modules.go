@@ -25,6 +25,19 @@ var componentPatterns = []struct {
 	{"nghttp2", "nghttp2", "header_or_body", regexp.MustCompile(`(?i)nghttp2[/ ]([0-9][\w.\-]+)`)},
 	{"vercel", "nextjs", "header_or_body", regexp.MustCompile(`(?i)(?:next(?:\.?js)?|x-powered-by\s*[:=]\s*next\.js)[ /@-]+v?([0-9]+\.[0-9]+\.[0-9]+(?:[-+][\w.-]+)?)`)},
 	{"facebook", "react-server-dom", "body", regexp.MustCompile(`(?i)react-server-dom-(?:webpack|turbopack|parcel)[ /@-]+v?([0-9]+\.[0-9]+\.[0-9]+(?:[-+][\w.-]+)?)`)},
+	{"apache", "tomcat", "header_or_body", regexp.MustCompile(`(?i)(?:apache[ /-]+)?tomcat[/ ]([0-9][\w.\-]+)`)},
+	{"microsoft", "iis", "header", regexp.MustCompile(`(?i)microsoft-iis[/ ]([0-9][\w.\-]+)`)},
+	{"eclipse", "jetty", "header", regexp.MustCompile(`(?i)jetty(?:\([^)]*\))?[/ ]([0-9][\w.\-]+)`)},
+	{"oracle", "weblogic", "header_or_body", regexp.MustCompile(`(?i)weblogic(?: server)?[/ ]([0-9][\w.\-]+)`)},
+	{"nodejs", "express", "header_or_body", regexp.MustCompile(`(?i)(?:express|x-powered-by\s*[:=]\s*express)[ /@-]+v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)`)},
+	{"djangoproject", "django", "header_or_body", regexp.MustCompile(`(?i)django[/ ]v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)`)},
+	{"palletsprojects", "flask", "header_or_body", regexp.MustCompile(`(?i)flask[/ ]v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)`)},
+	{"tiangolo", "fastapi", "header_or_body", regexp.MustCompile(`(?i)fastapi[/ ]v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)`)},
+	{"rubyonrails", "rails", "header_or_body", regexp.MustCompile(`(?i)(?:ruby on rails|rails)[/ ]v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)`)},
+	{"vmware", "spring_boot", "header_or_body", regexp.MustCompile(`(?i)spring[ -]?boot[/ ]v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)`)},
+	{"wordpress", "wordpress", "body", regexp.MustCompile(`(?i)(?:wordpress|generator)[ /"'=:-]+v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)`)},
+	{"drupal", "drupal", "body", regexp.MustCompile(`(?i)drupal[/ "'=:-]+v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)`)},
+	{"joomla", "joomla", "body", regexp.MustCompile(`(?i)joomla!?[/ "'=:-]+v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)`)},
 }
 
 type detectedComponent struct {

@@ -3,6 +3,9 @@ package modules
 import (
 	"context"
 	"strings"
+
+	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/verification"
 )
 
 var cstiPayloads = []struct {
@@ -45,7 +48,36 @@ func (r *Runner) runCSTI(ctx context.Context, target ScanTarget) []ModuleFinding
 		body := rr.Response.Body
 		// The arithmetic result must appear in the body, but the unrendered template payload string itself must NOT appear literally
 		if strings.Contains(body, cp.evalToken) && !strings.Contains(body, cp.payload) && !strings.Contains(baseline.Response.Body, cp.evalToken) {
-			r.emitDiscovery("csti_detection", target, "template_arithmetic_observed", "Arithmetic output observed in HTTP response; frontend execution is unproven")
+			var replays []httpclient.RequestResponse
+			for i := 0; i < 2; i++ {
+				replay, replayErr := r.probe(ctx, target, cp.payload)
+				if replayErr != nil || !cstiSignalConfirmed(replay.Response.Body, baseline.Response.Body, cp.payload, "csti_expression_evaluated", replay.Response.StatusCode) {
+					replays = nil
+					break
+				}
+				replays = append(replays, replay)
+			}
+			controlPayload := strings.Replace(cp.payload, "7777*7777", "7777+7777", 1)
+			control, controlErr := r.probe(ctx, target, controlPayload)
+			if len(replays) == 2 && controlErr == nil && !strings.Contains(control.Response.Body, cp.evalToken) {
+				p := defaultPayload("csti_detection", cp.framework, cp.payload, "csti_expression_evaluated")
+				f := r.verifyAndBuildWithCandidate(ctx, "csti_detection", target, p, baseline, rr,
+					"csti_expression_evaluated", false, false, "", "", func(c *verification.Candidate) {
+						c.RequestedProofType = verification.ProofDifferentialReplay
+						c.NegativeControlSet, c.NegativeControlOK = true, true
+						c.TypedReplayHits = []bool{true, true, true}
+						c.Observations = append(c.Observations,
+							r.observation("csti_detection", target, verification.RolePositiveReplay, 2, replays[0]),
+							r.observation("csti_detection", target, verification.RolePositiveReplay, 3, replays[1]),
+							r.observation("csti_detection", target, verification.RoleNegativeControl, 1, control))
+					})
+				if f != nil {
+					f.Title = "Template expression injection (arithmetic execution confirmed)"
+					f.Severity = "high"
+					f.Description = "A unique arithmetic template expression was evaluated consistently while a paired syntax control did not produce the same result. Browser-side versus server-side execution is not inferred from the HTTP response alone."
+					r.recordFinding(ctx, &out, f, "csti_detection", "csti_expression_evaluated")
+				}
+			}
 		}
 	}
 

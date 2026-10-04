@@ -46,25 +46,20 @@ func (r *Runner) runSecurityHeaders(ctx context.Context, target ScanTarget) []Mo
 		Response: httpclient.ResponseRecord{StatusCode: 200, Body: "", Headers: map[string]string{}},
 	}
 	var out []ModuleFinding
-	missing := 0
+	isHTTPS := false
+	if parsed, parseErr := url.Parse(target.EndpointURL); parseErr == nil {
+		isHTTPS = strings.EqualFold(parsed.Scheme, "https")
+	}
 	for _, h := range criticalSecurityHeaders {
+		if h.signal == "missing_hsts" && !isHTTPS {
+			continue
+		}
 		if headerValue(rr.Response.Headers, h.name) != "" {
 			continue
 		}
-		missing++
-	}
-	// A single omitted defence-in-depth header is noisy.  Keep the existing
-	// threshold for missing-header reports, but do not let it suppress a
-	// positively observed unsafe CSP below.
-	if missing >= 2 {
-		for _, h := range criticalSecurityHeaders {
-			if headerValue(rr.Response.Headers, h.name) != "" {
-				continue
-			}
-			p := defaultPayload("security_headers", h.signal, h.name, h.signal)
-			f := r.verifyAndBuild(ctx, "security_headers", target, p, baseline, rr, h.signal, false, false, "", "")
-			r.recordFinding(ctx, &out, f, "security_headers", h.signal)
-		}
+		p := defaultPayload("security_headers", h.signal, h.name, h.signal)
+		f := r.verifyAndBuild(ctx, "security_headers", target, p, baseline, rr, h.signal, false, false, "", "")
+		r.recordFinding(ctx, &out, f, "security_headers", h.signal)
 	}
 	if v := headerValue(rr.Response.Headers, "X-Frame-Options"); strings.EqualFold(v, "ALLOWALL") {
 		p := defaultPayload("security_headers", "weak_xfo", v, "weak_xfo")

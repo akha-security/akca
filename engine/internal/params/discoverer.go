@@ -116,11 +116,26 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 		}
 	}
 
+	confirmedPassive := make([]DiscoveredParameter, 0, len(passive))
+	passiveHints := make([]DiscoveredParameter, 0, len(passive))
 	for _, p := range passive {
+		if !confirmedPassiveParameter(p) {
+			if activeCandidateHint(p) {
+				passiveHints = append(passiveHints, p)
+			}
+			continue
+		}
+		confirmedPassive = append(confirmedPassive, p)
 		_ = d.persist(endpointID, p)
 	}
-	if PassiveEnoughForSkip(passive, method) {
-		return passive, nil
+	// Captured form/API request bodies are authoritative input surfaces and must
+	// be saved even when known parameters are sufficient to skip active guessing.
+	for _, p := range templateParams {
+		_ = d.persist(endpointID, p)
+	}
+	knownParameters := append(append([]DiscoveredParameter(nil), confirmedPassive...), templateParams...)
+	if PassiveEnoughForSkip(knownParameters, method) {
+		return knownParameters, nil
 	}
 
 	// Method-matched baselines map to prevent comparing GET probes against POST baselines
@@ -198,6 +213,9 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 	confirmedHits := map[string]map[string]struct{}{}
 
 	recordHit := func(name, surfaceKey string) {
+		if _, exists := confirmedHits[name]; !exists && d.maxHits > 0 && len(confirmedHits) >= d.maxHits {
+			return
+		}
 		if _, ok := confirmedHits[name]; !ok {
 			confirmedHits[name] = map[string]struct{}{}
 		}
@@ -205,27 +223,34 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 	}
 
 	probes := 0
-	wordlist := DifferentialWordlist(endpointURL, d.wordlistCap)
-
-	// Inject JS parameters if any
-	if rows, jerr := d.db.Conn().Query(`SELECT DISTINCT name FROM parameters WHERE priority >= 80 AND endpoint_id IN (SELECT id FROM endpoints WHERE scan_id = ?)`, d.scanID); jerr == nil {
+	knownNames := make(map[string]struct{}, len(knownParameters))
+	for _, parameter := range knownParameters {
+		knownNames[parameter.Name] = struct{}{}
+	}
+	// Reuse only a small set of strongly proven names from this scan. Previously
+	// every priority>=80 row was prepended after wordlist truncation, so shared
+	// DOM/header noise could make a nominal 160-name list effectively unlimited.
+	learnedLimit := d.wordlistCap / 4
+	if learnedLimit <= 0 || learnedLimit > 40 {
+		learnedLimit = 40
+	}
+	var learned []string
+	if rows, jerr := d.db.Conn().Query(`
+		SELECT p.name
+		FROM parameters p JOIN endpoints e ON e.id = p.endpoint_id
+		WHERE e.scan_id = ? AND p.priority >= 90
+		GROUP BY p.name
+		ORDER BY MAX(p.priority) DESC, p.name
+		LIMIT ?`, d.scanID, learnedLimit); jerr == nil {
 		defer rows.Close()
 		for rows.Next() {
-			var jsParam string
-			if rows.Scan(&jsParam) == nil {
-				found := false
-				for _, w := range wordlist {
-					if w == jsParam {
-						found = true
-						break
-					}
-				}
-				if !found {
-					wordlist = append([]string{jsParam}, wordlist...)
-				}
+			var name string
+			if rows.Scan(&name) == nil {
+				learned = append(learned, name)
 			}
 		}
 	}
+	wordlist := DifferentialCandidates(endpointURL, passiveHints, learned, knownNames, d.wordlistCap)
 
 	// Phase 1: Fast single-probe pass across all candidates so all wordlist items (url, category, webhook, etc.) get tested
 	// Run probes concurrently using a worker pool to avoid sequential HTTP latency bottleneck.
@@ -284,9 +309,23 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 							}
 							isHit := isParameterHitWithControl(baseFP, fp, randCtrlFP, baseBody, rr.Response.Body, randCtrlBody,
 								cand, randParam, "akca_probe", isDynamic, noiseThreshold)
+							confirmationProbe := false
+							if isHit {
+								if confirmURL, confirmBody := buildCustomQueryProbe(requestURL, cand, "akca_probe"); d.scope.IsInScope(confirmURL) {
+									if confirmRR, confirmErr := d.client.Do(ctx, http.MethodGet, confirmURL, confirmBody, requestHeaders); confirmErr == nil {
+										confirmationProbe = true
+										confirmFP := Fingerprint(confirmRR.Response.StatusCode, confirmRR.Response.Body, confirmRR.Response.Duration.Milliseconds(), confirmRR.Response.Headers)
+										isHit = isParameterHitWithControl(baseFP, confirmFP, randCtrlFP, baseBody, confirmRR.Response.Body, randCtrlBody,
+											cand, randParam, "akca_probe", isDynamic, noiseThreshold)
+									}
+								}
+							}
 
 							hitMu.Lock()
 							probes++
+							if confirmationProbe {
+								probes++
+							}
 							if isHit {
 								recordHit(cand, "query")
 							}
@@ -300,9 +339,22 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 							fp := Fingerprint(pRR.Response.StatusCode, pRR.Response.Body, pRR.Response.Duration.Milliseconds(), pRR.Response.Headers)
 							isPostHit := isParameterHitWithControl(postBaselineFP, fp, randCtrlFP_POST, postBaselineBody, pRR.Response.Body, randCtrlBody_POST,
 								cand, randParam, "akca_probe", isDynamic, noiseThreshold)
+							confirmationProbe := false
+							if isPostHit {
+								confirmJSON := []byte(fmt.Sprintf(`{"%s":"akca_probe"}`, cand))
+								if confirmRR, confirmErr := d.client.Do(ctx, http.MethodPost, requestURL, confirmJSON, jsonHeaders); confirmErr == nil {
+									confirmationProbe = true
+									confirmFP := Fingerprint(confirmRR.Response.StatusCode, confirmRR.Response.Body, confirmRR.Response.Duration.Milliseconds(), confirmRR.Response.Headers)
+									isPostHit = isParameterHitWithControl(postBaselineFP, confirmFP, randCtrlFP_POST, postBaselineBody, confirmRR.Response.Body, randCtrlBody_POST,
+										cand, randParam, "akca_probe", isDynamic, noiseThreshold)
+								}
+							}
 
 							hitMu.Lock()
 							probes++
+							if confirmationProbe {
+								probes++
+							}
 							if isPostHit {
 								recordHit(cand, "post_json")
 								jsonPotentialHits[cand] = struct{}{}
@@ -329,9 +381,23 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 							}
 							isHit := isParameterHitWithControl(baseFP, fp, randCtrlFP, baseBody, rr.Response.Body, randCtrlBody,
 								cand, randParam, "akca_probe", isDynamic, noiseThreshold)
+							confirmationProbe := false
+							if isHit {
+								if confirmBody, confirmLocation, confirmOK := mutateNativeBody(template, cand, "akca_probe"); confirmOK && confirmLocation == location {
+									if confirmRR, confirmErr := d.client.Do(ctx, method, requestURL, confirmBody, bodyProbeHeaders(requestHeaders, confirmLocation)); confirmErr == nil {
+										confirmationProbe = true
+										confirmFP := Fingerprint(confirmRR.Response.StatusCode, confirmRR.Response.Body, confirmRR.Response.Duration.Milliseconds(), confirmRR.Response.Headers)
+										isHit = isParameterHitWithControl(baseFP, confirmFP, randCtrlFP, baseBody, confirmRR.Response.Body, randCtrlBody,
+											cand, randParam, "akca_probe", isDynamic, noiseThreshold)
+									}
+								}
+							}
 
 							hitMu.Lock()
 							probes++
+							if confirmationProbe {
+								probes++
+							}
 							if isHit {
 								recordHit(cand, string(location))
 								if location == LocationJSON {
@@ -419,11 +485,7 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 		_ = d.persist(targetEndpointID, p)
 	}
 
-	for _, p := range templateParams {
-		_ = d.persist(endpointID, p)
-	}
-
-	all := append(passive, differential...)
+	all := append(confirmedPassive, differential...)
 	all = append(all, templateParams...)
 	return all, nil
 }
@@ -670,9 +732,19 @@ func (d *Discoverer) probeSingleParam(ctx context.Context, ep storage.DiscoveryE
 		if probeURL, body := buildQueryProbe(requestURL, param); d.scope.IsInScope(probeURL) {
 			if rr, perr := d.client.Do(ctx, http.MethodGet, probeURL, body, requestHeaders); perr == nil {
 				fp := Fingerprint(rr.Response.StatusCode, rr.Response.Body, rr.Response.Duration.Milliseconds(), rr.Response.Headers)
-				if isParameterHitWithControl(baseline, fp, controlFP, baselineRR.Response.Body, rr.Response.Body, controlBody,
-					param, randParam, "akca_probe", false, 128) {
-					_ = d.db.SaveParameter(ep.ID, param, "query", 75)
+				isHit := isParameterHitWithControl(baseline, fp, controlFP, baselineRR.Response.Body, rr.Response.Body, controlBody,
+					param, randParam, "akca_probe", false, 128)
+				if isHit {
+					if replayRR, replayErr := d.client.Do(ctx, http.MethodGet, probeURL, body, requestHeaders); replayErr == nil {
+						replayFP := Fingerprint(replayRR.Response.StatusCode, replayRR.Response.Body, replayRR.Response.Duration.Milliseconds(), replayRR.Response.Headers)
+						isHit = isParameterHitWithControl(baseline, replayFP, controlFP, baselineRR.Response.Body, replayRR.Response.Body, controlBody,
+							param, randParam, "akca_probe", false, 128)
+					} else {
+						isHit = false
+					}
+				}
+				if isHit {
+					_ = d.db.SaveParameter(ep.ID, param, string(LocationQuery), 75)
 				}
 			}
 		}
@@ -691,8 +763,18 @@ func (d *Discoverer) probeSingleParam(ctx context.Context, ep storage.DiscoveryE
 			headers := bodyProbeHeaders(requestHeaders, location)
 			if rr, probeErr := d.client.Do(ctx, m, requestURL, body, headers); probeErr == nil {
 				fp := Fingerprint(rr.Response.StatusCode, rr.Response.Body, rr.Response.Duration.Milliseconds(), rr.Response.Headers)
-				if isParameterHitWithControl(baseline, fp, controlFP, baselineRR.Response.Body, rr.Response.Body, controlBody,
-					param, randParam, "akca_probe", false, 128) {
+				isHit := isParameterHitWithControl(baseline, fp, controlFP, baselineRR.Response.Body, rr.Response.Body, controlBody,
+					param, randParam, "akca_probe", false, 128)
+				if isHit {
+					if replayRR, replayErr := d.client.Do(ctx, m, requestURL, body, headers); replayErr == nil {
+						replayFP := Fingerprint(replayRR.Response.StatusCode, replayRR.Response.Body, replayRR.Response.Duration.Milliseconds(), replayRR.Response.Headers)
+						isHit = isParameterHitWithControl(baseline, replayFP, controlFP, baselineRR.Response.Body, replayRR.Response.Body, controlBody,
+							param, randParam, "akca_probe", false, 128)
+					} else {
+						isHit = false
+					}
+				}
+				if isHit {
 					_ = d.db.SaveParameter(ep.ID, param, string(location), 85)
 				}
 			}
@@ -958,7 +1040,10 @@ func isParameterHitWithControl(baseFP, probeFP, randCtrlFP ResponseFingerprint, 
 
 func normalizeUnknownParameterResponse(body, parameter, value string) string {
 	normalized := strings.ToLower(strings.TrimSpace(body))
-	for _, token := range []string{strings.ToLower(parameter), strings.ToLower(value)} {
+	for _, token := range []string{
+		strings.ToLower(parameter), strings.ToLower(value),
+		"akca_probe", "akca_confirm",
+	} {
 		if token != "" {
 			normalized = strings.ReplaceAll(normalized, token, "__akca_value__")
 		}
@@ -1031,6 +1116,10 @@ func (d *Discoverer) SetMaxProbes(n int) {
 
 func (d *Discoverer) SetWordlistCap(n int) {
 	d.wordlistCap = n
+}
+
+func (d *Discoverer) SetMaxHits(n int) {
+	d.maxHits = n
 }
 
 func (d *Discoverer) SetMaxTransferProbes(n int) {

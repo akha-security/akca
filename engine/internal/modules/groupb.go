@@ -499,37 +499,55 @@ func (r *Runner) stableNativeBaseline(ctx context.Context, target ScanTarget) (h
 // caller can emit a diagnostic skip event instead of silently dropping the target.
 func (r *Runner) stableNativeBaselineForModule(ctx context.Context, module string, target ScanTarget) (httpclient.RequestResponse, bool, string) {
 	value := nativeTargetValue(target)
-	var first httpclient.RequestResponse
+	var samples []httpclient.RequestResponse
 	for i := 0; i < 3; i++ {
 		rr, err := r.probeForModule(ctx, module, target, value)
 		if err != nil {
-			if i == 0 {
-				first, err = r.cachedEmptyProbe(ctx, target)
-				if err != nil {
-					return httpclient.RequestResponse{}, false, fmt.Sprintf("baseline probe failed on attempt %d: %v", i+1, err)
-				}
-			} else {
-				// Don't fail baseline on subsequent retry network noise if first attempt succeeded
-				break
-			}
-		}
-		if i == 0 {
-			first = rr
 			continue
 		}
-		if rr.Response.StatusCode != first.Response.StatusCode {
-			return httpclient.RequestResponse{}, false, fmt.Sprintf(
-				"unstable baseline: status code changed from %d to %d on attempt %d",
-				first.Response.StatusCode, rr.Response.StatusCode, i+1)
-		}
-		ratio := bodyDiffRatio(normalizeVolatileFields(first.Response.Body), normalizeVolatileFields(rr.Response.Body))
-		if ratio > 0.85 {
-			return httpclient.RequestResponse{}, false, fmt.Sprintf(
-				"unstable baseline: body diff ratio %.4f exceeds threshold 0.85 on attempt %d",
-				ratio, i+1)
+		samples = append(samples, rr)
+	}
+	if len(samples) < 2 {
+		fallback, err := r.cachedEmptyProbe(ctx, target)
+		if err == nil {
+			samples = append(samples, fallback)
 		}
 	}
-	return first, true, ""
+	if len(samples) < 2 {
+		return httpclient.RequestResponse{}, false, "baseline probe produced fewer than two usable responses"
+	}
+	statusCounts := map[int]int{}
+	modalStatus, modalCount := 0, 0
+	for _, sample := range samples {
+		statusCounts[sample.Response.StatusCode]++
+		if statusCounts[sample.Response.StatusCode] > modalCount {
+			modalStatus, modalCount = sample.Response.StatusCode, statusCounts[sample.Response.StatusCode]
+		}
+	}
+	if modalCount < 2 {
+		return httpclient.RequestResponse{}, false, "unstable baseline: no status code was reproduced"
+	}
+	var modal []httpclient.RequestResponse
+	for _, sample := range samples {
+		if sample.Response.StatusCode == modalStatus {
+			modal = append(modal, sample)
+		}
+	}
+	bestRatio := 2.0
+	best := modal[0]
+	for i := 0; i < len(modal); i++ {
+		for j := i + 1; j < len(modal); j++ {
+			ratio := bodyDiffRatio(normalizeVolatileFields(modal[i].Response.Body), normalizeVolatileFields(modal[j].Response.Body))
+			if ratio < bestRatio {
+				bestRatio = ratio
+				best = modal[i]
+			}
+		}
+	}
+	if bestRatio > 0.85 {
+		return httpclient.RequestResponse{}, false, fmt.Sprintf("unstable baseline: best reproduced body diff ratio %.4f exceeds threshold 0.85", bestRatio)
+	}
+	return best, true, ""
 }
 
 func nativeTargetValue(target ScanTarget) string {

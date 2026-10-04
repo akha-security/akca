@@ -193,14 +193,27 @@ func (r *Runner) runHTTPSmuggling(ctx context.Context, target ScanTarget) []Modu
 		}
 		var runs []httpclient.RequestResponse
 		var lastCanary string
+		evidenceMode := ""
 		for i := 0; i < 2; i++ {
 			canary := randomProbeToken()
 			attack := variant.buildRawReq(u.Host, path, canary)
 			rr, e := r.rawSmugglingExchange(ctx, target, attack, normal)
 			noteRawProtocolExchange(ctx, rr, e)
-			if e != nil || !strings.Contains(rr.Response.Body, "akca-smuggle-"+canary) {
+			if e != nil {
 				break
 			}
+			mode := ""
+			if strings.Contains(rr.Response.Body, "akca-smuggle-"+canary) {
+				mode = "canary"
+			} else if rr.Response.StatusCode >= 400 && rr.Response.StatusCode <= 599 &&
+				rr.Response.StatusCode != control.Response.StatusCode {
+				mode = "status"
+			}
+			if mode == "" || (evidenceMode != "" && mode != evidenceMode) ||
+				(len(runs) > 0 && mode == "status" && runs[0].Response.StatusCode != rr.Response.StatusCode) {
+				break
+			}
+			evidenceMode = mode
 			runs = append(runs, rr)
 			lastCanary = canary
 		}
@@ -208,6 +221,9 @@ func (r *Runner) runHTTPSmuggling(ctx context.Context, target ScanTarget) []Modu
 			continue
 		}
 		signal := "http_desync_" + variant.name
+		if evidenceMode == "status" {
+			signal = "http_desync_status_" + variant.name
+		}
 		p := defaultPayload("http_smuggling", signal, lastCanary, signal)
 		f := r.verifyAndBuildWithCandidate(ctx, "http_smuggling", target, p, baseline, runs[1], signal, false, false, "", "", func(c *verification.Candidate) {
 			c.RequestedProofType = verification.ProofProtocolDesync
@@ -219,7 +235,12 @@ func (r *Runner) runHTTPSmuggling(ctx context.Context, target ScanTarget) []Modu
 		if f != nil {
 			f.Severity = "critical"
 			f.Title = variant.title
-			f.Description = variant.description + " Two independent raw connections reproduced a canary response absent from the clean sequence."
+			if evidenceMode == "status" {
+				f.Severity = "high"
+				f.Description = variant.description + " Two independent raw connections shifted the queued follow-up request to the same unexpected error status while the clean same-connection control stayed successful. No response-body reflection was required."
+			} else {
+				f.Description = variant.description + " Two independent raw connections reproduced a canary response absent from the clean sequence."
+			}
 			r.recordFinding(ctx, &out, f, "http_smuggling", signal)
 			return out
 		}
@@ -318,18 +339,27 @@ func readHTTPResponse(reader *bufio.Reader) (int, string) {
 	return response.StatusCode, string(body)
 }
 
-func httpSmugglingSignalConfirmed(signal, body, expectedCanary string, status int) bool {
-	if status <= 0 || !strings.HasPrefix(signal, "http_desync_") || strings.TrimSpace(body) == "" {
+func httpSmugglingSignalConfirmed(signal, body, expectedCanary string, status, baselineStatus int) bool {
+	if status <= 0 || !strings.HasPrefix(signal, "http_desync_") {
 		return false
 	}
+	statusEvidence := strings.HasPrefix(signal, "http_desync_status_")
+	variantSignal := strings.TrimPrefix(signal, "http_desync_")
+	variantSignal = strings.TrimPrefix(variantSignal, "status_")
 	knownVariant := false
 	for _, variant := range smugglingVariants {
-		if signal == "http_desync_"+variant.name {
+		if variantSignal == variant.name {
 			knownVariant = true
 			break
 		}
 	}
 	if !knownVariant {
+		return false
+	}
+	if statusEvidence {
+		return status >= 400 && status <= 599 && baselineStatus >= 200 && baselineStatus < 400
+	}
+	if strings.TrimSpace(body) == "" {
 		return false
 	}
 	if expectedCanary != "" && strings.Contains(body, expectedCanary) {

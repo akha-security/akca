@@ -41,6 +41,7 @@ func (r *Runner) runCloudPosture(ctx context.Context, target ScanTarget) []Modul
 
 func (r *Runner) gatherClientSideContent(ctx context.Context, target ScanTarget) []string {
 	var bodies []string
+	seenURLs := map[string]struct{}{}
 	rr, err := r.cachedEmptyProbe(ctx, target)
 	if err == nil && len(rr.Response.Body) > 0 {
 		bodies = append(bodies, rr.Response.Body)
@@ -50,8 +51,29 @@ func (r *Runner) gatherClientSideContent(ctx context.Context, target ScanTarget)
 		return bodies
 	}
 	base := u.Scheme + "://" + u.Host
+	var scriptURLs []string
 	for _, path := range []string{"/main.js", "/app.js", "/static/js/main.js", "/assets/index.js", "/env.js", "/config.js"} {
-		rawURL := strings.TrimRight(base, "/") + path
+		scriptURLs = append(scriptURLs, strings.TrimRight(base, "/")+path)
+	}
+	if r.db != nil {
+		if endpoints, listErr := r.db.ListDiscoveryEndpoints(r.scanID, 500); listErr == nil {
+			for _, endpoint := range endpoints {
+				parsed, parseErr := url.Parse(endpoint.URL)
+				if parseErr != nil || !strings.EqualFold(parsed.Host, u.Host) {
+					continue
+				}
+				pathLower := strings.ToLower(parsed.Path)
+				if strings.HasSuffix(pathLower, ".js") || strings.HasSuffix(pathLower, ".mjs") || strings.HasSuffix(pathLower, ".cjs") {
+					scriptURLs = append(scriptURLs, endpoint.URL)
+				}
+			}
+		}
+	}
+	for _, rawURL := range scriptURLs {
+		if _, exists := seenURLs[rawURL]; exists {
+			continue
+		}
+		seenURLs[rawURL] = struct{}{}
 		if !r.scope.IsInScope(rawURL) {
 			continue
 		}

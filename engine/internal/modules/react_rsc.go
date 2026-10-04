@@ -8,6 +8,7 @@ import (
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/payloadgen"
+	"github.com/akha-security/akca/engine/internal/verification"
 )
 
 type reactRSCProbe struct {
@@ -62,13 +63,35 @@ func (r *Runner) runReactRSCRCE(ctx context.Context, target ScanTarget) []Module
 			continue
 		}
 		if reactRSCDecoderCrash(rr.Response) && !reactRSCDecoderCrash(benign.Response) {
-			r.emitOnce("react-rsc-decoder-crash:"+probeURL, "module_notice",
-				"React RSC decoder differential observed; runtime execution evidence is required before reporting RCE",
-				map[string]interface{}{
-					"url":     probeURL,
-					"variant": probe.name,
-					"status":  rr.Response.StatusCode,
+			var replays []httpclient.RequestResponse
+			for i := 0; i < 2; i++ {
+				replay, replayErr := r.client.Do(ctx, http.MethodPost, probeURL, []byte(probe.payload), headers)
+				if replayErr != nil || !reactRSCDecoderCrash(replay.Response) {
+					replays = nil
+					break
+				}
+				replays = append(replays, replay)
+			}
+			if len(replays) != 2 {
+				continue
+			}
+			payload.ExpectedSignal = "decoder_crash_differential"
+			finding := r.verifyAndBuildWithCandidate(ctx, "react_rsc_rce", probeTarget, payload, benign, rr,
+				"decoder_crash_differential", false, false, "", "", func(candidate *verification.Candidate) {
+					candidate.RequestedProofType = verification.ProofDifferentialReplay
+					candidate.NegativeControlSet, candidate.NegativeControlOK = true, true
+					candidate.TypedReplayHits = []bool{true, true, true}
+					candidate.Observations = append(candidate.Observations,
+						r.observation("react_rsc_rce", probeTarget, verification.RoleNegativeControl, 1, benign),
+						r.observation("react_rsc_rce", probeTarget, verification.RolePositiveReplay, 2, replays[0]),
+						r.observation("react_rsc_rce", probeTarget, verification.RolePositiveReplay, 3, replays[1]))
 				})
+			if finding != nil {
+				finding.Title = "React Server Components decoder crash differential"
+				finding.Severity = "medium"
+				finding.Description = "Malformed RSC input reproducibly triggered a decoder-specific server error while the benign RSC control did not. This is denial-of-service/error-path evidence, not proof of remote code execution."
+				r.recordFinding(ctx, &findings, finding, "react_rsc_rce", "decoder_crash_differential")
+			}
 		}
 	}
 	return findings

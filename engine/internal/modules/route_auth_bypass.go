@@ -133,6 +133,14 @@ func (r *Runner) runRouteAuthBypass(ctx context.Context, target ScanTarget) []Mo
 		}
 
 		bound := ownerOK && sameResourceFingerprint(owner.Response.Body, probeRR.Response.Body)
+		if !ownerOK && isAuthBlocked && successfulResourceResponse(probeRR.Response) &&
+			anonymousRouteResourceBound(targetURL, probeRR.Response.Body) {
+			// For an unauthenticated scan there is no privileged owner response to
+			// bind. A denied canonical route becoming a stable non-login resource on
+			// an equivalent transformed route is sufficient once the sibling soft-404
+			// and public-root controls above have passed.
+			bound = true
+		}
 		if canary != "" && !strings.Contains(baselineRR.Response.Body, canary) && strings.Contains(probeRR.Response.Body, canary) {
 			bound = true
 		}
@@ -178,6 +186,23 @@ func (r *Runner) runRouteAuthBypass(ctx context.Context, target ScanTarget) []Mo
 	}
 
 	return out
+}
+
+func anonymousRouteResourceBound(targetURL, body string) bool {
+	lowerBody := strings.ToLower(body)
+	if authDeniedBody(lowerBody) || strings.Contains(lowerBody, "public documentation") {
+		return false
+	}
+	if privateObjectRecordSignal(lowerBody) {
+		return true
+	}
+	lowerURL := strings.ToLower(targetURL)
+	for _, marker := range []string{"admin", "dashboard", "manage", "settings", "internal", "private", "account", "billing", "users"} {
+		if strings.Contains(lowerURL, marker) && strings.Contains(lowerBody, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func isRouteBypassSuccessful(probe, baseline httpclient.ResponseRecord) bool {

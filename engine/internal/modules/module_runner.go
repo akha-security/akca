@@ -42,12 +42,13 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 	}
 	allocation := r.allocateModuleBudget(module, targets)
 	defer r.finishModuleBudget(module, allocation)
-	eligible := 0
+	eligibleWork := make(map[string]struct{})
 	for _, target := range targets {
 		if r.budgetEligible(module, target) {
-			eligible++
+			eligibleWork[budgetWorkKey(module, target)] = struct{}{}
 		}
 	}
+	eligible := len(eligibleWork)
 	planData := map[string]interface{}{"scan_id": r.scanID, "module": module, "targets": len(targets), "targets_eligible": eligible, "budget_mode": "unlimited"}
 	planData["assurance_profile"] = AssuranceProfile(module)
 	if allocation != nil {

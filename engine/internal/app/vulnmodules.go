@@ -173,17 +173,20 @@ func (e *Engine) runVulnModulesSequential(ctx context.Context) error {
 			"phase": phase, "module": item.name, "module_index": moduleIndex, "module_total": moduleTotal,
 		})
 		findings, err := runner.RunModuleFromDB(ctx, item.name, e.moduleTargetLimit())
+		status := "completed"
 		if err != nil {
 			if errors.Is(err, modules.ErrModuleCoverageIncomplete) {
 				hasCoverageGap = true
+				status = "partial"
 			} else {
 				hasError = true
+				status = "failed"
 				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": phase, "module": item.name})
 			}
 		}
 		_ = e.Emit("phase_finished", item.title, map[string]interface{}{
 			"phase": phase, "module": item.name, "findings": len(findings),
-			"module_index": moduleIndex, "module_total": moduleTotal,
+			"module_index": moduleIndex, "module_total": moduleTotal, "status": status,
 		})
 		cat := modules.ModuleCategory(item.name)
 		if lastModuleForCategory[cat] == moduleOffset {

@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
@@ -77,16 +78,12 @@ func (r *Runner) runJWT(ctx context.Context, target ScanTarget) []ModuleFinding 
 		return nil
 	}
 	validIdentity := jwtIdentityFromResponse(valid.Response)
-	if validIdentity == "" {
-		r.emitSkip("jwt", target, "protected endpoint did not return a stable identity")
-		return nil
-	}
 	// Establish a rejected invalid-signature control before evaluating any
 	// signature-bypass candidate. Without this control, a generic 2xx endpoint
 	// or a response that ignores Authorization could be misread as JWT bypass.
 	invalidToken := invalidateJWTSignature(validToken)
 	invalid, err := r.probeWithHeaders(ctx, target, "", map[string]string{"Authorization": "Bearer " + invalidToken})
-	if err != nil || jwtIdentityFromResponse(invalid.Response) == validIdentity {
+	if err != nil || !jwtInvalidControlRejected(valid.Response, invalid.Response, validIdentity) {
 		return nil
 	}
 
@@ -95,6 +92,12 @@ func (r *Runner) runJWT(ctx context.Context, target ScanTarget) []ModuleFinding 
 		unverifiedResp, err := r.probeWithHeaders(ctx, target, "", map[string]string{"Authorization": "Bearer " + unverifiedToken})
 		if err == nil && unverifiedResp.Response.StatusCode >= 200 && unverifiedResp.Response.StatusCode < 300 {
 			probeIdentity := jwtIdentityFromResponse(unverifiedResp.Response)
+			if validIdentity == "" && jwtProtectedResponseEquivalent(valid.Response, unverifiedResp.Response) {
+				if out := r.recordOpaqueJWTBypass(ctx, target, "unverified_signature", unverifiedToken,
+					valid, invalid, unverifiedResp, "The server accepted a JWT with an altered payload and invalid signature."); len(out) > 0 {
+					return out
+				}
+			}
 			if probeIdentity != "" && (probeIdentity != validIdentity || strings.Contains(strings.ToLower(probeIdentity), "akca-admin")) {
 				payload := defaultPayload("jwt", "unverified_signature", unverifiedToken, "identity_change_confirmed")
 				finding := r.verifyAndBuildWithCandidate(ctx, "jwt", target, payload, valid, unverifiedResp,
@@ -220,6 +223,11 @@ func (r *Runner) runJWT(ctx context.Context, target ScanTarget) []ModuleFinding 
 			continue
 		}
 		probeIdentity := jwtIdentityFromResponse(probe.Response)
+		if validIdentity == "" && jwtProtectedResponseEquivalent(valid.Response, probe.Response) {
+			if out := r.recordOpaqueJWTBypass(ctx, target, tp.name, tp.token, valid, invalid, probe, tp.desc); len(out) > 0 {
+				return out
+			}
+		}
 		if probeIdentity == "" || probeIdentity == validIdentity || !strings.Contains(strings.ToLower(probeIdentity), "akca-admin") {
 			continue
 		}
@@ -249,6 +257,60 @@ func (r *Runner) runJWT(ctx context.Context, target ScanTarget) []ModuleFinding 
 		}
 	}
 	return nil
+}
+
+func jwtInvalidControlRejected(valid, invalid httpclient.ResponseRecord, validIdentity string) bool {
+	if validIdentity != "" {
+		return jwtIdentityFromResponse(invalid) != validIdentity
+	}
+	if valid.StatusCode < 200 || valid.StatusCode >= 300 {
+		return false
+	}
+	if invalid.StatusCode == http.StatusUnauthorized || invalid.StatusCode == http.StatusForbidden {
+		return true
+	}
+	return !jwtProtectedResponseEquivalent(valid, invalid)
+}
+
+func jwtProtectedResponseEquivalent(valid, candidate httpclient.ResponseRecord) bool {
+	return candidate.StatusCode >= 200 && candidate.StatusCode < 300 &&
+		candidate.StatusCode == valid.StatusCode &&
+		sameResourceFingerprint(valid.Body, candidate.Body)
+}
+
+func (r *Runner) recordOpaqueJWTBypass(ctx context.Context, target ScanTarget, variant, token string,
+	valid, invalid, accepted httpclient.RequestResponse, description string) []ModuleFinding {
+	var replays []httpclient.RequestResponse
+	for i := 0; i < 2; i++ {
+		replay, err := r.probeWithHeaders(ctx, target, "", map[string]string{"Authorization": "Bearer " + token})
+		if err != nil || !jwtProtectedResponseEquivalent(valid.Response, replay.Response) {
+			return nil
+		}
+		replays = append(replays, replay)
+	}
+	payload := defaultPayload("jwt", variant, token, "protected_resource_access")
+	finding := r.verifyAndBuildWithCandidate(ctx, "jwt", target, payload, invalid, accepted,
+		"protected_resource_access", false, false, "", "", func(candidate *verification.Candidate) {
+			candidate.RequestedProofType = verification.ProofDifferentialReplay
+			candidate.NegativeControlSet = true
+			candidate.NegativeControlOK = true
+			candidate.TypedReplayHits = []bool{true, true, true}
+			candidate.Observations = append(candidate.Observations,
+				r.observation("jwt", target, verification.RoleBaselineReplay, 1, valid),
+				r.observation("jwt", target, verification.RoleNegativeControl, 1, invalid),
+				r.observation("jwt", target, verification.RolePositiveReplay, 2, replays[0]),
+				r.observation("jwt", target, verification.RolePositiveReplay, 3, replays[1]),
+			)
+		})
+	if finding == nil {
+		return nil
+	}
+	finding.Title = fmt.Sprintf("JWT Authentication Bypass (%s)", variant)
+	finding.Description = "A valid JWT established access to a protected resource, an invalid-signature control was rejected, and the tampered token reproduced the valid protected response across independent replays. " + description
+	finding.Severity = "critical"
+	var out []ModuleFinding
+	r.recordFinding(ctx, &out, finding, "jwt", "protected_resource_access")
+	return out
 }
 
 func (r *Runner) capturedJWTForTarget(target ScanTarget) string {
@@ -615,6 +677,9 @@ func buildJWT(alg, headerJSON, payloadJSON string) string {
 }
 
 func jwtSignal(body, baseline, signal string) bool {
+	if signal == "protected_resource_access" {
+		return body != baseline
+	}
 	return signal == "identity_change_confirmed" && body != baseline &&
 		strings.Contains(strings.ToLower(body), "akca-admin")
 }

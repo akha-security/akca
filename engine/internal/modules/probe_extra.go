@@ -57,6 +57,15 @@ func (r *Runner) cachedEmptyProbe(ctx context.Context, target ScanTarget) (httpc
 	return rr, nil
 }
 
+func observedResponse(ctx context.Context, target ScanTarget, requireComplete bool) (httpclient.RequestResponse, bool) {
+	if target.ObservedResponse == nil || target.ObservedResponse.Response.StatusCode <= 0 || (requireComplete && !target.ObservedComplete) {
+		return httpclient.RequestResponse{}, false
+	}
+	rr := *target.ObservedResponse
+	noteCachedEvidence(ctx, rr)
+	return rr, true
+}
+
 func (r *Runner) cachedEmptyHeaderProbe(ctx context.Context, target ScanTarget) (httpclient.RequestResponse, error) {
 	key := fmt.Sprintf("%s|%s|%s|%s|%s|%s", target.EndpointURL, strings.ToUpper(target.Method), target.Parameter, target.Location, target.Profile.ParameterLocation, target.Profile.ContentType)
 	r.baselineMu.Lock()
@@ -95,9 +104,6 @@ func (r *Runner) probeHeadersOnlyForModule(ctx context.Context, module string, t
 }
 
 func (r *Runner) probeWithHeadersForModule(ctx context.Context, module string, target ScanTarget, payload string, headers map[string]string) (httpclient.RequestResponse, error) {
-	if module != "" && len(headers) > 0 && !moduleAllowsHeaderPayloads(module) {
-		headers = nil
-	}
 	method := strings.ToUpper(target.Method)
 	if method == "" {
 		method = "GET"

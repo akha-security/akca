@@ -1,10 +1,11 @@
 package config
 
 const (
-	// The global/module request budget remains unlimited. Crawl traffic and
-	// visited pages are bounded separately, while the endpoint inventory stays
-	// unlimited so method variants and hidden routes are not discarded.
+	// Full Scan does not impose an implicit post-discovery module budget. Each
+	// module completes its finite, deduplicated workload unless the operator
+	// explicitly supplies a request or per-target budget.
 	FullScanRequestBudget        = 0
+	FullScanRequestsPerTarget    = 0
 	FullScanCrawlerRequestBudget = 1_500
 	FullScanMaxPages             = 1_500
 	FullScanMaxEndpoints         = 0
@@ -19,6 +20,9 @@ func ApplyScanProfile(cfg ScanConfig) ScanConfig {
 	}
 	if !cfg.Explicit.RequestBudget {
 		cfg.RequestBudget = FullScanRequestBudget
+	}
+	if !cfg.Explicit.RequestsPerTarget {
+		cfg.RequestsPerTarget = FullScanRequestsPerTarget
 	}
 	if !cfg.Explicit.CrawlerRequestBudget {
 		cfg.CrawlerRequestBudget = FullScanCrawlerRequestBudget

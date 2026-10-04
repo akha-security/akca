@@ -28,28 +28,28 @@ var proofPolicies = map[string]ModuleProofPolicy{
 	"command_injection":      replayPolicy("command_injection", ProofDifferentialReplay, ProofTiming, ProofOAST, ProofRuntimeTrace),
 	"lfi":                    replayPolicy("lfi", ProofDifferentialReplay, ProofFileRetrieval, ProofRuntimeTrace),
 	"nosql":                  replayPolicy("nosql", ProofDifferentialReplay, ProofTiming),
-	"prototype_pollution":    replayPolicy("prototype_pollution", ProofDifferentialReplay),
+	"prototype_pollution":    prototypePollutionPolicy("prototype_pollution"),
 	"ldap_xpath_injection":   replayPolicy("ldap_xpath_injection", ProofDifferentialReplay, ProofHeaderEvidence, ProofRuntimeTrace),
 	"crlf":                   headerPolicy("crlf"),
 	"open_redirect":          headerPolicy("open_redirect"),
 	"host_header":            headerPolicy("host_header"),
-	"cors":                   headerPolicy("cors"),
+	"cors":                   corsPolicy("cors"),
 	"second_order":           storedPolicy("second_order"),
 	"client_ssti":            domPolicy("client_ssti"),
 	"blind_xss":              oastPolicy("blind_xss"),
 	"file_upload":            statePolicy("file_upload", ProofFileRetrieval),
-	"idor":                   identityPolicy("idor"),
+	"idor":                   idorPolicy("idor"),
 	"bfla":                   identityPolicy("bfla"),
 	"mass_assignment":        statePolicy("mass_assignment", ProofStateMutation, ProofDifferentialReplay),
 	"race_condition":         statePolicy("race_condition", ProofStateMutation),
 	"business_logic":         statePolicy("business_logic", ProofStateMutation),
-	"jwt":                    identityPolicy("jwt"),
+	"jwt":                    jwtPolicy("jwt"),
 	"oauth":                  replayPolicy("oauth", ProofDifferentialReplay),
 	"rate_limit":             replayPolicy("rate_limit", ProofDifferentialReplay, ProofPolicyViolation),
 	"account_enum":           replayPolicy("account_enum", ProofDifferentialReplay, ProofTiming),
 	"cache_poisoning":        replayPolicy("cache_poisoning", ProofDifferentialReplay),
 	"cache_deception":        replayPolicy("cache_deception", ProofDifferentialReplay),
-	"hpp":                    statePolicy("hpp", ProofStateMutation),
+	"hpp":                    hppPolicy("hpp"),
 	"broken_auth":            anonymousPolicy("broken_auth"),
 	"improper_auth":          anonymousPolicy("improper_auth"),
 	"route_auth_bypass":      replayPolicy("route_auth_bypass", ProofDifferentialReplay),
@@ -97,11 +97,11 @@ var proofPolicies = map[string]ModuleProofPolicy{
 	"saas_exposure":            activeContentPolicy("saas_exposure", ProofContentEvidence),
 	"cpdos":                    activeContentPolicy("cpdos", ProofContentEvidence, ProofDifferentialReplay),
 	"proxy_path_confusion":     contentPolicy("proxy_path_confusion"),
-	"ws_cswsh":                 crossOriginPolicy("ws_cswsh"),
+	"ws_cswsh":                 wsCSWSHPolicy("ws_cswsh"),
 	"pdf_injection":            contentPolicy("pdf_injection"),
 	"jsonp_callback":           crossOriginPolicy("jsonp_callback"),
-	"react_rsc_rce":            replayPolicy("react_rsc_rce", ProofRuntimeTrace),
-	"server_side_js_injection": contentPolicy("server_side_js_injection"),
+	"react_rsc_rce":            replayPolicy("react_rsc_rce", ProofRuntimeTrace, ProofDifferentialReplay),
+	"server_side_js_injection": activeContentPolicy("server_side_js_injection", ProofDifferentialReplay, ProofContentEvidence, ProofTiming, ProofOAST, ProofRuntimeTrace),
 	"csti_detection":           domPolicy("csti_detection"),
 	"swagger_exposure":         contentPolicy("swagger_exposure"),
 	"sensitive_file_discovery": contentPolicy("sensitive_file_discovery"),
@@ -126,6 +126,12 @@ var proofPolicies = map[string]ModuleProofPolicy{
 
 func crossOriginPolicy(module string) ModuleProofPolicy {
 	return ModuleProofPolicy{Module: module, Version: CurrentProofPolicyVersion, MinimumIndependentRuns: 2, RequiresNativeBaseline: true, RequiresNegativeControl: true, RequiresTypedSignal: true, AllowedProofTypes: []ProofType{ProofCrossOriginRead}, EvidenceClass: "browser_private_read"}
+}
+
+func wsCSWSHPolicy(module string) ModuleProofPolicy {
+	policy := crossOriginPolicy(module)
+	policy.AllowedProofTypes = append(policy.AllowedProofTypes, ProofConfiguration)
+	return policy
 }
 
 func replayPolicy(module string, allowed ...ProofType) ModuleProofPolicy {
@@ -161,6 +167,42 @@ func identityPolicy(module string) ModuleProofPolicy {
 	}
 }
 
+func idorPolicy(module string) ModuleProofPolicy {
+	return ModuleProofPolicy{
+		Module: module, Version: CurrentProofPolicyVersion, MinimumIndependentRuns: 2,
+		RequiresNativeBaseline: true, RequiresNegativeControl: true,
+		AllowedProofTypes: []ProofType{ProofIdentityBoundary, ProofStateMutation, ProofDifferentialReplay},
+		EvidenceClass:     "object_authorization_or_differential", RequiresTypedSignal: true,
+	}
+}
+
+func hppPolicy(module string) ModuleProofPolicy {
+	return ModuleProofPolicy{
+		Module: module, Version: CurrentProofPolicyVersion, MinimumIndependentRuns: 2,
+		RequiresNativeBaseline: true, RequiresNegativeControl: true,
+		AllowedProofTypes: []ProofType{ProofStateMutation, ProofDifferentialReplay},
+		EvidenceClass:     "state_mutation_or_privilege_differential", RequiresTypedSignal: true,
+	}
+}
+
+func prototypePollutionPolicy(module string) ModuleProofPolicy {
+	return ModuleProofPolicy{
+		Module: module, Version: CurrentProofPolicyVersion, MinimumIndependentRuns: 2,
+		RequiresNativeBaseline: true, RequiresNegativeControl: true,
+		AllowedProofTypes: []ProofType{ProofDifferentialReplay, ProofDOMExecution},
+		EvidenceClass:     "server_differential_or_browser_runtime", RequiresTypedSignal: true,
+	}
+}
+
+func jwtPolicy(module string) ModuleProofPolicy {
+	return ModuleProofPolicy{
+		Module: module, Version: CurrentProofPolicyVersion, MinimumIndependentRuns: 2,
+		RequiresNativeBaseline: true, RequiresNegativeControl: true,
+		AllowedProofTypes: []ProofType{ProofIdentityBoundary, ProofDifferentialReplay},
+		EvidenceClass:     "jwt_identity_or_protected_resource", RequiresTypedSignal: true,
+	}
+}
+
 func headerPolicy(module string) ModuleProofPolicy {
 	return ModuleProofPolicy{
 		Module: module, Version: CurrentProofPolicyVersion, MinimumIndependentRuns: 3,
@@ -168,6 +210,12 @@ func headerPolicy(module string) ModuleProofPolicy {
 		AllowedProofTypes: []ProofType{ProofHeaderEvidence},
 		EvidenceClass:     "header_differential", RequiresTypedSignal: true,
 	}
+}
+
+func corsPolicy(module string) ModuleProofPolicy {
+	policy := headerPolicy(module)
+	policy.AllowedProofTypes = append(policy.AllowedProofTypes, ProofConfiguration)
+	return policy
 }
 
 func contentPolicy(module string) ModuleProofPolicy {

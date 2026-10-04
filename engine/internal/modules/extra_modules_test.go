@@ -4,12 +4,15 @@ import (
 	"context"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/verification"
 )
 
-func TestReactRSCCrashIsNotReportedAsRCE(t *testing.T) {
+func TestReactRSCCrashIsReportedAsDecoderDifferentialNotRCE(t *testing.T) {
 	// For benign control, let's distinguish in mock client based on body
 	benignClient := &activeDynamicBodyClient{
 		handler: func(method, rawURL string, body []byte, headers map[string]string) httpclient.ResponseRecord {
@@ -33,8 +36,50 @@ func TestReactRSCCrashIsNotReportedAsRCE(t *testing.T) {
 	target := ScanTarget{EndpointURL: "https://example.com/", Method: "GET"}
 	findings := r.runReactRSCRCE(context.Background(), target)
 
-	if len(findings) != 0 {
-		t.Fatalf("HTTP 500 without execution evidence must not be reported as RCE, got %d findings", len(findings))
+	if len(findings) != 1 || findings[0].Severity != "medium" || strings.Contains(strings.ToLower(findings[0].Title), "remote code execution") {
+		t.Fatalf("expected one non-RCE decoder differential, got %+v", findings)
+	}
+}
+
+type archiveCountingClient struct {
+	mu    sync.Mutex
+	calls map[string]int
+}
+
+func (c *archiveCountingClient) Do(_ context.Context, method, rawURL string, _ []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	c.mu.Lock()
+	c.calls[rawURL]++
+	c.mu.Unlock()
+	status := 404
+	body := "not found"
+	if rawURL == "https://example.com" {
+		status, body = 200, "<html>home</html>"
+	}
+	return httpclient.RequestResponse{
+		Request:  httpclient.RequestRecord{Method: method, URL: rawURL, Headers: headers},
+		Response: httpclient.ResponseRecord{StatusCode: status, Body: body, Headers: map[string]string{"Content-Type": "text/plain"}},
+	}, nil
+}
+
+func TestBackupArchivesDoesNotRepeatRootDictionaryPerPrefix(t *testing.T) {
+	client := &archiveCountingClient{calls: make(map[string]int)}
+	runner := newActiveRunner(t, client)
+	runner.runBackupArchives(context.Background(), ScanTarget{EndpointURL: "https://example.com/news/article", Method: "GET"})
+	client.mu.Lock()
+	firstCalls := len(client.calls)
+	rootCalls := client.calls["https://example.com/backup.zip"]
+	client.mu.Unlock()
+	if rootCalls != 1 {
+		t.Fatalf("root archive candidate called %d times after first prefix", rootCalls)
+	}
+	runner.runBackupArchives(context.Background(), ScanTarget{EndpointURL: "https://example.com/blog/post", Method: "POST"})
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if client.calls["https://example.com/backup.zip"] != 1 {
+		t.Fatalf("root archive dictionary repeated across prefixes/methods: %d", client.calls["https://example.com/backup.zip"])
+	}
+	if len(client.calls)-firstCalls >= firstCalls {
+		t.Fatalf("second prefix repeated the origin dictionary: first=%d additional=%d", firstCalls, len(client.calls)-firstCalls)
 	}
 }
 
@@ -73,6 +118,50 @@ func TestSSJSSignalRejectsBaselineMarker(t *testing.T) {
 	}
 	if ssjsSignalConfirmed("ok", "normal output", "unknown", 200, 200) {
 		t.Fatal("unknown SSJS signal must not confirm")
+	}
+}
+
+func TestSSJSTimingRejectsHTTP200WAFBlockPage(t *testing.T) {
+	blockPage := "<title>Request Rejected</title>The requested URL was rejected. Please consult with your administrator. Your support ID is: 123"
+	if ssjsSignalConfirmed(blockPage, "normal", "ssjs_time_delay", 200, 200) {
+		t.Fatal("HTTP 200 WAF rejection page confirmed SSJS timing")
+	}
+	c := &activeDynamicClient{handler: func(method, rawURL string, headers map[string]string) httpclient.ResponseRecord {
+		decoded, _ := url.QueryUnescape(rawURL)
+		if strings.Contains(decoded, "while(b-a<5000)") {
+			return httpclient.ResponseRecord{StatusCode: 200, Body: blockPage, Duration: 5500 * time.Millisecond}
+		}
+		return httpclient.ResponseRecord{StatusCode: 200, Body: "normal", Duration: 100 * time.Millisecond}
+	}}
+	findings := newActiveRunner(t, c).runSSJS(context.Background(), ScanTarget{
+		EndpointURL: "https://example.com/robots.txt?public=1", Parameter: "public", Method: "GET",
+	})
+	if len(findings) != 0 {
+		t.Fatalf("WAF rejection produced SSJS finding: %+v", findings)
+	}
+}
+
+func TestSSJSTimingRequiresThreeMatchedDelayedControls(t *testing.T) {
+	c := &activeDynamicClient{handler: func(method, rawURL string, headers map[string]string) httpclient.ResponseRecord {
+		decoded, _ := url.QueryUnescape(rawURL)
+		switch {
+		case strings.Contains(decoded, "while(b-a<5000)"):
+			return httpclient.ResponseRecord{StatusCode: 200, Body: "normal", Duration: 5100 * time.Millisecond}
+		case strings.Contains(decoded, "while(b-a<0)"):
+			return httpclient.ResponseRecord{StatusCode: 200, Body: "normal", Duration: 100 * time.Millisecond}
+		default:
+			return httpclient.ResponseRecord{StatusCode: 200, Body: "normal", Duration: 100 * time.Millisecond}
+		}
+	}}
+	findings := newActiveRunner(t, c).runSSJS(context.Background(), ScanTarget{
+		EndpointURL: "https://example.com/eval?code=1", Parameter: "code", Method: "GET",
+	})
+	if len(findings) != 1 {
+		t.Fatalf("matched timing proof produced %d findings, want 1", len(findings))
+	}
+	proof := findings[0].Evidence.Verification
+	if !proof.TimingConfirmed || proof.ProofType != verification.ProofTiming {
+		t.Fatalf("SSJS timing finding lacked timing proof: %+v", proof)
 	}
 }
 

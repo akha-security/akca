@@ -659,7 +659,7 @@ func (c *flappingBaselineClient) Do(_ context.Context, method, rawURL string, bo
 	}, nil
 }
 
-func TestSSRFEmitsSkipOnUnstableBaseline(t *testing.T) {
+func TestSSRFBaselineToleratesSingleStatusFlap(t *testing.T) {
 	c := &flappingBaselineClient{}
 	cfg := config.DefaultScanConfig()
 	var skipped []map[string]interface{}
@@ -675,7 +675,8 @@ func TestSSRFEmitsSkipOnUnstableBaseline(t *testing.T) {
 	if len(findings) != 0 {
 		t.Fatalf("unstable baseline should produce no findings, got %d", len(findings))
 	}
-	// Filter to find the baseline skip (there may also be a precondition skip)
+	// A 200/500/200 sequence has a reproducible modal baseline and must not be
+	// starved by one transient response.
 	var baselineSkips []map[string]interface{}
 	for _, ev := range skipped {
 		reason, _ := ev["reason"].(string)
@@ -684,8 +685,8 @@ func TestSSRFEmitsSkipOnUnstableBaseline(t *testing.T) {
 			baselineSkips = append(baselineSkips, ev)
 		}
 	}
-	if len(baselineSkips) == 0 {
-		t.Fatal("expected a plugin_skipped event mentioning baseline instability, got none")
+	if len(baselineSkips) != 0 {
+		t.Fatalf("single status flap should not invalidate the baseline: %+v", baselineSkips)
 	}
 }
 

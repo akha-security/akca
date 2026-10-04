@@ -95,6 +95,10 @@ func secretExposureConfirmed(body, baseline, kind string) bool {
 }
 
 func jwtModuleConfirmed(body, baseline, signal string, probeStatus, baseStatus int) bool {
+	if signal == "protected_resource_access" {
+		return probeStatus >= 200 && probeStatus < 300 &&
+			(baseStatus == http.StatusUnauthorized || baseStatus == http.StatusForbidden || body != baseline)
+	}
 	if signal == "identity_change_confirmed" {
 		return probeStatus >= 200 && probeStatus < 300 &&
 			baseStatus >= 200 && baseStatus < 300 &&

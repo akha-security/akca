@@ -106,7 +106,7 @@ func TestLowInfoModulesDoNotInjectDiscoveredHeaderPayloads(t *testing.T) {
 	}
 }
 
-func TestLowInfoModulesDoNotSendExplicitHeaderPayloads(t *testing.T) {
+func TestLowInfoModulesPreserveExplicitHeaderPayloads(t *testing.T) {
 	client := &wafHeaderCaptureClient{}
 	cfg := config.DefaultScanConfig()
 	r := NewRunner("scan-low", client, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil, nil, cfg)
@@ -117,7 +117,7 @@ func TestLowInfoModulesDoNotSendExplicitHeaderPayloads(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if got := client.headers[len(client.headers)-1]["X-Forwarded-For"]; got != "" {
-		t.Fatalf("low module must not send explicit header payload, got %q", got)
+	if got := client.headers[len(client.headers)-1]["X-Forwarded-For"]; got != "198.51.100.20" {
+		t.Fatalf("explicit module header payload was silently removed, got %q", got)
 	}
 }

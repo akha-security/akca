@@ -238,6 +238,7 @@ func (r *Runner) runRateLimitThresholdDiscovery(ctx context.Context, target Scan
 	account := "akca-threshold-" + randomAccountNonce() + "@example.invalid"
 	started := time.Now()
 	processed := 0
+	var attempts, controls []httpclient.RequestResponse
 	for i := 0; i < maxBurst; i++ {
 		if ctx.Err() != nil {
 			return nil
@@ -256,8 +257,43 @@ func (r *Runner) runRateLimitThresholdDiscovery(ctx context.Context, target Scan
 			return nil
 		}
 		processed++
+		attempts = append(attempts, rr)
+		if i > 0 && i%5 == 0 {
+			control, controlErr := r.probeForModule(ctx, "rate_limit", target,
+				"akca-control-"+randomAccountNonce()+"@example.invalid")
+			if controlErr != nil || rateLimitBlockSignal(control.Response.StatusCode, control.Response.Body) ||
+				!failedAuthenticationOutcome(control.Response) {
+				return nil
+			}
+			controls = append(controls, control)
+		}
 	}
-	r.emitDiscovery("rate_limit", target, "rate_limit_not_observed",
-		fmt.Sprintf("No block observed during %d failed authentication requests over %s; no target policy was supplied, so this is not a vulnerability finding", processed, time.Since(started)))
-	return nil
+	if len(attempts) != maxBurst || len(controls) < 2 {
+		return nil
+	}
+	payload := defaultPayload("rate_limit", "autonomous_threshold_25",
+		fmt.Sprintf("randomized account; attempts=%d", processed), "missing_rate_limiting")
+	finding := r.verifyAndBuildWithCandidate(ctx, "rate_limit", target, payload, attempts[0], attempts[len(attempts)-1],
+		"missing_rate_limiting", false, false, "", "", func(candidate *verification.Candidate) {
+			candidate.RequestedProofType = verification.ProofPolicyViolation
+			candidate.ExpectedEquivalent = true
+			candidate.NegativeControlSet, candidate.NegativeControlOK = true, true
+			for index, attempt := range attempts {
+				candidate.Observations = append(candidate.Observations,
+					r.observation("rate_limit", target, verification.RolePositiveReplay, index+2, attempt))
+			}
+			for index, control := range controls {
+				candidate.Observations = append(candidate.Observations,
+					r.observation("rate_limit", target, verification.RoleNegativeControl, index+1, control))
+			}
+		})
+	if finding == nil {
+		return nil
+	}
+	finding.Title = "Authentication endpoint accepted 25 failures without throttling"
+	finding.Severity = "medium"
+	finding.Description = fmt.Sprintf("The endpoint processed %d failures for one randomized nonexistent account over %s without a block; interleaved independent-account controls confirmed service availability. This is an autonomous threshold finding, not a claim about a user-supplied policy.", processed, time.Since(started))
+	var out []ModuleFinding
+	r.recordFinding(ctx, &out, finding, "rate_limit", "missing_rate_limiting")
+	return out
 }

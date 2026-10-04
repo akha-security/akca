@@ -728,7 +728,10 @@ func (r *Runner) booleanBlindSQLiProbe(ctx context.Context, target ScanTarget, b
 		if !sqliSignalConfirmed(p, trueRR.Body, baseline.Response.Body, signal) {
 			continue
 		}
-		if (trueRR.StatusCode >= 400 || falseRR.StatusCode >= 400) && baseline.Response.StatusCode < 400 {
+		// A stable 2xx/404 (or 2xx/400) split is a common REST boolean oracle.
+		// Only reject when both branches are errors relative to a successful
+		// baseline; the alternating replay below still has to reproduce the split.
+		if trueRR.StatusCode >= 400 && falseRR.StatusCode >= 400 && baseline.Response.StatusCode < 400 {
 			continue
 		}
 
@@ -864,7 +867,7 @@ func isLikelySQLiParam(param string) bool {
 		return false
 	}
 	switch p {
-	case "_", "t", "ts", "timestamp", "cb", "cache", "nocache", "v", "ver", "version", "format", "lang", "locale":
+	case "_", "t", "ts", "timestamp", "cb", "cache", "nocache", "v", "ver", "version", "format":
 		return false
 	}
 	return true

@@ -138,17 +138,19 @@ func (r *Runner) runLLMInjection(ctx context.Context, target ScanTarget) []Modul
 		canary := r.privateCanary("llm_injection", target)
 		text := extractLLMCompletionOrSanitizedText(rr.Response.Body)
 		proven := canary != "" && !strings.Contains(pr.payload, canary) && !strings.Contains(baseline.Response.Body, canary) && strings.Contains(text, canary) && rr.Response.StatusCode == 200
-		if !proven {
-			if isLegitimateLLMOutput(rr.Response, baseline.Response, pr) {
-				r.emitDiscovery("llm_injection", target, pr.signal, "Model response observed; disclosure or instruction-boundary violation is unproven")
-			}
+		legitimateOutput := isLegitimateLLMOutput(rr.Response, baseline.Response, pr)
+		if !proven && !legitimateOutput {
 			continue
 		}
-		pr.signal = "llm_private_canary_disclosure"
-		pr.title = "LLM disclosed a declared private canary"
-		pr.severity = "high"
+		expectedSignal := pr.signal
+		if proven {
+			pr.signal = "llm_private_canary_disclosure"
+			pr.title = "LLM disclosed a declared private canary"
+			pr.severity = "high"
+			expectedSignal = canary
+		}
 
-		p := defaultPayload("llm_injection", pr.name, pr.payload, canary)
+		p := defaultPayload("llm_injection", pr.name, pr.payload, expectedSignal)
 		f := r.verifyAndBuild(ctx, "llm_injection", target, p, baseline, rr, pr.signal, false, false, "", pr.matchMarker)
 		if f != nil {
 			f.Title = pr.title

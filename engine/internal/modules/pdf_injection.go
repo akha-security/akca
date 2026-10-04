@@ -1,8 +1,11 @@
 package modules
 
 import (
+	"bytes"
+	"compress/zlib"
 	"context"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -47,7 +50,7 @@ func (r *Runner) runPDFInjection(ctx context.Context, target ScanTarget) []Modul
 	lfiPayload := `<iframe src="file:///etc/passwd"></iframe>`
 	lfiRR, err := r.probe(ctx, target, lfiPayload)
 	if err == nil && lfiRR.Response.StatusCode == 200 {
-		body := lfiRR.Response.Body
+		body := pdfSearchableContent(lfiRR.Response.Body)
 		if strings.Contains(body, "root:x:0:0:") || strings.Contains(body, "[boot loader]") {
 			signal := "pdf_local_file_read"
 			p := defaultPayload("pdf_injection", signal, lfiPayload, signal)
@@ -66,7 +69,7 @@ func (r *Runner) runPDFInjection(ctx context.Context, target ScanTarget) []Modul
 	metaPayload := `<iframe src="http://169.254.169.254/latest/meta-data/"></iframe>`
 	metaRR, mErr := r.probe(ctx, target, metaPayload)
 	if mErr == nil && metaRR.Response.StatusCode == 200 {
-		body := metaRR.Response.Body
+		body := pdfSearchableContent(metaRR.Response.Body)
 		if strings.Contains(body, "ami-id") || strings.Contains(body, "instance-id") || strings.Contains(body, "local-hostname") {
 			signal := "pdf_metadata_ssrf"
 			p := defaultPayload("pdf_injection", signal, metaPayload, signal)
@@ -100,6 +103,7 @@ func pdfInjectionSignalConfirmed(signal, body string, status int) bool {
 	if status != 200 {
 		return false
 	}
+	body = pdfSearchableContent(body)
 	switch signal {
 	case "pdf_local_file_read":
 		return strings.Contains(body, "root:x:0:0:") || strings.Contains(body, "[boot loader]")
@@ -109,4 +113,46 @@ func pdfInjectionSignalConfirmed(signal, body string, status int) bool {
 	default:
 		return false
 	}
+}
+
+func pdfSearchableContent(body string) string {
+	raw := []byte(body)
+	searchable := append([]byte(nil), raw...)
+	for offset := 0; offset < len(raw); {
+		rel := bytes.Index(raw[offset:], []byte("stream"))
+		if rel < 0 {
+			break
+		}
+		streamAt := offset + rel
+		headerAt := streamAt - 512
+		if headerAt < 0 {
+			headerAt = 0
+		}
+		dataAt := streamAt + len("stream")
+		if dataAt < len(raw) && raw[dataAt] == '\r' {
+			dataAt++
+		}
+		if dataAt < len(raw) && raw[dataAt] == '\n' {
+			dataAt++
+		}
+		endRel := bytes.Index(raw[dataAt:], []byte("endstream"))
+		if endRel < 0 {
+			break
+		}
+		endAt := dataAt + endRel
+		if bytes.Contains(raw[headerAt:streamAt], []byte("/FlateDecode")) {
+			compressed := bytes.TrimRight(raw[dataAt:endAt], "\r\n")
+			reader, err := zlib.NewReader(bytes.NewReader(compressed))
+			if err == nil {
+				decoded, readErr := io.ReadAll(io.LimitReader(reader, 4<<20))
+				_ = reader.Close()
+				if readErr == nil {
+					searchable = append(searchable, '\n')
+					searchable = append(searchable, decoded...)
+				}
+			}
+		}
+		offset = endAt + len("endstream")
+	}
+	return string(searchable)
 }

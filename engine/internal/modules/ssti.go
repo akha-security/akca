@@ -194,9 +194,6 @@ func pairedSSTIPayload(p payloadgen.Payload) (payloadgen.Payload, bool) {
 }
 
 func detectSSTISignal(p payloadgen.Payload, body, baseline string) string {
-	if strings.Contains(body, p.Value) && !strings.Contains(baseline, p.Value) {
-		return ""
-	}
 	if p.ExpectedSignal == "string_transform_eval" && strings.Contains(body, "AKCA_SSTI_MARKER") && !strings.Contains(baseline, "AKCA_SSTI_MARKER") {
 		return "string_transform_eval"
 	}

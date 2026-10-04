@@ -35,6 +35,36 @@ func (r *Runner) runCORS(ctx context.Context, target ScanTarget) []ModuleFinding
 		{"https://" + u.Hostname() + "_.evil.example", "special_char_bypass"},
 	}
 	var out []ModuleFinding
+	if baseline.Response.StatusCode >= 200 && baseline.Response.StatusCode < 300 &&
+		headerValue(baseline.Response.Headers, "Access-Control-Allow-Origin") == "*" {
+		var wildcardReplays []httpclient.RequestResponse
+		for _, origin := range []string{"https://evil.example", "https://another-evil.example"} {
+			replay, replayErr := r.probeCORS(ctx, target, origin)
+			if replayErr != nil || replay.Response.StatusCode < 200 || replay.Response.StatusCode >= 300 ||
+				headerValue(replay.Response.Headers, "Access-Control-Allow-Origin") != "*" {
+				wildcardReplays = nil
+				break
+			}
+			wildcardReplays = append(wildcardReplays, replay)
+		}
+		if len(wildcardReplays) == 2 {
+			empty := httpclient.RequestResponse{Response: httpclient.ResponseRecord{StatusCode: 200, Headers: map[string]string{}}}
+			p := defaultPayload("cors", "wildcard_public_read", "*", "wildcard_public_read")
+			f := r.verifyAndBuildWithCandidate(ctx, "cors", target, p, empty, baseline,
+				"wildcard_public_read", false, false, "", "", func(c *verification.Candidate) {
+					c.RequestedProofType = verification.ProofConfiguration
+					c.Observations = append(c.Observations,
+						r.observation("cors", target, verification.RolePositiveReplay, 2, wildcardReplays[0]),
+						r.observation("cors", target, verification.RolePositiveReplay, 3, wildcardReplays[1]))
+				})
+			if f != nil {
+				f.Severity = "low"
+				f.Title = "CORS allows every origin"
+				f.Description = "Access-Control-Allow-Origin: * was reproduced for independent untrusted origins. Public response data is browser-readable cross-origin; credentialed reads are not implied."
+				r.recordFinding(ctx, &out, f, "cors", "wildcard_public_read")
+			}
+		}
+	}
 	for _, pr := range probes {
 		if originURL, e := url.Parse(pr.origin); e == nil && strings.EqualFold(originURL.Scheme, u.Scheme) && strings.EqualFold(originURL.Host, u.Host) {
 			continue
@@ -251,6 +281,8 @@ func (r *Runner) probeCORSServerSideSSRF(ctx context.Context, target ScanTarget,
 func corsSignal(headers map[string]string, origin, signal string) bool {
 	acao := headerValue(headers, "Access-Control-Allow-Origin")
 	switch signal {
+	case "wildcard_public_read":
+		return acao == "*"
 	case "null_origin":
 		return strings.EqualFold(acao, "null")
 	case "origin_reflection", "partial_origin_match", "pre_domain_match", "protocol_downgrade", "trusted_subdomain",

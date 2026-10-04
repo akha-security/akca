@@ -74,6 +74,19 @@ func (c ScanConfig) ParameterWordlistCap() int {
 	}
 }
 
+// ParameterMaxHits limits speculative hidden parameters accepted per endpoint.
+// Captured URL and request-template parameters do not consume this allowance.
+func (c ScanConfig) ParameterMaxHits() int {
+	switch c.ScanIntensity {
+	case "stealth":
+		return 8
+	case "normal", "":
+		return 24
+	default: // fast
+		return 12
+	}
+}
+
 // ParameterTransferMaxProbes caps the global cross-endpoint parameter transfer
 // pass that runs before per-endpoint discovery.
 func (c ScanConfig) ParameterTransferMaxProbes() int {

@@ -40,7 +40,8 @@ var (
 func ExtractPassive(endpointURL, method, contentType, body string, headers map[string]string) []DiscoveredParameter {
 	var out []DiscoveredParameter
 	add := func(name string, loc Location, priority int, source string) {
-		if name == "" {
+		name = strings.TrimSpace(name)
+		if !validCandidateName(name) {
 			return
 		}
 		out = append(out, DiscoveredParameter{
@@ -55,21 +56,26 @@ func ExtractPassive(endpointURL, method, contentType, body string, headers map[s
 	// speculative wordlist or path guesses.
 	if u := parseQueryParams(endpointURL); len(u) > 0 {
 		for k := range u {
-			add(k, LocationQuery, 96, "passive")
+			add(k, LocationQuery, 96, "url_query")
 		}
 	}
 
+	// HTML controls are useful hidden-parameter candidates, but they are not
+	// parameters of the page currently being viewed. The crawler separately
+	// parses <form action=...> and stores a request template on the real target
+	// endpoint. Keeping these as hints avoids attaching a site-wide search form
+	// to every crawled article/product page.
 	for _, m := range reInputName.FindAllStringSubmatch(body, -1) {
-		add(m[1], LocationForm, 75, "passive")
+		add(m[1], LocationForm, 75, "html_form_hint")
 	}
 	for _, m := range reHidden.FindAllStringSubmatch(body, -1) {
-		add(m[1], LocationHidden, 80, "passive")
+		add(m[1], LocationHidden, 80, "html_form_hint")
 	}
 	for _, m := range reInputID.FindAllStringSubmatch(body, -1) {
-		add(m[1], LocationHTMLAttr, 60, "passive")
+		add(m[1], LocationHTMLAttr, 60, "html_id_hint")
 	}
 	for _, m := range reDataAttr.FindAllStringSubmatch(body, -1) {
-		add("data-"+m[1], LocationDataAttr, 65, "passive")
+		add("data-"+m[1], LocationDataAttr, 65, "html_data_hint")
 	}
 
 	ct := strings.ToLower(contentType)
@@ -77,7 +83,7 @@ func ExtractPassive(endpointURL, method, contentType, body string, headers map[s
 	lowerTrim := strings.ToLower(trimmed)
 	if strings.Contains(ct, "json") || strings.HasPrefix(trimmed, "{") {
 		for k := range extractJSONKeys(body) {
-			add(k, LocationJSON, 75, "passive")
+			add(k, LocationJSON, 75, "response_json_hint")
 		}
 	}
 	// Only treat the body as XML for genuine XML responses. HTML documents also
@@ -87,18 +93,18 @@ func ExtractPassive(endpointURL, method, contentType, body string, headers map[s
 		strings.HasPrefix(lowerTrim, "<!doctype html") || strings.HasPrefix(lowerTrim, "<html")
 	if strings.Contains(ct, "xml") || (strings.HasPrefix(trimmed, "<") && !looksHTML) {
 		for k := range extractXMLKeys(body) {
-			add(k, LocationXML, 70, "passive")
+			add(k, LocationXML, 70, "response_xml_hint")
 		}
 	}
 	if strings.Contains(ct, "multipart") {
 		for k := range extractMultipartNames(body) {
-			add(k, LocationMultipart, 70, "passive")
+			add(k, LocationMultipart, 70, "response_multipart_hint")
 		}
 	}
 
 	for k := range headers {
 		if isInterestingHeader(k) {
-			add(k, LocationHeader, 55, "passive")
+			add(k, LocationHeader, 55, "request_header_hint")
 		}
 	}
 	// Universal header injection surfaces — backends and proxies often parse these.
@@ -107,33 +113,65 @@ func ExtractPassive(endpointURL, method, contentType, body string, headers map[s
 	}
 
 	if reGraphQLVar.MatchString(body) {
-		add("variables", LocationGraphQL, 85, "passive")
+		add("variables", LocationGraphQL, 85, "graphql_hint")
 	}
 	if strings.Contains(strings.ToLower(endpointURL), "callback") || reOAuthParam.MatchString(endpointURL) {
 		for _, p := range []string{"code", "state", "redirect_uri", "client_id", "scope"} {
-			add(p, LocationOAuth, 80, "passive")
+			add(p, LocationOAuth, 80, "oauth_hint")
 		}
 	}
 	if strings.HasPrefix(strings.ToLower(endpointURL), "ws://") || strings.HasPrefix(strings.ToLower(endpointURL), "wss://") {
-		add("message", LocationWebSocket, 70, "passive")
+		add("message", LocationWebSocket, 70, "websocket_hint")
 	}
 	for _, m := range reJSParam.FindAllStringSubmatch(body, -1) {
 		for _, part := range strings.Split(m[1], ",") {
 			kv := strings.Split(strings.TrimSpace(part), ":")
 			if len(kv) > 0 {
 				key := strings.Trim(kv[0], `"' `)
-				add(key, LocationJSBuilder, 72, "passive")
+				add(key, LocationJSBuilder, 72, "js_builder_hint")
 			}
 		}
 	}
 	if reStateBlob.MatchString(body) {
-		add("__state__", LocationStateBlob, 68, "passive")
+		add("__state__", LocationStateBlob, 68, "state_blob_hint")
 	}
 
 	if seg := extractPathParamHints(endpointURL); seg != "" {
-		add(seg, LocationPath, 78, "passive")
+		add(seg, LocationPath, 78, "path_hint")
 	}
 	return out
+}
+
+// confirmedPassiveParameter is intentionally strict. Response fields, DOM ids,
+// data attributes and synthetic headers may seed active Arjun-style probing,
+// but they are not accepted request parameters until differential proof exists.
+func confirmedPassiveParameter(p DiscoveredParameter) bool {
+	return p.Source == "url_query"
+}
+
+func activeCandidateHint(p DiscoveredParameter) bool {
+	switch p.Source {
+	case "html_form_hint", "response_json_hint", "response_xml_hint", "response_multipart_hint",
+		"graphql_hint", "js_builder_hint":
+		return true
+	default:
+		return false
+	}
+}
+
+func validCandidateName(name string) bool {
+	if name == "" || len(name) > 96 {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '_', r == '-', r == '.', r == '[', r == ']':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func parseQueryParams(rawURL string) map[string]struct{} {

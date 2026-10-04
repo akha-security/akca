@@ -13,14 +13,14 @@ func TestUserRedirectNestedQueryIsNotDestination(t *testing.T) {
 	for _, location := range []string{
 		"https://l.facebook.com/l.php?u=https%3A%2F%2Fwww.facebook.com%2Fads%2Fcreate%2F%3Fextra_1%3Dhttps%253A%252F%252Fevil.example%252Fakca",
 		"https://safe.example/?next=https://evil.example/akca",
-		"https://evil.example@safe.example/", "https://evil.example.safe.example/", "/evil.example", "javascript:alert(1)",
+		"https://evil.example@safe.example/", "https://evil.example.safe.example/", "/evil.example",
 	} {
 		rr := httpclient.RequestResponse{Response: httpclient.ResponseRecord{StatusCode: 302, Headers: map[string]string{"Location": location}}}
 		if openRedirectSignal(rr, "https://evil.example/akca") || openRedirectHeaderConfirmed(rr.Response.Headers, "parameter_redirect") {
 			t.Fatalf("false redirect for %q", location)
 		}
 	}
-	for _, location := range []string{"https://evil.example/akca", "//evil.example/akca", "https://user@evil.example/"} {
+	for _, location := range []string{"https://evil.example/akca", "//evil.example/akca", "https://user@evil.example/", "javascript:alert(1)", "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg=="} {
 		if !redirectDestinationIsCanary(location) {
 			t.Fatalf("real redirect missed: %s", location)
 		}
@@ -70,6 +70,76 @@ func TestUserPublicJSONSuffixIsNotAuthBypass(t *testing.T) {
 }
 
 type cstiProofRenderer struct{ literal bool }
+
+type prototypeProofRenderer struct{}
+
+func (prototypeProofRenderer) Render(context.Context, string) (string, error) {
+	return "<html></html>", nil
+}
+
+func (prototypeProofRenderer) EvaluatePage(_ context.Context, rawURL, _ string) (string, error) {
+	if strings.Contains(rawURL, "__proto__") {
+		return `{"polluted":"akca_dom_polluted","src":null,"innerHTML":null,"url":null}`, nil
+	}
+	return `{"polluted":null,"src":null,"innerHTML":null,"url":null}`, nil
+}
+
+func TestClientPrototypePollutionRequiresBrowserRuntimeEvidence(t *testing.T) {
+	c := auditDoer(func(_ context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+		return httpclient.RequestResponse{
+			Request:  httpclient.RequestRecord{Method: method, URL: rawURL, Body: string(body), Headers: headers},
+			Response: httpclient.ResponseRecord{StatusCode: 200, Body: "normal", Headers: map[string]string{"Content-Type": "text/html"}},
+		}, nil
+	})
+	runner := newActiveRunner(t, c)
+	runner.browser = prototypeProofRenderer{}
+	findings := runner.runPrototypePollution(context.Background(), ScanTarget{
+		EndpointURL: "https://example.com/watch?v=1", Method: "GET", Parameter: "v", Location: "query",
+	})
+	if len(findings) != 1 || findings[0].Evidence.Signal != "client_prototype_pollution" {
+		t.Fatalf("expected one browser-proven client prototype pollution finding, got %+v", findings)
+	}
+}
+
+type countingPrototypeRenderer struct{ evaluations int }
+
+func (b *countingPrototypeRenderer) Render(context.Context, string) (string, error) {
+	return "<html></html>", nil
+}
+
+func (b *countingPrototypeRenderer) EvaluatePage(_ context.Context, rawURL, _ string) (string, error) {
+	b.evaluations++
+	if strings.Contains(rawURL, "__proto__") {
+		return `{"polluted":"akca_dom_polluted","src":null,"innerHTML":null,"url":null}`, nil
+	}
+	return `{"polluted":null,"src":null,"innerHTML":null,"url":null}`, nil
+}
+
+func TestClientPrototypePollutionRunsOncePerQueryShape(t *testing.T) {
+	calls := 0
+	c := auditDoer(func(_ context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+		calls++
+		return httpclient.RequestResponse{
+			Request:  httpclient.RequestRecord{Method: method, URL: rawURL, Body: string(body), Headers: headers},
+			Response: httpclient.ResponseRecord{StatusCode: 200, Body: "<html>normal</html>", Headers: map[string]string{"Content-Type": "text/html"}},
+		}, nil
+	})
+	runner := newActiveRunner(t, c)
+	browser := &countingPrototypeRenderer{}
+	runner.browser = browser
+	first := ScanTarget{EndpointURL: "https://example.com/watch?a=1&b=2", Method: "GET", Parameter: "a", Location: "query"}
+	second := ScanTarget{EndpointURL: "https://example.com/watch?a=7&b=9", Method: "GET", Parameter: "b", Location: "query"}
+	if findings := runner.runPrototypePollution(context.Background(), first); len(findings) != 1 {
+		t.Fatalf("first query shape should be browser-tested, got %+v", findings)
+	}
+	evaluations, requests := browser.evaluations, calls
+	if findings := runner.runPrototypePollution(context.Background(), second); len(findings) != 0 {
+		t.Fatalf("equivalent query shape produced duplicate findings: %+v", findings)
+	}
+	if browser.evaluations != evaluations || calls != requests {
+		t.Fatalf("equivalent query shape repeated work: browser %d->%d, HTTP %d->%d", evaluations, browser.evaluations, requests, calls)
+	}
+}
 
 func (b cstiProofRenderer) Render(_ context.Context, u string) (string, error) {
 	decoded, _ := url.QueryUnescape(u)

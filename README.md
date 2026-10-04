@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/akha-security/akca/actions/workflows/ci.yml"><img src="https://github.com/akha-security/akca/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/akha-security/akca/releases/tag/v0.2.6"><img src="https://img.shields.io/badge/version-v0.2.6-8b5cf6" alt="Version v0.2.6"></a>
+  <a href="https://github.com/akha-security/akca/releases/tag/v0.2.7"><img src="https://img.shields.io/badge/version-v0.2.7-8b5cf6" alt="Version v0.2.7"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25 or newer"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache License 2.0"></a>
 </p>
@@ -47,7 +47,7 @@ AKCA does not claim feature or detection parity with mature commercial platforms
 <p align="center">
   <img src="docs/assets/scanner.png" alt="AKCA scanner running against a local security testing lab" width="760">
   <br>
-  <sub>AKCA v0.2.6 scan session with live engine status, resource telemetry, and confirmed findings.</sub>
+  <sub>AKCA v0.2.7 scan session with live engine status, resource telemetry, and confirmed findings.</sub>
 </p>
 
 ## Installation
@@ -337,12 +337,12 @@ Or calculate the module budget from discovered URL/method combinations:
 akca -u https://example.com --requests-per-target 200
 ```
 
-AKCA distributes bounded module budgets across modules, URLs, and parameters. Unused allocations move forward to later work. A positive `--request-budget` takes precedence over `--requests-per-target`.
+Full Scan has no implicit post-discovery module budget. When an operator explicitly sets a positive budget, AKCA distributes it across modules, URLs, and parameters, and unused allocations move forward to later work. A positive `--request-budget` takes precedence over `--requests-per-target`.
 
 | Option | Purpose |
 | --- | --- |
 | `--request-budget 5000` | Cap total requests, including discovery, retries, and redirects |
-| `--requests-per-target 200` | Derive the module budget from discovered URL/method combinations |
+| `--requests-per-target 200` | Optionally derive a bounded module budget from discovered URL/method combinations; default `0` is unlimited |
 | `--crawler-budget 1500` | Limit discovery requests |
 | `--time-budget 30m` | Limit scan duration |
 | `--rate-limit 5` | Limit requests per second |
@@ -417,14 +417,14 @@ Discovered URLs are retained even when they cannot be visited. A crawl that exha
 
 Unconfigured rate-limit checks produce observations, not vulnerability findings. A configured threshold proof also requires `window_seconds`; if the requests do not fit inside that window, the check is inconclusive. SQLi does not treat a 400 response or arithmetic evaluation alone as proof. New vendor-specific SQL errors in 400/422 responses must pass the replay and control verification path.
 
-## What's new in v0.2.6
+## What's new in v0.2.7
 
-- Bound hidden-parameter discovery and parallelize cross-endpoint transfer so full scans finish predictably without silently disabling coverage.
-- Increase full-scan crawling capacity to 1,500 pages and improve automatic memory sizing and terminal resource labels.
-- Expand SSRF fingerprints across AWS, GCP, Azure, Alibaba, DigitalOcean, Oracle, Tencent, Packet, Docker, Consul, Redis and Kubernetes surfaces.
-- Harden OAST with per-probe callback identities, failover-safe correlation, end-to-end health enforcement and corrected PDF/Server-Side JavaScript callbacks.
-- Tighten false-positive controls for blind XSS, SQLi, command injection, LFI, DOM XSS, HTTP smuggling and source-disclosure findings.
-- Strengthen benchmark and CI quality gates while preserving full request/response evidence and coverage diagnostics.
+- Generate scan IDs automatically so every invocation and future GUI-created scan has a stable unique identity.
+- Allow independent scan processes to share the WAL-backed SQLite store without a machine-wide scan lock.
+- Remove the implicit per-URL Full Scan module budget so SQL injection and similar finite checks are not silently cut short.
+- Keep explicit operator budgets available, while moving unused request allocation forward across later module work.
+- Bound hidden-parameter discovery around realistic Arjun-style probing instead of treating every observed value as a useful parameter candidate.
+- Reject HTTP 200 WAF block pages as Server-Side JavaScript timing evidence and require matched, statistically consistent delay controls.
 
 See [CHANGELOG.md](CHANGELOG.md) for release details.
 

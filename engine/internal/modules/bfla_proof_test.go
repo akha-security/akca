@@ -17,6 +17,34 @@ type bflaProofClient struct {
 	calls   []string
 }
 
+type readOnlyBFLAClient struct{}
+
+func (readOnlyBFLAClient) Do(_ context.Context, method, rawURL string, body []byte,
+	headers map[string]string) (httpclient.RequestResponse, error) {
+	return readOnlyBFLAResponse(method, rawURL, body, headers, http.StatusOK,
+		`{"users":[{"email":"alice@example.com"}],"permissions":["manage_users"]}`), nil
+}
+
+func (readOnlyBFLAClient) DoWithAuthProfile(_ context.Context, method, rawURL string, body []byte,
+	headers map[string]string, _ config.AuthProfile) (httpclient.RequestResponse, error) {
+	return readOnlyBFLAResponse(method, rawURL, body, headers, http.StatusOK,
+		`{"users":[{"email":"alice@example.com"}],"permissions":["manage_users"]}`), nil
+}
+
+func (readOnlyBFLAClient) DoWithoutSession(_ context.Context, method, rawURL string, body []byte,
+	headers map[string]string) (httpclient.RequestResponse, error) {
+	return readOnlyBFLAResponse(method, rawURL, body, headers, http.StatusUnauthorized,
+		`{"error":"unauthorized"}`), nil
+}
+
+func readOnlyBFLAResponse(method, rawURL string, body []byte, headers map[string]string,
+	status int, responseBody string) httpclient.RequestResponse {
+	return httpclient.RequestResponse{
+		Request:  httpclient.RequestRecord{Method: method, URL: rawURL, Body: string(body), Headers: headers},
+		Response: httpclient.ResponseRecord{StatusCode: status, Body: responseBody, Headers: map[string]string{"Content-Type": "application/json"}},
+	}
+}
+
 func (c *bflaProofClient) Do(ctx context.Context, method, rawURL string, body []byte,
 	headers map[string]string) (httpclient.RequestResponse, error) {
 	return c.response(method, rawURL, body, headers, "shared"), nil
@@ -92,5 +120,22 @@ func TestBFLARequiresRealRolesStateProofAndCleanup(t *testing.T) {
 	}
 	if !findings[0].Evidence.Verification.ProofSatisfied {
 		t.Fatal("expected centralized proof policy to be satisfied")
+	}
+}
+
+func TestBFLAReadOnlyHeuristicUsesNamedRoleBoundary(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.AuthProfiles = []config.AuthProfile{{ID: "member"}, {ID: "admin"}}
+	cfg.RoleProfiles = []config.RoleProfile{
+		{ID: "member", Name: "Member", AuthProfileID: "member"},
+		{ID: "admin", Name: "Administrator", AuthProfileID: "admin"},
+	}
+	runner := NewRunner("scan-bfla-read", readOnlyBFLAClient{}, scope.NewEngine(cfg), nil,
+		verification.NewEngine(nil, nil), nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
+	findings := runner.runBFLA(context.Background(), ScanTarget{
+		EndpointURL: "http://example.com/admin/users", Method: http.MethodGet,
+	})
+	if len(findings) != 1 || findings[0].Evidence.Signal != "privileged_read_access" {
+		t.Fatalf("expected a read-only BFLA finding, got %+v", findings)
 	}
 }

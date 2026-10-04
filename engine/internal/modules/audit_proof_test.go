@@ -24,13 +24,16 @@ func TestSQLi400RequiresVendorEvidence(t *testing.T) {
 	}
 }
 
-func TestUnconfiguredRateLimitNeverClaimsVulnerability(t *testing.T) {
-	for _, body := range []string{"invalid credentials", "Bad Request", "generic page"} {
-		r := groupCRunner(t, &groupCClient{responses: map[string]string{"__default__": body}})
+func TestAutonomousRateLimitRequiresVerifiedAuthenticationFailures(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want int
+	}{{"invalid credentials", 1}, {"Bad Request", 0}, {"generic page", 0}} {
+		r := groupCRunner(t, &groupCClient{responses: map[string]string{"__default__": tc.body}})
 		r.cfg.PayloadBudget = config.PayloadBudgetHigh
 		findings := r.runRateLimit(context.Background(), ScanTarget{EndpointURL: "http://example.com/login", Method: "GET", Parameter: "user", Location: "query"})
-		if len(findings) != 0 {
-			t.Fatalf("unconfigured rate policy produced findings: %+v", findings)
+		if len(findings) != tc.want {
+			t.Fatalf("body=%q findings=%d want=%d", tc.body, len(findings), tc.want)
 		}
 	}
 }

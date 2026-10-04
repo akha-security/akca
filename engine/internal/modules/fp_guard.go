@@ -173,7 +173,7 @@ func moduleSignalConfirmed(
 		return cachePoisonPersisted(baseBody, body, probeHeaders, p.Value)
 	case "cache_deception":
 		return signal == "private_canary_anonymous_cache_hit" &&
-			probeStatus == 200 && cacheEvidence(probeHeaders)
+			probeStatus == 200 && body != baseBody && !isUncacheableResponse(probeHeaders)
 	case "broken_auth":
 		return brokenAuthSignal(probe, baseline)
 	case "route_auth_bypass":
@@ -191,6 +191,10 @@ func moduleSignalConfirmed(
 	case "parser_differential":
 		return probe.StatusCode == 200 && probe.Body != baseline.Body && len(strings.TrimSpace(probe.Body)) > 20
 	case "bfla":
+		if signal == "privileged_read_access" {
+			return successfulResourceResponse(probe) && privateAuthResourceEvidence(body) &&
+				resourceFingerprint(body) != resourceFingerprint(baseBody)
+		}
 		return signal == "protected_state_mutation" &&
 			probeStatus >= 200 && probeStatus < 300 &&
 			resourceFingerprint(body) != resourceFingerprint(baseBody)
@@ -231,8 +235,10 @@ func moduleSignalConfirmed(
 			probeStatus >= 200 && probeStatus < 300 &&
 			resourceFingerprint(body) != resourceFingerprint(baseBody)
 	case "hpp":
-		return signal == "forbidden_state_persisted" &&
-			probeStatus >= 200 && probeStatus < 300 &&
+		if signal == "privilege_response_differential" {
+			return probeStatus >= 200 && probeStatus < 300 && hppSignal(body, baseBody)
+		}
+		return signal == "forbidden_state_persisted" && probeStatus >= 200 && probeStatus < 300 &&
 			resourceFingerprint(body) != resourceFingerprint(baseBody)
 	case "file_upload":
 		return signal == "retrieved_hash_confirmed" && probeStatus == 200 &&
@@ -276,25 +282,26 @@ func moduleSignalConfirmed(
 	case "pdf_injection":
 		return pdfInjectionSignalConfirmed(signal, body, probeStatus)
 	case "cpdos":
-		return (probeStatus == 400 || probeStatus == 405 || probeStatus == 500 || probeStatus == 501) && baseStatus == 200
+		return (probeStatus == 400 || probeStatus == 405 || probeStatus == 500 || probeStatus == 501 || probeStatus == 502) && baseStatus == 200
 	case "proxy_path_confusion":
 		return probeStatus == 200 && (baseStatus == 401 || baseStatus == 403)
 	case "ws_cswsh":
-		return signal == "browser_private_read" && probeStatus == 101
+		return (signal == "browser_private_read" || signal == "cross_origin_upgrade_with_cookie") && probeStatus == 101
 	case "jsonp_callback":
 		return signal == "browser_private_read" && probeStatus == 200 && strings.Contains(body, p.Value)
 	case "react_rsc_rce":
-		return false
+		return signal == "decoder_crash_differential" && reactRSCDecoderCrash(probe) && !reactRSCDecoderCrash(baseline)
 	case "server_side_js_injection":
 		return ssjsSignalConfirmed(body, baseBody, signal, probeStatus, baseStatus)
 	case "csti_detection":
-		return domExecuted && signal == "angular_dom_execution" && probeStatus == 200
+		return probeStatus == 200 && ((domExecuted && signal == "angular_dom_execution") ||
+			signal == "csti_expression_evaluated" && cstiSignalConfirmed(body, baseBody, p.Value, signal, probeStatus))
 	case "swagger_exposure":
 		return swaggerExposureSignalConfirmed(signal, body, probeStatus)
 	case "sensitive_file_discovery":
 		return sensitiveFileSignalConfirmed(signal, probe)
 	case "http_smuggling":
-		return httpSmugglingSignalConfirmed(signal, body, p.Value, probeStatus)
+		return httpSmugglingSignalConfirmed(signal, body, p.Value, probeStatus, baseStatus)
 	case "race_condition_sync":
 		return signal == "race_condition_limit_bypass" && probeStatus >= 200 && probeStatus < 300
 	case "oauth_flow_audit":
@@ -309,6 +316,9 @@ func moduleSignalConfirmed(
 		return signal == "cross_site_state_mutation" && probeStatus >= 200 && probeStatus < 300 &&
 			resourceFingerprint(body) != resourceFingerprint(baseBody)
 	case "prototype_pollution":
+		if signal == "client_prototype_pollution" {
+			return domExecuted
+		}
 		if strings.HasPrefix(signal, "client_") || signal == "prototype_behavior_change" || signal == "prototype_error_disclosure" {
 			return false
 		}
@@ -543,6 +553,18 @@ func xxeSignalConfirmed(body, baseline, signal string) bool {
 			}
 		}
 		return false
+	case "error_based_file_entity":
+		lower := strings.ToLower(body)
+		baseLower := strings.ToLower(baseline)
+		if !strings.Contains(lower, "akca-xxe-proof-file") || strings.Contains(baseLower, "akca-xxe-proof-file") {
+			return false
+		}
+		for _, marker := range []string{"filenotfoundexception", "no such file", "failed to load external entity", "could not resolve entity", "systemid"} {
+			if strings.Contains(lower, marker) && !strings.Contains(baseLower, marker) {
+				return true
+			}
+		}
+		return false
 	default:
 		return false
 	}
@@ -562,6 +584,8 @@ func corsSignalConfirmed(baseHeaders, probeHeaders map[string]string, signal, or
 		return false
 	}
 	switch signal {
+	case "wildcard_public_read":
+		return acao == "*"
 	case "null_origin":
 		return strings.EqualFold(acao, "null")
 	case "origin_reflection", "partial_origin_match", "pre_domain_match", "protocol_downgrade",
