@@ -356,6 +356,13 @@ Linked API/service subdomains are outside the default target scope. To include l
 akca -u https://www.example.com --include-linked-api-subdomains
 ```
 
+To keep specific URL paths out of crawling and testing, use `--exclude-path` (repeatable). A trailing `*` matches a prefix. This is useful for authenticated scans, where following a sign-out link would otherwise revoke the session:
+
+```bash
+akca -u https://app.example.com/ -c "session=..." \
+  --exclude-path /logout --exclude-path /account/sign-out
+```
+
 ### Why a Full Scan takes longer
 
 AKCA's default Full Scan is designed around coverage and evidence quality, not the shortest possible completion time. Its runtime is therefore not directly comparable to tools that stop after a shallow HTTP crawl or report a vulnerability from a single response difference.
