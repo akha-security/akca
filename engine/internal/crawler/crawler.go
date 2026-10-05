@@ -355,6 +355,12 @@ func (c *Crawler) runWorkers(ctx context.Context, budget Budget) {
 				workMu.Lock()
 				item, ok := c.q.Dequeue()
 				if ok {
+					if !c.reserveRequest(budget) {
+						c.q.Enqueue(item)
+						finish()
+						workMu.Unlock()
+						continue
+					}
 					active++
 				} else if active == 0 {
 					finish()
@@ -369,7 +375,7 @@ func (c *Crawler) runWorkers(ctx context.Context, budget Budget) {
 					continue
 				}
 
-				if err := c.visit(ctx, item, budget); err != nil {
+				if err := c.visit(ctx, item, budget, true); err != nil {
 					_ = c.emit("log", "request failed: "+err.Error(), map[string]interface{}{
 						"scan_id": c.scanID, "url": item.URL, "method": item.Method,
 					})
@@ -397,7 +403,7 @@ func crawlerWorkerCount(cfg config.ScanConfig) int {
 	return workers
 }
 
-func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (visitErr error) {
+func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget, requestReserved bool) (visitErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			_ = c.emit("log", fmt.Sprintf("crawler visit recovered from panic: %v", r), map[string]interface{}{
@@ -413,7 +419,7 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 	if method == "" {
 		method = http.MethodGet
 	}
-	if c.budgetExceeded(budget) || (budget.MaxDepth > 0 && depth > budget.MaxDepth) {
+	if (!requestReserved && c.budgetExceeded(budget)) || (budget.MaxDepth > 0 && depth > budget.MaxDepth) {
 		return nil
 	}
 	if !c.scope.IsInScope(rawURL) {
@@ -451,7 +457,7 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget) (vi
 		visitURL = rawURL
 	}
 
-	if !c.reserveRequest(budget) {
+	if !requestReserved && !c.reserveRequest(budget) {
 		c.q.Enqueue(item)
 		return nil
 	}
