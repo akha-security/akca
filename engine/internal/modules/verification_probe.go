@@ -278,7 +278,7 @@ func negativeControlPayload(module string, target ScanTarget, original payloadge
 
 func supportsGenericReplay(module string) bool {
 	switch module {
-	case "xss", "sqli", "ssti", "xxe", "command_injection", "lfi", "crlf":
+	case "xss", "sqli", "ssti", "xxe", "command_injection", "lfi", "crlf", "insecure_deserialization":
 		return true
 	default:
 		return false
