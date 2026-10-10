@@ -592,6 +592,7 @@ func printDetailedUsage() {
 		{"--requests-per-target <n>", "Optional module budget per discovered URL/method; default 0 means unlimited"},
 		{"--time-budget <duration>", "Maximum duration such as 30m or 2h; 0 means unlimited"},
 		{"--memory-limit <mb>", "Process memory limit; 0 means automatic"},
+		{"--exclude-path <path>", "Exclude a URL path from crawling and testing; repeatable, trailing * matches a prefix (e.g. /logout or /admin/*)"},
 		{"--include-linked-api-subdomains", "Also crawl linked API/service subdomains under the same root"},
 		{"--scan-id <id>", "Optional deterministic scan identifier for automation; generated automatically by default"},
 	})
@@ -2686,6 +2687,7 @@ func runScanCommand(args []string) int {
 	var cookieVal string
 	var headers sliceFlag
 	var apiSpecs sliceFlag
+	var excludePaths sliceFlag
 	var outputFormat string
 	var outputFilePath string
 	var noOAST bool
@@ -2735,6 +2737,7 @@ func runScanCommand(args []string) int {
 	fs.Var(&headers, "header", "")
 	fs.Var(&headers, "H", "")
 	fs.Var(&apiSpecs, "api-spec", "")
+	fs.Var(&excludePaths, "exclude-path", "")
 	fs.StringVar(&outputFormat, "format", "html", "")
 	fs.StringVar(&outputFormat, "f", "html", "")
 	fs.StringVar(&outputFilePath, "output", "", "")
@@ -2973,6 +2976,11 @@ func runScanCommand(args []string) int {
 	}
 	if len(customHeaders) > 0 {
 		cfg.CustomHeaders = customHeaders
+	}
+	for _, p := range excludePaths {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			cfg.ExcludedPaths = append(cfg.ExcludedPaths, trimmed)
+		}
 	}
 	cfg.EnableOAST = !noOAST
 	if strings.TrimSpace(oastServer) != "" {

@@ -811,3 +811,15 @@ func TestPhaseLifecycleShowsPartialInsteadOfCompleted(t *testing.T) {
 		t.Fatalf("partial module status was hidden: %q", got)
 	}
 }
+
+func TestExcludePathFlagAccumulatesRepeatably(t *testing.T) {
+	fs := flag.NewFlagSet("akca", flag.ContinueOnError)
+	var excludePaths sliceFlag
+	fs.Var(&excludePaths, "exclude-path", "")
+	if err := fs.Parse([]string{"--exclude-path", "/logout", "--exclude-path", "/admin/*"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(excludePaths) != 2 || excludePaths[0] != "/logout" || excludePaths[1] != "/admin/*" {
+		t.Fatalf("exclude-path should accumulate repeated values in order, got %v", []string(excludePaths))
+	}
+}
