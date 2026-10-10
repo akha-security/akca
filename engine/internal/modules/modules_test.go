@@ -114,8 +114,35 @@ func testRunner(t *testing.T, client HTTPDoer) *Runner {
 
 type executedDOMRenderer struct{}
 
-func (executedDOMRenderer) Render(context.Context, string) (string, error) {
-	return `<html data-akca-xss="executed"></html>`, nil
+func (executedDOMRenderer) Render(_ context.Context, rawURL string) (string, error) {
+	u, _ := url.Parse(rawURL)
+	value := u.Query().Get("q")
+	// A parameterless navigation is used by second-order XSS regression tests.
+	if value == "" {
+		return `<html data-akca-xss="executed"></html>`, nil
+	}
+	for _, payload := range verification.DOMXSSPayloads() {
+		if value == payload {
+			return `<html data-akca-xss="executed"></html>`, nil
+		}
+	}
+	return `<html><body>clean control</body></html>`, nil
+}
+
+type selectiveDOMRenderer struct {
+	payload      string
+	alwaysMarked bool
+}
+
+func (r selectiveDOMRenderer) Render(_ context.Context, rawURL string) (string, error) {
+	if r.alwaysMarked {
+		return `<html class="akca-xss-confirmed"></html>`, nil
+	}
+	u, _ := url.Parse(rawURL)
+	if u.Query().Get("q") == r.payload {
+		return `<html class="akca-xss-confirmed"></html>`, nil
+	}
+	return `<html><body>clean control</body></html>`, nil
 }
 
 func testTarget(payloads []payloadgen.Payload) ScanTarget {
@@ -154,8 +181,9 @@ func TestXSSDOMExecutionRequiresNoServerReflection(t *testing.T) {
 	payload := `"><svg/onload=alert(1)>`
 	client := &mockClient{responses: map[string]string{
 		"akca-xss-base":              "results:",
-		payload:                      "results: " + payload,
+		payload:                      "<html><body>application shell</body></html>",
 		verification.DOMXSSPayload(): "<html><body>application shell</body></html>",
+		"__default__":                "<html><body>application shell</body></html>",
 	}}
 	payloads := []payloadgen.Payload{{Value: payload, VulnClass: "xss", Variant: "html_breakout"}}
 	cfg := config.DefaultScanConfig()
@@ -167,6 +195,42 @@ func TestXSSDOMExecutionRequiresNoServerReflection(t *testing.T) {
 	}
 	if findings[0].Evidence.Signal != "dom_execution" {
 		t.Fatalf("non-reflected client-side execution was classified as %q", findings[0].Evidence.Signal)
+	}
+}
+
+func TestXSSDOMExecutionFallsBackAcrossCanaries(t *testing.T) {
+	payloads := verification.DOMXSSPayloads()
+	if len(payloads) < 2 {
+		t.Fatal("expected multiple DOM XSS canaries")
+	}
+	client := &mockClient{responses: map[string]string{
+		"akca-xss-base": "<html><body>application shell</body></html>",
+		"__default__":   "<html><body>application shell</body></html>",
+	}}
+	cfg := config.DefaultScanConfig()
+	r := NewRunner("scan-m", client, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+		func(string, string, map[string]interface{}) error { return nil }, cfg,
+		WithBrowserRenderer(selectiveDOMRenderer{payload: payloads[1]}))
+	findings := r.runXSS(context.Background(), testTarget(nil))
+	if len(findings) != 1 {
+		t.Fatalf("expected DOM XSS from fallback canary, got %d", len(findings))
+	}
+	if findings[0].Evidence.Payload.Value != payloads[1] || findings[0].Evidence.Signal != "dom_execution" {
+		t.Fatalf("unexpected fallback proof: %+v", findings[0].Evidence)
+	}
+}
+
+func TestXSSDOMExecutionRejectsPreexistingBrowserMarker(t *testing.T) {
+	client := &mockClient{responses: map[string]string{
+		"akca-xss-base": "<html><body>application shell</body></html>",
+		"__default__":   "<html><body>application shell</body></html>",
+	}}
+	cfg := config.DefaultScanConfig()
+	r := NewRunner("scan-m", client, scope.NewEngine(cfg), nil, verification.NewEngine(nil, nil), nil,
+		func(string, string, map[string]interface{}) error { return nil }, cfg,
+		WithBrowserRenderer(selectiveDOMRenderer{alwaysMarked: true}))
+	if findings := r.runXSS(context.Background(), testTarget(nil)); len(findings) != 0 {
+		t.Fatalf("pre-existing browser marker must not produce DOM XSS: %+v", findings)
 	}
 }
 

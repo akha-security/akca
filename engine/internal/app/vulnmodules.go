@@ -23,8 +23,8 @@ var fullScanModuleOrder = []vulnModulePhase{
 	{name: "tls_misconfig", title: "TLS misconfiguration scanning"},
 	{name: "sensitive_data", title: "Sensitive data scanning"},
 	{name: "secret_exposure", title: "Secret exposure scanning"},
-	{name: "vulnerable_components", title: "Vulnerable components scanning"},
-	{name: "known_cve", title: "Known CVE scanning"},
+	{name: "vulnerable_components", title: "Passive component inventory"},
+	{name: "known_cve", title: "Offline CVE catalog matching"},
 	{name: "script_source", title: "Script source scanning"},
 
 	// 2. Lightweight Active & Exposure Probing

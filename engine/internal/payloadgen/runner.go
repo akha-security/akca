@@ -45,6 +45,7 @@ func (g *Generator) Run(ctx context.Context, profiles []reflection.ReflectionPro
 			return nil, fmt.Errorf("database query failure for WAF profile on host %s: %w", host, err)
 		}
 		preferredTechniques := g.wafPreferredTechniques(host)
+		decoder := g.wafDecoderProfile(host)
 		learnData := store.Load(host, profile.EndpointURL)
 		w, b, n, fp := learnData.ToPayloadGen()
 
@@ -72,6 +73,12 @@ func (g *Generator) Run(ctx context.Context, profiles []reflection.ReflectionPro
 				CautiousModeRecommended: waf.CautiousModeRecommended,
 				AllowEvasion:            g.cfg.EnableWAFBypassHeaders,
 				PreferredTechniques:     preferredTechniques,
+				QueryURLDecodeDepth:     decoder.QueryURLDecodeDepth,
+				QueryURLDecodeObserved:  decoder.QueryURLDecodeObserved,
+				QueryURLDecodeConflict:  decoder.QueryURLDecodeConflict,
+				QueryPlusAsSpace:        decoder.QueryPlusAsSpace,
+				QueryPlusObserved:       decoder.QueryPlusObserved,
+				QueryPlusConflict:       decoder.QueryPlusConflict,
 			},
 			Budget: targetBudget,
 			Learn: LearningProfile{
@@ -112,6 +119,21 @@ func (g *Generator) Run(ctx context.Context, profiles []reflection.ReflectionPro
 		return nil, fmt.Errorf("failed to emit payload generation finished event: %w", err)
 	}
 	return results, nil
+}
+
+func (g *Generator) wafDecoderProfile(host string) wafintel.DecoderProfile {
+	if g.db == nil || strings.TrimSpace(host) == "" {
+		return wafintel.DecoderProfile{}
+	}
+	raw, err := g.db.LoadWAFLearningProfile(host)
+	if err != nil {
+		return wafintel.DecoderProfile{}
+	}
+	learn := wafintel.NewLearningProfile(host)
+	if json.Unmarshal([]byte(raw), &learn) != nil {
+		return wafintel.DecoderProfile{}
+	}
+	return learn.Decoder
 }
 
 func (g *Generator) wafPreferredTechniques(host string) []string {

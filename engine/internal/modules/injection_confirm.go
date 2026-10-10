@@ -1,6 +1,8 @@
 package modules
 
 import (
+	"html"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -18,7 +20,65 @@ func injectionPayloadReflected(payload, body, baseline string) bool {
 	if payload == "" {
 		return false
 	}
-	return strings.Contains(body, payload) && !strings.Contains(baseline, payload)
+	needle := strings.ToLower(payload)
+	bodyVariants := reflectionDecodeVariants(body)
+	baselineVariants := reflectionDecodeVariants(baseline)
+	for _, candidate := range bodyVariants {
+		if !strings.Contains(candidate, needle) {
+			continue
+		}
+		reflectedInBaseline := false
+		for _, control := range baselineVariants {
+			if strings.Contains(control, needle) {
+				reflectedInBaseline = true
+				break
+			}
+		}
+		if !reflectedInBaseline {
+			return true
+		}
+	}
+	return false
+}
+
+// reflectionDecodeVariants exposes the common representations used when an
+// application copies a request value into HTML, JavaScript or an analytics
+// URL. Comparing decoded probe and baseline variants prevents an encoded echo
+// from being mistaken for server-side execution.
+func reflectionDecodeVariants(value string) []string {
+	seen := map[string]struct{}{}
+	queue := []string{value}
+	variants := make([]string, 0, 8)
+	for depth := 0; depth < 4 && len(queue) > 0; depth++ {
+		current := queue
+		queue = nil
+		for _, raw := range current {
+			normalized := strings.ToLower(raw)
+			normalized = strings.ReplaceAll(normalized, `\/`, "/")
+			for escaped, decoded := range map[string]string{
+				`\u002f`: "/", `\u003a`: ":", `\u0025`: "%", `\u0026`: "&",
+				`\u003f`: "?", `\u003d`: "=", `\u002b`: "+",
+			} {
+				normalized = strings.ReplaceAll(normalized, escaped, decoded)
+			}
+			if _, ok := seen[normalized]; ok {
+				continue
+			}
+			seen[normalized] = struct{}{}
+			variants = append(variants, normalized)
+
+			if decoded := html.UnescapeString(normalized); decoded != normalized {
+				queue = append(queue, decoded)
+			}
+			if decoded, err := url.QueryUnescape(normalized); err == nil && decoded != normalized {
+				queue = append(queue, decoded)
+			}
+			if decoded, err := url.PathUnescape(normalized); err == nil && decoded != normalized {
+				queue = append(queue, decoded)
+			}
+		}
+	}
+	return variants
 }
 
 func sqliSignalConfirmed(p payloadgen.Payload, body, baseline, signal string) bool {

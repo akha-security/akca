@@ -1,6 +1,7 @@
 package payloadgen
 
 import (
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -648,6 +649,113 @@ func TestWAFMutatedNegativeControls(t *testing.T) {
 	}
 	if !hasAdaptedNegative {
 		t.Fatal("expected at least one adapted negative control payload")
+	}
+}
+
+func TestCompoundWAFTechniquesAlsoApplyToNegativeControls(t *testing.T) {
+	tests := []struct {
+		family    string
+		technique string
+		want      string
+	}{
+		{family: "sqli", technique: "comment_case", want: "/**/"},
+		{family: "command_injection", technique: "ifs_substitution", want: "${IFS}"},
+		{family: "xss", technique: "unicode_url", want: "%5C"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.technique, func(t *testing.T) {
+			adapted := Payload{
+				Family: tc.family, VulnClass: tc.family, Variant: "probe_waf_" + tc.technique,
+				Encoding: tc.technique, SemanticKey: "probe|" + tc.technique, Priority: 50,
+			}
+			control, ok := wafNegativeControlFor(adapted, reflection.ReflectionProfile{ParameterLocation: "body"})
+			if !ok || !strings.Contains(control.Value, tc.want) {
+				t.Fatalf("negative control did not receive %s: %+v", tc.technique, control)
+			}
+		})
+	}
+}
+
+func TestGroupBDoubleURLVariantHasExactlyTwoLayers(t *testing.T) {
+	original := "http://127.0.0.1/a?b=c"
+	var encoded string
+	for _, variant := range wafVariantsForPayload(original, "ssrf", "Cloudflare", reflection.ContextUnknown) {
+		if variant.enc == "double_url" {
+			encoded = variant.value
+			break
+		}
+	}
+	if encoded == "" {
+		t.Fatal("missing double_url SSRF variant")
+	}
+	once, err := url.QueryUnescape(encoded)
+	if err != nil || once == original {
+		t.Fatalf("expected one remaining URL layer, got %q (err=%v)", once, err)
+	}
+	twice, err := url.QueryUnescape(once)
+	if err != nil || twice != original {
+		t.Fatalf("expected exactly two URL layers, got %q (err=%v)", twice, err)
+	}
+}
+
+func TestRuntimeWAFVariantSetsKeepBooleanPairsAtomic(t *testing.T) {
+	values := []string{
+		`1' AND '17'='17'-- -`,
+		`1' AND '17'='18'-- -`,
+		`1' AND '29'='29'-- -`,
+		`1' AND '29'='30'-- -`,
+	}
+	sets := RuntimeWAFVariantSets(values, "sqli", reflection.ContextUnknown, "query", WAFHints{
+		Vendor: "Cloudflare", AllowEvasion: true, PreferredTechniques: []string{"double_url", "comment_case"},
+	}, 3)
+	if len(sets) == 0 {
+		t.Fatal("expected runtime WAF variants")
+	}
+	if sets[0].Encoding != "double_url" {
+		t.Fatalf("learned technique order was not honored: %+v", sets)
+	}
+	for _, set := range sets {
+		if len(set.Values) != len(values) {
+			t.Fatalf("boolean set lost a branch for %s: %+v", set.Encoding, set.Values)
+		}
+		for i, value := range set.Values {
+			if value == values[i] || value == "" {
+				t.Fatalf("branch %d was not transformed with %s: %q", i, set.Encoding, value)
+			}
+		}
+	}
+}
+
+func TestRuntimeWAFVariantsUseObservedDecodeDepth(t *testing.T) {
+	original := `' AND SLEEP(6)-- -`
+	sets := RuntimeWAFVariantSets([]string{original}, "sqli", reflection.ContextUnknown, "query", WAFHints{
+		Vendor: "Cloudflare", AllowEvasion: true, QueryURLDecodeObserved: true, QueryURLDecodeDepth: 3,
+	}, 1)
+	if len(sets) != 1 || sets[0].Encoding != "url_depth_3" {
+		t.Fatalf("observed decode depth was not prioritized: %+v", sets)
+	}
+	// Query transport supplies the final encoding layer, so the generated value
+	// must contain exactly two pre-encoding layers.
+	once, err := url.QueryUnescape(sets[0].Values[0])
+	if err != nil || once == original {
+		t.Fatalf("expected one remaining pre-encoding layer, got %q (err=%v)", once, err)
+	}
+	twice, err := url.QueryUnescape(once)
+	if err != nil || twice != original {
+		t.Fatalf("expected two pre-encoding layers before query transport, got %q (err=%v)", twice, err)
+	}
+}
+
+func TestRuntimeWAFVariantsIgnoreConflictingDecodeDepth(t *testing.T) {
+	sets := RuntimeWAFVariantSets([]string{`' AND 1=1-- -`}, "sqli", reflection.ContextUnknown, "query", WAFHints{
+		Vendor: "Cloudflare", AllowEvasion: true, QueryURLDecodeObserved: true,
+		QueryURLDecodeDepth: 3, QueryURLDecodeConflict: true,
+	}, 1)
+	if len(sets) == 0 {
+		t.Fatal("expected ordinary WAF variants")
+	}
+	if sets[0].Encoding == "url_depth_3" {
+		t.Fatalf("conflicting host observations must not drive encode depth: %+v", sets)
 	}
 }
 

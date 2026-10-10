@@ -3,6 +3,7 @@ package wafintel
 import (
 	"context"
 	"encoding/json"
+	"html"
 	"net/http"
 	"net/url"
 	"strings"
@@ -50,13 +51,21 @@ func (r *Runner) CalibrateWithOptions(ctx context.Context, targets []string, opt
 		if host == "" {
 			continue
 		}
-		waf, err := r.db.GetWAFProfile(r.scanID, host)
-		if err != nil || waf.Vendor == "" {
-			continue
-		}
 		learn := r.loadWAFLearn(host)
 		probeURL := calibrationURL(target)
 		baselineStatus, baselineBody := r.probe(ctx, probeURL, "akca-baseline", nil)
+		learn = r.probeParserTomography(ctx, probeURL, baselineStatus, baselineBody, learn)
+		if learn.Decoder.QueryURLDecodeObserved || learn.Decoder.QueryPlusObserved {
+			_ = r.emit("parser_tomography_observed", "query decoder behavior observed", map[string]interface{}{
+				"scan_id": r.scanID, "host": host, "decoder_profile": learn.Decoder,
+			})
+		}
+
+		waf, err := r.db.GetWAFProfile(r.scanID, host)
+		if err != nil || waf.Vendor == "" {
+			_ = r.db.SaveWAFLearningProfile(host, learn)
+			continue
+		}
 
 		// Character Pre-flight Matrix: probe critical separator/injection characters
 		learn = r.probeCharacterMatrix(ctx, probeURL, baselineStatus, baselineBody, learn)
@@ -117,11 +126,94 @@ func (r *Runner) CalibrateWithOptions(ctx context.Context, targets []string, opt
 		_ = r.db.SaveWAFLearningProfile(host, learn)
 		_ = r.emit("waf_strategy_selected", strategy.Name, map[string]interface{}{
 			"scan_id": r.scanID, "host": host, "vendor": waf.Vendor, "strategy_id": strategy.ID,
-			"encodings": strategy.Encodings, "protocol": strategy.Protocol,
+			"encodings": strategy.Encodings, "protocol": strategy.Protocol, "decoder_profile": learn.Decoder,
 		})
 	}
 	_ = r.emit("waf_evasion_finished", "waf evasion intelligence finished", map[string]interface{}{"scan_id": r.scanID})
 	return nil
+}
+
+// probeParserTomography sends inert markers whose reflected form reveals the
+// target's query normalization pipeline. A result is persisted only when the
+// exact marker is observable in the response.
+func (r *Runner) probeParserTomography(ctx context.Context, probeURL string, baseStatus int, baseBody string, learn LearningProfile) LearningProfile {
+	if r.client == nil || ctx.Err() != nil {
+		return learn
+	}
+	prefix := "akcaT9Q"
+	depthWireValue := prefix + "%252541z"
+	status, body := r.probe(ctx, appendRawQuery(probeURL, "akca_tomography", depthWireValue), depthWireValue, nil)
+	if !isWAFBlocked(baseStatus, baseBody, status, body) {
+		if depth, observed := inferQueryURLDecodeDepth(body, prefix); observed {
+			recordQueryURLDecodeDepth(&learn.Decoder, depth)
+		}
+	}
+
+	plusWireValue := prefix + "P+Qz"
+	status, body = r.probe(ctx, appendRawQuery(probeURL, "akca_tomography_plus", plusWireValue), plusWireValue, nil)
+	if !isWAFBlocked(baseStatus, baseBody, status, body) {
+		switch {
+		case responseContainsMarker(body, prefix+"P Qz"):
+			recordQueryPlusBehavior(&learn.Decoder, true)
+		case responseContainsMarker(body, prefix+"P+Qz"):
+			recordQueryPlusBehavior(&learn.Decoder, false)
+		}
+	}
+	return learn
+}
+
+func recordQueryURLDecodeDepth(profile *DecoderProfile, depth int) {
+	if profile.QueryURLDecodeObserved && profile.QueryURLDecodeDepth != depth {
+		profile.QueryURLDecodeConflict = true
+		return
+	}
+	profile.QueryURLDecodeDepth = depth
+	profile.QueryURLDecodeObserved = true
+}
+
+func recordQueryPlusBehavior(profile *DecoderProfile, plusAsSpace bool) {
+	if profile.QueryPlusObserved && profile.QueryPlusAsSpace != plusAsSpace {
+		profile.QueryPlusConflict = true
+		return
+	}
+	profile.QueryPlusAsSpace = plusAsSpace
+	profile.QueryPlusObserved = true
+}
+
+func inferQueryURLDecodeDepth(body, prefix string) (int, bool) {
+	candidates := []struct {
+		depth  int
+		marker string
+	}{
+		{3, prefix + "Az"},
+		{2, prefix + "%41z"},
+		{1, prefix + "%2541z"},
+		{0, prefix + "%252541z"},
+	}
+	for _, candidate := range candidates {
+		if responseContainsMarker(body, candidate.marker) {
+			return candidate.depth, true
+		}
+	}
+	return 0, false
+}
+
+func responseContainsMarker(body, marker string) bool {
+	return strings.Contains(body, marker) || strings.Contains(body, html.EscapeString(marker))
+}
+
+func appendRawQuery(rawURL, name, rawValue string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	pair := url.QueryEscape(name) + "=" + rawValue
+	if u.RawQuery == "" {
+		u.RawQuery = pair
+	} else {
+		u.RawQuery += "&" + pair
+	}
+	return u.String()
 }
 
 func (r *Runner) probe(ctx context.Context, rawURL, payload string, headers map[string]string) (int, string) {

@@ -12,6 +12,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/models"
 	"github.com/akha-security/akca/engine/internal/oast"
+	"github.com/akha-security/akca/engine/internal/payloadgen"
 	"github.com/akha-security/akca/engine/internal/reflection"
 	"github.com/akha-security/akca/engine/internal/scope"
 	"github.com/akha-security/akca/engine/internal/storage"
@@ -59,6 +60,21 @@ type groupBClient struct {
 	statuses     map[string]int
 	calls        int
 	seenPayloads []string
+}
+
+type encodedReflectionSSRFClient struct{}
+
+func (c *encodedReflectionSSRFClient) Do(_ context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	u, _ := url.Parse(rawURL)
+	payload := u.Query().Get("url")
+	responseBody := `<html><script>var dataText="page=/&referrer=clean";</script></html>`
+	if payload != "" {
+		responseBody = `<html><script>var dataText="page=/&referrer=` + url.QueryEscape(payload) + `";</script></html>`
+	}
+	return httpclient.RequestResponse{
+		Request:  httpclient.RequestRecord{Method: method, URL: rawURL, Headers: headers, Body: string(body)},
+		Response: httpclient.ResponseRecord{StatusCode: 200, Body: responseBody, Headers: map[string]string{"Content-Type": "text/html"}},
+	}, nil
 }
 
 type flappingBFLAClient struct {
@@ -173,6 +189,14 @@ func TestSSRFMetadataSignal(t *testing.T) {
 	}
 	if findings[0].Severity != "critical" {
 		t.Fatalf("reproduced structured SSRF evidence severity=%q, want critical", findings[0].Severity)
+	}
+}
+
+func TestSSRFEncodedAnalyticsReflectionDoesNotReport(t *testing.T) {
+	target := ScanTarget{EndpointURL: "http://example.com/index.php", Method: "GET", Parameter: "url"}
+	findings := groupBRunner(t, &encodedReflectionSSRFClient{}).runSSRF(context.Background(), target)
+	if len(findings) != 0 {
+		t.Fatalf("URL-encoded analytics/referrer reflection produced %d SSRF findings", len(findings))
 	}
 }
 
@@ -692,19 +716,23 @@ func TestSSRFBaselineToleratesSingleStatusFlap(t *testing.T) {
 
 func TestSSRFHighConfidenceMetadata(t *testing.T) {
 	tests := []struct {
-		body string
-		want bool
+		name  string
+		p     payloadgen.Payload
+		probe httpclient.ResponseRecord
+		want  bool
 	}{
-		{"random page content", false},
-		{`{"ami-id":"ami-1234","instance-id":"i-abcdef"}`, true},
-		{`{"computeMetadata":{"v1":{"project":"my-project"}}}`, true},
-		{`{"subscriptionId":"sub-123","Microsoft.Compute":{}}`, true},
-		{"normal html page with no metadata", false},
+		{name: "random", p: payloadgen.Payload{Value: "http://169.254.169.254/latest/meta-data/", ExpectedSignal: "aws_metadata"}, probe: httpclient.ResponseRecord{Body: "random page content", StatusCode: 200}, want: false},
+		{name: "aws fields", p: payloadgen.Payload{Value: "http://169.254.169.254/latest/meta-data/", ExpectedSignal: "aws_metadata"}, probe: httpclient.ResponseRecord{Body: `{"ami-id":"ami-1234","instance-id":"i-abcdef"}`, StatusCode: 200}, want: true},
+		{name: "gcp header and field", p: payloadgen.Payload{Value: "http://metadata.google.internal/computeMetadata/v1/", ExpectedSignal: "gcp_metadata"}, probe: httpclient.ResponseRecord{Body: "project/project-id", StatusCode: 200, Headers: map[string]string{"Metadata-Flavor": "Google"}}, want: true},
+		{name: "azure fields", p: payloadgen.Payload{Value: "http://169.254.169.254/metadata/instance?api-version=2021-02-01", ExpectedSignal: "azure_metadata"}, probe: httpclient.ResponseRecord{Body: `{"subscriptionId":"sub-123","vmId":"vm-123","Microsoft.Compute":{}}`, StatusCode: 200}, want: true},
+		{name: "reflected tencent hostname", p: payloadgen.Payload{Value: "http://metadata.tencentyun.com/latest/meta-data/", ExpectedSignal: "tencent_metadata"}, probe: httpclient.ResponseRecord{Body: "referrer=http%3A%2F%2Fmetadata.tencentyun.com%2Flatest%2Fmeta-data%2F", StatusCode: 200}, want: false},
 	}
 	for _, tt := range tests {
-		if got := ssrfHighConfidenceMetadata(tt.body); got != tt.want {
-			t.Errorf("ssrfHighConfidenceMetadata(%q) = %v, want %v", tt.body[:min(40, len(tt.body))], got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ssrfHighConfidenceMetadata(tt.p, httpclient.ResponseRecord{Body: "clean", StatusCode: 200}, tt.probe, tt.p.ExpectedSignal); got != tt.want {
+				t.Errorf("ssrfHighConfidenceMetadata() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

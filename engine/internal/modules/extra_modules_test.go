@@ -42,13 +42,17 @@ func TestReactRSCCrashIsReportedAsDecoderDifferentialNotRCE(t *testing.T) {
 }
 
 type archiveCountingClient struct {
-	mu    sync.Mutex
-	calls map[string]int
+	mu        sync.Mutex
+	calls     map[string]int
+	rangeSeen bool
 }
 
 func (c *archiveCountingClient) Do(_ context.Context, method, rawURL string, _ []byte, headers map[string]string) (httpclient.RequestResponse, error) {
 	c.mu.Lock()
 	c.calls[rawURL]++
+	if rawURL != "https://example.com" && headers["Range"] == "bytes=0-511" {
+		c.rangeSeen = true
+	}
 	c.mu.Unlock()
 	status := 404
 	body := "not found"
@@ -72,6 +76,21 @@ func TestBackupArchivesDoesNotRepeatRootDictionaryPerPrefix(t *testing.T) {
 	if rootCalls != 1 {
 		t.Fatalf("root archive candidate called %d times after first prefix", rootCalls)
 	}
+	if firstCalls > archiveRootCanaryProbes+1 {
+		t.Fatalf("uniform 404 origin exceeded canary stage: calls=%d", firstCalls)
+	}
+	if !client.rangeSeen {
+		t.Fatal("archive probes must request only the signature byte range")
+	}
+	for _, candidate := range []string{
+		"https://example.com/example.com.zip",
+		"https://example.com/database.sql.gz",
+		"https://example.com/news/article.bak",
+	} {
+		if client.calls[candidate] != 1 {
+			t.Fatalf("diversified archive canary missed %s", candidate)
+		}
+	}
 	runner.runBackupArchives(context.Background(), ScanTarget{EndpointURL: "https://example.com/blog/post", Method: "POST"})
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -80,6 +99,39 @@ func TestBackupArchivesDoesNotRepeatRootDictionaryPerPrefix(t *testing.T) {
 	}
 	if len(client.calls)-firstCalls >= firstCalls {
 		t.Fatalf("second prefix repeated the origin dictionary: first=%d additional=%d", firstCalls, len(client.calls)-firstCalls)
+	}
+}
+
+type archiveBlockedClient struct {
+	mu           sync.Mutex
+	archiveCalls int
+}
+
+func (c *archiveBlockedClient) Do(_ context.Context, method, rawURL string, _ []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	status, body := 200, "<html>home</html>"
+	if rawURL != "https://example.com" {
+		c.mu.Lock()
+		c.archiveCalls++
+		c.mu.Unlock()
+		status, body = 429, "too many requests"
+	}
+	return httpclient.RequestResponse{
+		Request:  httpclient.RequestRecord{Method: method, URL: rawURL, Headers: headers},
+		Response: httpclient.ResponseRecord{StatusCode: status, Body: body, Headers: map[string]string{"Content-Type": "text/plain"}},
+	}, nil
+}
+
+func TestBackupArchivesStopsAtFirstPressureSignal(t *testing.T) {
+	client := &archiveBlockedClient{}
+	runner := newActiveRunner(t, client)
+	findings := runner.runBackupArchives(context.Background(), ScanTarget{EndpointURL: "https://example.com/news/article", Method: "GET"})
+	if len(findings) != 0 {
+		t.Fatalf("rate-limited archive scan produced findings: %+v", findings)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if client.archiveCalls != 1 {
+		t.Fatalf("archive queue continued after pressure signal: calls=%d", client.archiveCalls)
 	}
 }
 

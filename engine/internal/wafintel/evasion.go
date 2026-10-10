@@ -2,12 +2,16 @@ package wafintel
 
 import (
 	"fmt"
-	"math/rand"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
-	"time"
-	"unicode"
+	"unicode/utf8"
+)
+
+var (
+	caseInsensitivePayloadToken = regexp.MustCompile(`(?i)\b(?:select|union|from|where|and|or|script|svg|img|body|onerror|onload)\b`)
+	mysqlKeywordToken           = regexp.MustCompile(`(?i)\b(?:select|union|from|where)\b`)
 )
 
 type Strategy struct {
@@ -65,6 +69,18 @@ type LearningProfile struct {
 	AllowedChars     []string       `json:"allowed_chars,omitempty"`
 	LastSuccessful   string         `json:"last_successful"`
 	LastTechnique    string         `json:"last_technique,omitempty"`
+	Decoder          DecoderProfile `json:"decoder_profile,omitempty"`
+}
+
+// DecoderProfile records only transformations directly observed in reflected
+// canaries. Unknown values remain explicitly unobserved rather than guessed.
+type DecoderProfile struct {
+	QueryURLDecodeDepth    int  `json:"query_url_decode_depth,omitempty"`
+	QueryURLDecodeObserved bool `json:"query_url_decode_observed,omitempty"`
+	QueryURLDecodeConflict bool `json:"query_url_decode_conflict,omitempty"`
+	QueryPlusAsSpace       bool `json:"query_plus_as_space,omitempty"`
+	QueryPlusObserved      bool `json:"query_plus_observed,omitempty"`
+	QueryPlusConflict      bool `json:"query_plus_conflict,omitempty"`
 }
 
 func NewLearningProfile(domain string) LearningProfile {
@@ -196,9 +212,7 @@ func appendBlockedTechnique(blocked []string, technique string) []string {
 func ApplyStrategy(payload string, strategy Strategy) (string, map[string]string) {
 	out := MutatePayload(payload)
 	headers := map[string]string{}
-	for _, enc := range strategy.Encodings {
-		out = ApplyEncoding(out, enc)
-	}
+	out = EncodingCascade(out, strategy.Encodings...)
 	for _, trick := range strategy.Protocol {
 		switch trick {
 		case "chunked":
@@ -227,6 +241,7 @@ func ApplyStrategy(payload string, strategy Strategy) (string, map[string]string
 }
 
 func ApplyEncoding(s, enc string) string {
+	enc = strings.ToLower(strings.TrimSpace(enc))
 	switch enc {
 	case "url":
 		return url.QueryEscape(s)
@@ -287,16 +302,15 @@ func ApplyEncoding(s, enc string) string {
 		r = strings.ReplaceAll(r, ">", `\u003e`)
 		return r
 	case "mysql_version_comment":
-		r := strings.ReplaceAll(s, "SELECT", "/*!50000SELECT*/")
-		r = strings.ReplaceAll(r, "UNION", "/*!50000UNION*/")
-		r = strings.ReplaceAll(r, "FROM", "/*!50000FROM*/")
-		r = strings.ReplaceAll(r, "WHERE", "/*!50000WHERE*/")
-		return r
+		return mysqlKeywordToken.ReplaceAllStringFunc(s, func(keyword string) string {
+			return "/*!50000" + keyword + "*/"
+		})
 	case "mixed":
 		if len(s) == 0 {
 			return s
 		}
-		return url.QueryEscape(string(s[0])) + htmlEntityEncode(s[1:])
+		_, size := utf8.DecodeRuneInString(s)
+		return url.QueryEscape(s[:size]) + htmlEntityEncode(s[size:])
 	case "unicode_nfkc":
 		r := strings.ReplaceAll(s, "<", "\uff1c")
 		r = strings.ReplaceAll(r, ">", "\uff1e")
@@ -313,21 +327,52 @@ func ApplyEncoding(s, enc string) string {
 
 func EncodingCascade(s string, encodings ...string) string {
 	out := s
+	previous := ""
 	for _, enc := range encodings {
-		out = ApplyEncoding(out, enc)
+		enc = strings.ToLower(strings.TrimSpace(enc))
+		switch enc {
+		case "url":
+			out = ApplyEncoding(out, "url")
+		case "double_url":
+			// A strategy may describe the desired progression as url -> double_url.
+			// In that case double_url means a total depth of two, not two more
+			// layers on top of the existing URL encoding.
+			if previous == "url" {
+				out = ApplyEncoding(out, "url")
+			} else {
+				out = ApplyEncoding(out, "double_url")
+			}
+		default:
+			out = ApplyEncoding(out, enc)
+		}
+		previous = enc
 	}
 	return out
 }
 
 func MutatePayload(s string) string {
+	// Only mutate tokens whose grammar is case-insensitive. Randomly changing
+	// every letter can invalidate case-sensitive identifiers such as JS alert().
+	return caseInsensitivePayloadToken.ReplaceAllStringFunc(s, alternatingCase)
+}
+
+func alternatingCase(token string) string {
 	var b strings.Builder
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	for i, r := range s {
-		if i%2 == rng.Intn(2) {
-			b.WriteRune(unicode.ToUpper(r))
-		} else {
-			b.WriteRune(unicode.ToLower(r))
+	b.Grow(len(token))
+	upper := true
+	for _, r := range token {
+		if r >= 'a' && r <= 'z' {
+			if upper {
+				r -= 'a' - 'A'
+			}
+			upper = !upper
+		} else if r >= 'A' && r <= 'Z' {
+			if !upper {
+				r += 'a' - 'A'
+			}
+			upper = !upper
 		}
+		b.WriteRune(r)
 	}
 	return b.String()
 }
@@ -382,15 +427,15 @@ func hexEncode(s string) string {
 	if strings.Contains(lower, "select") || strings.Contains(lower, "union") || strings.Contains(lower, "or 1=1") {
 		var b strings.Builder
 		b.WriteString("0x")
-		for _, r := range s {
-			b.WriteString(fmt.Sprintf("%02x", r))
+		for _, value := range []byte(s) {
+			b.WriteString(fmt.Sprintf("%02x", value))
 		}
 		return b.String()
 	}
 	var b strings.Builder
-	for _, r := range s {
+	for _, value := range []byte(s) {
 		b.WriteString(`\x`)
-		hb := hexByte(byte(r))
+		hb := hexByte(value)
 		b.Write(hb)
 	}
 	return b.String()
@@ -398,8 +443,8 @@ func hexEncode(s string) string {
 
 func octalEncode(s string) string {
 	var b strings.Builder
-	for _, r := range s {
-		b.WriteString(fmt.Sprintf("\\%o", r))
+	for _, value := range []byte(s) {
+		b.WriteString(fmt.Sprintf("\\%03o", value))
 	}
 	return b.String()
 }

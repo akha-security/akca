@@ -14,13 +14,15 @@ import (
 )
 
 type delayedTimingProbe struct {
-	Target    ScanTarget
-	Module    string
-	Payload   payloadgen.Payload
-	Baseline  timingblind.Baseline
-	SleepSec  int
-	FirstMs   int64
-	Scheduled time.Time
+	Target     ScanTarget
+	Module     string
+	Payload    payloadgen.Payload
+	ZeroValue  string
+	FalseValue string
+	Baseline   timingblind.Baseline
+	SleepSec   int
+	FirstMs    int64
+	Scheduled  time.Time
 }
 
 func (r *Runner) calibrateTargetTiming(ctx context.Context, target ScanTarget) timingblind.Baseline {
@@ -117,7 +119,10 @@ func (r *Runner) flushDelayedTimingVerifications(ctx context.Context) []ModuleFi
 		}
 		zeroValue := "akca-timing-zero-control"
 		if item.Module == "sqli" {
-			zeroValue = timingblind.SQLiMatchedZeroDelayPayload(item.Payload.Value, r.techDatabaseHint(item.Target.EndpointURL)).Value
+			zeroValue = item.ZeroValue
+			if zeroValue == "" {
+				zeroValue = timingblind.SQLiMatchedZeroDelayPayload(item.Payload.Value, r.techDatabaseHint(item.Target.EndpointURL)).Value
+			}
 		} else if item.Module == "nosql" {
 			if strings.Contains(item.Payload.Value, "sleep(") {
 				zeroValue = strings.ReplaceAll(item.Payload.Value, "sleep(5000)", "sleep(0)")
@@ -152,8 +157,14 @@ func (r *Runner) flushDelayedTimingVerifications(ctx context.Context) []ModuleFi
 			continue
 		}
 		if item.Module == "sqli" {
-			if falseControl, hasFalseControl := timingblind.SQLiXORFalseConditionControl(item.Payload.Value); hasFalseControl {
-				falseRR, falseErr := r.probeForModule(ctx, item.Module, item.Target, falseControl.Value)
+			falseValue := item.FalseValue
+			if falseValue == "" {
+				if falseControl, hasFalseControl := timingblind.SQLiXORFalseConditionControl(item.Payload.Value); hasFalseControl {
+					falseValue = falseControl.Value
+				}
+			}
+			if falseValue != "" {
+				falseRR, falseErr := r.probeForModule(ctx, item.Module, item.Target, falseValue)
 				if falseErr != nil || !usableTimingSQLiResponse(falseRR.Response) || !acceptableTimingStatusPair(falseRR.Response.StatusCode, rr.Response.StatusCode) {
 					continue
 				}

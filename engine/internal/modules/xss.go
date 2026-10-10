@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/akha-security/akca/engine/internal/config"
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/oast"
 	"github.com/akha-security/akca/engine/internal/payloadgen"
@@ -31,6 +32,16 @@ func (r *Runner) runXSS(ctx context.Context, target ScanTarget) []ModuleFinding 
 	if len(probes) == 0 {
 		probes = defaultXSSProbes()
 	}
+	// DOM XSS does not need to alter the server response. Test it as an
+	// independent browser proof before reflection-based filtering; otherwise a
+	// location.search -> innerHTML/eval flow is discarded while the HTTP body is
+	// still the same application shell. The browser control also prevents an
+	// unrelated marker already present on the page from becoming a finding.
+	if f := r.confirmDOMXSSInBrowser(ctx, target, baseline); f != nil {
+		if r.recordFinding(ctx, &out, f, "xss", f.Evidence.Signal) {
+			return out
+		}
+	}
 	for _, p := range probes {
 		if p.IsControl || p.IsNegativeControl {
 			continue
@@ -52,42 +63,19 @@ func (r *Runner) runXSS(ctx context.Context, target ScanTarget) []ModuleFinding 
 		if !xssSignalConfirmed(p, rr.Response.Body, baseline.Response.Body, signal) {
 			continue
 		}
-		oastURL := ""
-		domPresent := verification.CheckDOMPresence(rr.Response.Body, p.Value)
-		domExecuted := false
-		domPayload := verification.DOMXSSPayload()
-		domRR, domErr := r.probeForModule(ctx, "xss", target, domPayload)
-		browserCanaryReflected := false
-		if domErr == nil && r.browser != nil && domRR.Request.URL != "" {
-			browserCanaryReflected = verification.CheckDOMPresence(domRR.Response.Body, domPayload)
-			rendered, renderErr := r.renderProbeInBrowser(ctx, domRR)
-			domExecuted = renderErr == nil && verification.CheckDOMExecution(rendered)
-		}
-		if domExecuted && !sqliErrorRe.MatchString(domRR.Response.Body) {
-			// Browser execution is the proof mechanism, not automatically the XSS
-			// subtype. If the canary is present in the server response this is a
-			// reflected XSS that was confirmed in a browser. Only execution without
-			// server-side reflection is labelled DOM-based XSS.
-			if browserCanaryReflected {
-				p = defaultPayload("xss", "browser_reflected_canary", domPayload, "reflected_browser_execution")
-				signal = "reflected_browser_execution"
-			} else {
-				p = defaultPayload("xss", "browser_dom_canary", domPayload, "dom_execution")
-				signal = "dom_execution"
-			}
-			rr = domRR
-			probeTarget = target
-			domPresent = browserCanaryReflected
-		}
 		marker := ""
 		writeLike := !strings.EqualFold(target.Method, http.MethodGet) && !strings.EqualFold(target.Method, http.MethodHead)
-		if domErr == nil && domRR.Response.StatusCode >= 200 && domRR.Response.StatusCode < 400 &&
-			(writeLike || target.Profile.Stable && target.Profile.ReflectionKind == reflection.ReflectionRaw) {
-			// Stored payloads commonly return only 2xx/3xx and do not reflect at the
-			// injection point. Track successful write surfaces as well as stable raw
-			// reflections so later pages can provide independent execution proof.
-			marker = domPayload
-			r.trackStoredMarker(target.EndpointURL, target.Parameter, marker)
+		if r.browser == nil {
+			domPayload := verification.DOMXSSPayload()
+			domRR, domErr := r.probeForModule(ctx, "xss", target, domPayload)
+			if domErr == nil && domRR.Response.StatusCode >= 200 && domRR.Response.StatusCode < 400 &&
+				(writeLike || target.Profile.Stable && target.Profile.ReflectionKind == reflection.ReflectionRaw) {
+				// Stored payloads commonly return only 2xx/3xx and do not reflect at the
+				// injection point. Track successful write surfaces as well as stable raw
+				// reflections so later pages can provide independent execution proof.
+				marker = domPayload
+				r.trackStoredMarker(target.EndpointURL, target.Parameter, marker)
+			}
 		}
 		if target.Profile.Stable && target.Profile.ReflectionKind == reflection.ReflectionRaw {
 			if signal == "reflected" {
@@ -98,8 +86,7 @@ func (r *Runner) runXSS(ctx context.Context, target ScanTarget) []ModuleFinding 
 		// executable reflected payload is already validated by the HTML parser;
 		// treating that ordinary reflection as "DOM presence only" would apply
 		// an unrelated false-positive penalty.
-		domSignalPresent := domPresent && domExecuted
-		f := r.verifyAndBuild(ctx, "xss", probeTarget, p, baseline, rr, signal, domSignalPresent, domExecuted, oastURL, marker)
+		f := r.verifyAndBuild(ctx, "xss", probeTarget, p, baseline, rr, signal, false, false, "", marker)
 		if f != nil {
 			if r.recordFinding(ctx, &out, f, "xss", signal) {
 				return out
@@ -107,6 +94,83 @@ func (r *Runner) runXSS(ctx context.Context, target ScanTarget) []ModuleFinding 
 		}
 	}
 	return out
+}
+
+// confirmDOMXSSInBrowser proves client-side execution even when the HTTP
+// response is byte-for-byte identical to the baseline. It deliberately limits
+// navigation-based proof to GET URL surfaces: replaying a header/body mutation
+// by merely visiting its URL would test a different request and misattribute
+// the result.
+func (r *Runner) confirmDOMXSSInBrowser(ctx context.Context, target ScanTarget,
+	baseline httpclient.RequestResponse) *ModuleFinding {
+	if r.browser == nil || !domBrowserAddressable(target) || baseline.Request.URL == "" {
+		return nil
+	}
+	controlDOM, err := r.renderProbeInBrowser(ctx, baseline)
+	if err != nil || verification.CheckDOMExecution(controlDOM) {
+		return nil
+	}
+
+	payloads := verification.DOMXSSPayloads()
+	switch r.cfg.PayloadBudget {
+	case config.PayloadBudgetLow:
+		payloads = payloads[:min(1, len(payloads))]
+	case config.PayloadBudgetMedium:
+		payloads = payloads[:min(2, len(payloads))]
+	case config.PayloadBudgetHigh:
+		payloads = payloads[:min(3, len(payloads))]
+	}
+
+	for index, value := range payloads {
+		attempts := r.injectionProbeAttemptsForModule(ctx, "xss", target, value)
+		if len(attempts) == 0 {
+			continue
+		}
+		attempt := attempts[0]
+		rr := attempt.RR
+		if rr.Request.URL == "" || rr.Response.StatusCode < 200 || rr.Response.StatusCode >= 400 ||
+			sqliErrorRe.MatchString(rr.Response.Body) {
+			continue
+		}
+		rendered, renderErr := r.renderProbeInBrowser(ctx, rr)
+		if renderErr != nil || !verification.CheckDOMExecution(rendered) {
+			continue
+		}
+
+		reflected := injectionPayloadReflected(value, rr.Response.Body, baseline.Response.Body)
+		signal := "dom_execution"
+		variant := fmt.Sprintf("browser_dom_canary_%d", index+1)
+		if reflected {
+			signal = "reflected_browser_execution"
+			variant = fmt.Sprintf("browser_reflected_canary_%d", index+1)
+		}
+		payload := defaultPayload("xss", variant, value, signal)
+		probeTarget := attempt.Target
+		return r.verifyAndBuildWithCandidate(ctx, "xss", probeTarget, payload, baseline, rr,
+			signal, reflected, true, "", "", func(candidate *verification.Candidate) {
+				// A clean browser-rendered baseline is the negative execution control.
+				candidate.NegativeControlSet = true
+				candidate.NegativeControlOK = true
+				candidate.Observations = append(candidate.Observations,
+					r.observation("xss", probeTarget, verification.RoleNegativeControl, 1, baseline))
+			})
+	}
+	return nil
+}
+
+func domBrowserAddressable(target ScanTarget) bool {
+	method := strings.ToUpper(strings.TrimSpace(target.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+	if method != http.MethodGet {
+		return false
+	}
+	location := strings.ToLower(strings.TrimSpace(target.Location))
+	if location == "" {
+		location = strings.ToLower(strings.TrimSpace(target.Profile.ParameterLocation))
+	}
+	return location == "" || location == "query" || location == "path"
 }
 
 func (r *Runner) renderProbeInBrowser(ctx context.Context, rr httpclient.RequestResponse) (string, error) {

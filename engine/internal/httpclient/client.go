@@ -47,6 +47,20 @@ type RequestResponse struct {
 
 var exchangeSequence atomic.Uint64
 
+type expectedRateLimitContextKey struct{}
+
+// WithExpectedRateLimitResponse marks deliberate rate-limit verification
+// traffic. A 429 remains visible to the caller as evidence, but it must not be
+// mistaken for an unexpected WAF ban that globally parks unrelated modules.
+func WithExpectedRateLimitResponse(ctx context.Context) context.Context {
+	return context.WithValue(ctx, expectedRateLimitContextKey{}, true)
+}
+
+func expectsRateLimitResponse(ctx context.Context) bool {
+	value, _ := ctx.Value(expectedRateLimitContextKey{}).(bool)
+	return value
+}
+
 func StampExchange(rr *RequestResponse) {
 	if rr.ExchangeID == "" {
 		rr.ExchangeID = fmt.Sprintf("exchange-%d", exchangeSequence.Add(1))
@@ -65,6 +79,7 @@ type Client struct {
 	uaIndex         int
 	blockMu         sync.Mutex
 	hostBlocks      map[string]int
+	hostHealthy     map[string]int
 	blockedUntil    map[string]time.Time
 	OnRequest       func(err bool)
 	requestCount    atomic.Int64
@@ -78,6 +93,10 @@ func (c *Client) HTTPClient() *http.Client {
 	}
 	return c.httpClient
 }
+
+// IsLiveNetworkClient lets higher-level schedulers apply deliberate pacing to
+// noisy enumeration modules without slowing deterministic in-memory clients.
+func (c *Client) IsLiveNetworkClient() bool { return true }
 
 func (c *Client) TotalRequests() int64 {
 	if c == nil {
@@ -146,6 +165,7 @@ func New(cfg config.ScanConfig, scopeEngine *scope.Engine, limiter *ratelimit.Li
 		limiter:        limiter,
 		cfg:            cfg,
 		hostBlocks:     make(map[string]int),
+		hostHealthy:    make(map[string]int),
 		blockedUntil:   make(map[string]time.Time),
 		browserDomains: make(map[string]struct{}),
 	}
@@ -155,6 +175,7 @@ func New(cfg config.ScanConfig, scopeEngine *scope.Engine, limiter *ratelimit.Li
 		}
 	}
 	wireTransport := NewWireTransport(transport, limiter, &c.networkAttempts, cfg.RequestBudget)
+	wireTransport.hostGate = c.waitForHostCircuit
 	c.httpClient = &http.Client{
 		Timeout:   30 * time.Second,
 		Transport: wireTransport,
@@ -234,8 +255,8 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 	if err != nil {
 		return RequestResponse{}, err
 	}
-	if until, blocked := c.circuitOpen(u.Hostname()); blocked {
-		return RequestResponse{}, fmt.Errorf("host circuit open until %s after repeated WAF/rate-limit blocks", until.UTC().Format(time.RFC3339))
+	if err := c.waitForHostCircuit(ctx, u.Hostname()); err != nil {
+		return RequestResponse{}, err
 	}
 
 	start := time.Now()
@@ -312,9 +333,14 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 		// Handle WAF rate limiting — 429 is preserved as evidence and not retried,
 		// but future requests on this host/limiter are slowed down.
 		if resp.StatusCode == http.StatusTooManyRequests {
-			c.limiter.SetWAFSlowDown(5.0)
-			if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
-				cooldown := retryAfterDuration(retryAfter, 5*time.Second)
+			if !expectsRateLimitResponse(ctx) {
+				c.limiter.SetWAFSlowDown(5.0)
+				// Many WAFs omit Retry-After. Treat the first unexpected 429 as a real
+				// host-pressure signal instead of letting queued workers continue.
+				cooldown := retryAfterDuration(resp.Header.Get("Retry-After"), 30*time.Second)
+				if cooldown < 30*time.Second {
+					cooldown = 30 * time.Second
+				}
 				c.recordHostBlock(u.Hostname(), cooldown)
 			}
 			break
@@ -323,8 +349,8 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 		if resp.StatusCode >= 520 && resp.StatusCode <= 527 {
 			c.recordHostBlock(u.Hostname(), 15*time.Second)
 			resp.Body.Close()
-			if until, blocked := c.circuitOpen(u.Hostname()); blocked {
-				return RequestResponse{}, fmt.Errorf("CDN/WAF failures; host circuit open until %s", until.UTC().Format(time.RFC3339))
+			if err := c.waitForHostCircuit(ctx, u.Hostname()); err != nil {
+				return RequestResponse{}, err
 			}
 			c.limiter.SetWAFSlowDown(3.0)
 
@@ -344,11 +370,6 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 400 {
-		c.clearHostBlocks(u.Hostname())
-		c.limiter.DecayWAFSlowDown(0.10)
-	}
-
 	const maxBodyBytes = 2 << 20
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
 	if err != nil {
@@ -358,6 +379,17 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 	if len(respBody) > maxBodyBytes {
 		respBody = respBody[:maxBodyBytes]
 		bodyTruncated = true
+	}
+	if resp.StatusCode != http.StatusTooManyRequests && activeWAFBlockResponse(resp.StatusCode, resp.Header, string(respBody)) {
+		c.limiter.SetWAFSlowDown(5.0)
+		cooldown := retryAfterDuration(resp.Header.Get("Retry-After"), 30*time.Second)
+		if cooldown < 30*time.Second {
+			cooldown = 30 * time.Second
+		}
+		c.recordHostBlock(u.Hostname(), cooldown)
+	} else if resp.StatusCode < 500 {
+		c.recordHostSuccess(u.Hostname())
+		c.limiter.DecayWAFSlowDown(0.10)
 	}
 
 	redirected := false
@@ -439,6 +471,7 @@ func (c *Client) circuitOpen(host string) (time.Time, bool) {
 			if !now.Before(t) {
 				delete(c.blockedUntil, h)
 				delete(c.hostBlocks, h)
+				delete(c.hostHealthy, h)
 			}
 		}
 	}
@@ -450,10 +483,52 @@ func (c *Client) circuitOpen(host string) (time.Time, bool) {
 	return until, true
 }
 
+// waitForHostCircuit preserves the server-requested cooldown without turning it
+// into a synthetic transport failure. Returning immediately used to make every
+// module scheduled during a Retry-After window skip all of its targets, even
+// when the scan had no request or time budget. Waiting keeps back-pressure while
+// allowing the scan to resume as soon as the host is available again.
+func (c *Client) waitForHostCircuit(ctx context.Context, host string) error {
+	const recheckInterval = 250 * time.Millisecond
+	for {
+		until, blocked := c.circuitOpen(host)
+		if !blocked {
+			return nil
+		}
+		wait := time.Until(until)
+		if wait <= 0 {
+			continue
+		}
+		// Another in-flight request may recover and clear the circuit before the
+		// advertised cooldown expires. Recheck periodically so waiting workers do
+		// not remain parked after the host has already become healthy.
+		if wait > recheckInterval {
+			wait = recheckInterval
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 func (c *Client) recordHostBlock(host string, cooldown time.Duration) {
 	c.blockMu.Lock()
 	defer c.blockMu.Unlock()
+	if c.hostBlocks == nil {
+		c.hostBlocks = make(map[string]int)
+	}
+	if c.hostHealthy == nil {
+		c.hostHealthy = make(map[string]int)
+	}
+	if c.blockedUntil == nil {
+		c.blockedUntil = make(map[string]time.Time)
+	}
 	c.hostBlocks[host]++
+	c.hostHealthy[host] = 0
 	if c.hostBlocks[host] < 3 && cooldown < 30*time.Second {
 		return
 	}
@@ -463,14 +538,59 @@ func (c *Client) recordHostBlock(host string, cooldown time.Duration) {
 	if cooldown > 15*time.Minute {
 		cooldown = 15 * time.Minute
 	}
-	c.blockedUntil[host] = time.Now().Add(cooldown)
+	until := time.Now().Add(cooldown)
+	if current := c.blockedUntil[host]; current.After(until) {
+		until = current
+	}
+	c.blockedUntil[host] = until
+}
+
+func (c *Client) recordHostSuccess(host string) {
+	c.blockMu.Lock()
+	defer c.blockMu.Unlock()
+	if c.hostBlocks == nil || c.hostBlocks[host] == 0 {
+		return
+	}
+	if c.hostHealthy == nil {
+		c.hostHealthy = make(map[string]int)
+	}
+	c.hostHealthy[host]++
+	if c.hostHealthy[host] < 3 {
+		return
+	}
+	delete(c.hostBlocks, host)
+	delete(c.hostHealthy, host)
+	delete(c.blockedUntil, host)
 }
 
 func (c *Client) clearHostBlocks(host string) {
 	c.blockMu.Lock()
 	delete(c.hostBlocks, host)
+	delete(c.hostHealthy, host)
 	delete(c.blockedUntil, host)
 	c.blockMu.Unlock()
+}
+
+func activeWAFBlockResponse(status int, headers http.Header, body string) bool {
+	if status == http.StatusTooManyRequests {
+		return true
+	}
+	lower := strings.ToLower(body)
+	for _, marker := range []string{
+		"web application firewall", "request blocked", "requested url was rejected",
+		"checking your browser", "attention required", "cf-browser-verification",
+		"incapsula_resource", "your support id is", "rate limit exceeded",
+		"too many requests", "temporarily rate limited", "captcha challenge",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	if status == http.StatusForbidden {
+		server := strings.ToLower(headers.Get("Server"))
+		return strings.Contains(server, "cloudflare") && strings.Contains(lower, "ray id")
+	}
+	return false
 }
 
 func retryAfterDuration(raw string, fallback time.Duration) time.Duration {

@@ -78,27 +78,49 @@ func (r *Runner) modulePayloads(target ScanTarget, vulnClass, oastURL string) []
 // OAST callers use it to regenerate the same WAF variant with a fresh
 // callback URL, preserving a one-to-one callback-to-probe binding.
 func (r *Runner) generatedModulePayloads(target ScanTarget, vulnClass, oastURL string) []payloadgen.Payload {
-	vendor := ""
-	var preferred []string
-	var blockedChars, allowedChars []string
+	hints := r.wafHintsForTarget(target)
+	hints.AllowEvasion = hints.AllowEvasion && moduleAllowsHeaderPayloads(vulnClass)
+	return dedupePayloads(payloadgen.GenerateGroupB(vulnClass, oastURL, hints))
+}
+
+func (r *Runner) wafHintsForTarget(target ScanTarget) payloadgen.WAFHints {
+	hints := payloadgen.WAFHints{AllowEvasion: r.cfg.EnableWAFBypassHeaders}
 	if r.db != nil {
 		host := wafintel.HostFromTarget(target.EndpointURL)
 		if waf, err := r.db.GetWAFProfile(r.scanID, host); err == nil {
-			vendor = waf.Vendor
+			hints.Vendor = waf.Vendor
+			hints.CautiousModeRecommended = waf.CautiousModeRecommended
 		}
 		if raw, err := r.db.LoadWAFLearningProfile(host); err == nil {
 			learn := wafintel.NewLearningProfile(host)
 			if json.Unmarshal([]byte(raw), &learn) == nil {
-				preferred = wafintel.PreferredTechniques(learn)
-				blockedChars = learn.BlockedChars
-				allowedChars = learn.AllowedChars
+				hints.PreferredTechniques = wafintel.PreferredTechniques(learn)
+				hints.BlockedChars = learn.BlockedChars
+				hints.AllowedChars = learn.AllowedChars
+				hints.QueryURLDecodeDepth = learn.Decoder.QueryURLDecodeDepth
+				hints.QueryURLDecodeObserved = learn.Decoder.QueryURLDecodeObserved
+				hints.QueryURLDecodeConflict = learn.Decoder.QueryURLDecodeConflict
+				hints.QueryPlusAsSpace = learn.Decoder.QueryPlusAsSpace
+				hints.QueryPlusObserved = learn.Decoder.QueryPlusObserved
+				hints.QueryPlusConflict = learn.Decoder.QueryPlusConflict
 			}
 		}
 	}
-	return dedupePayloads(payloadgen.GenerateGroupB(vulnClass, oastURL, payloadgen.WAFHints{
-		Vendor: vendor, AllowEvasion: r.cfg.EnableWAFBypassHeaders && moduleAllowsHeaderPayloads(vulnClass),
-		PreferredTechniques: preferred, BlockedChars: blockedChars, AllowedChars: allowedChars,
-	}))
+	return hints
+}
+
+func (r *Runner) runtimeSQLiWAFVariantSets(target ScanTarget, values []string) []payloadgen.WAFVariantSet {
+	hints := r.wafHintsForTarget(target)
+	return r.runtimeSQLiWAFVariantSetsWithHints(target, values, hints)
+}
+
+func (r *Runner) runtimeSQLiWAFVariantSetsWithHints(target ScanTarget, values []string, hints payloadgen.WAFHints) []payloadgen.WAFVariantSet {
+	hints.AllowEvasion = hints.AllowEvasion && moduleAllowsHeaderPayloads("sqli")
+	location := target.Location
+	if strings.TrimSpace(location) == "" {
+		location = target.Profile.ParameterLocation
+	}
+	return payloadgen.RuntimeWAFVariantSets(values, "sqli", target.Profile.Context, location, hints, 3)
 }
 
 func dedupePayloads(payloads []payloadgen.Payload) []payloadgen.Payload {

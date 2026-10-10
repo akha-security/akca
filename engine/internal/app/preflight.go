@@ -58,6 +58,12 @@ func (e *Engine) runPreflightValidation(ctx context.Context, cfg config.ScanConf
 	if err := preflightStatusError(rr.Response.StatusCode, scanHasConfiguredAuth(cfg)); err != nil {
 		return err
 	}
+	if isNonstandardServerStatus(rr.Response.StatusCode) {
+		_ = e.Emit("coverage_gap", fmt.Sprintf("Target returned non-standard HTTP %d during preflight; the host is reachable, so scanning will continue with gateway/WAF-aware discovery", rr.Response.StatusCode), map[string]interface{}{
+			"phase": "preflight", "target": cfg.Targets[0], "status": rr.Response.StatusCode,
+			"reason": "nonstandard_gateway_status", "scan_continues": true,
+		})
+	}
 	_ = e.Emit("preflight_ok", "target and authentication preflight passed", map[string]interface{}{"target": cfg.Targets[0], "status": rr.Response.StatusCode, "authenticated": scanHasConfiguredAuth(cfg)})
 	return nil
 }
@@ -158,6 +164,14 @@ func scanHasConfiguredAuth(cfg config.ScanConfig) bool {
 }
 
 func preflightStatusError(status int, authenticated bool) error {
+	// Vendor gateways, reverse proxies and WAFs use unregistered 5xx codes (for
+	// example 530/556) as policy or routing responses. They prove that the host
+	// is reachable and often vary by path, method or browser profile, so aborting
+	// the entire scan here discards exactly the surfaces discovery should test.
+	// Registered server-error statuses retain the existing fail-fast behavior.
+	if isNonstandardServerStatus(status) {
+		return nil
+	}
 	if status == http.StatusBadGateway {
 		return fmt.Errorf("target preflight returned HTTP 502 Bad Gateway; scan aborted before consuming the request budget")
 	}
@@ -174,4 +188,8 @@ func preflightStatusError(status int, authenticated bool) error {
 		return fmt.Errorf("authentication preflight returned HTTP %d; configured credentials were not accepted", status)
 	}
 	return nil
+}
+
+func isNonstandardServerStatus(status int) bool {
+	return status >= 500 && status <= 599 && http.StatusText(status) == ""
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/deeptraversal"
@@ -256,6 +257,11 @@ func rankForTech(pl Payload, tech TechHints) Payload {
 func rankForWAFLearning(pl Payload, waf WAFHints) Payload {
 	if !pl.WAFAdapted {
 		return pl
+	}
+	if observed := tomographyURLTechnique(waf, pl.TransportEncoding); observed != "" &&
+		encodingTechniqueMatches(strings.ToLower(strings.TrimSpace(pl.Encoding)), observed) {
+		pl.Priority += 16
+		pl.SelectionReason += "; matched observed query decode depth"
 	}
 	// If a payload contains characters known to be blocked by the WAF in raw form,
 	// and this payload is NOT encoded to conceal them, penalize it.
@@ -730,7 +736,11 @@ func wafEvasionVariants(in Input, base []Payload) []Payload {
 			p.Family != "ssrf" && p.Family != "lfi" && p.Family != "xxe" && p.Family != "nosql" {
 			continue
 		}
-		for _, variant := range wafVariantsForPayload(p.Value, p.Family, vendor, in.Profile.Context) {
+		variants := wafVariantsForPayload(p.Value, p.Family, vendor, in.Profile.Context)
+		if technique := tomographyURLTechnique(in.WAF, in.Profile.ParameterLocation); technique != "" && !containsWAFVariantTechnique(variants, technique) {
+			variants = append([]wafVariant{{value: applyWAFTechnique(p.Value, technique), enc: technique}}, variants...)
+		}
+		for _, variant := range variants {
 			variant.value, variant.enc = adjustWAFForTransport(p.Value, variant.value, variant.enc, in.Profile.ParameterLocation)
 			if variant.value == p.Value || variant.value == "" {
 				continue
@@ -771,7 +781,7 @@ func wafNegativeControlFor(adapted Payload, profile reflection.ReflectionProfile
 	default:
 		benignValue = "akca_control_safe"
 	}
-	encVal := wafintel.ApplyEncoding(benignValue, adapted.Encoding)
+	encVal := applyWAFTechnique(benignValue, adapted.Encoding)
 	if encVal == "" {
 		return Payload{}, false
 	}
@@ -803,66 +813,176 @@ func wafNegativeControlFor(adapted Payload, profile reflection.ReflectionProfile
 	}, true
 }
 
-func wafVariantsForPayload(value, family, vendor string, ctx reflection.ContextType) []struct {
+type wafVariant struct {
 	value string
 	enc   string
-} {
+}
+
+func wafVariantsForPayload(value, family, vendor string, ctx reflection.ContextType) []wafVariant {
 	v := strings.ToLower(vendor)
-	var out []struct {
-		value string
-		enc   string
-	}
+	var out []wafVariant
 	add := func(val, enc string) {
 		if val != "" && val != value {
-			out = append(out, struct{ value, enc string }{val, enc})
+			out = append(out, wafVariant{value: val, enc: enc})
 		}
 	}
 	switch family {
 	case "sqli", "nosql":
-		add(deterministicCaseMix(commentSplit(value)), "comment_case")
-		add(wafintel.ApplyEncoding(value, "url"), "url")
-		add(wafintel.ApplyEncoding(value, "double_url"), "double_url")
-		add(wafintel.EncodingCascade(value, "unicode", "url"), "unicode_url")
-		add(wafintel.ApplyEncoding(value, "unicode_nfkc"), "unicode_nfkc")
+		add(applyWAFTechnique(value, "comment_case"), "comment_case")
+		add(applyWAFTechnique(value, "selective_url"), "selective_url")
+		add(applyWAFTechnique(value, "url"), "url")
+		add(applyWAFTechnique(value, "double_url"), "double_url")
+		add(applyWAFTechnique(value, "unicode_url"), "unicode_url")
+		add(applyWAFTechnique(value, "unicode_nfkc"), "unicode_nfkc")
 		if strings.Contains(v, "modsecurity") || strings.Contains(v, "aws") {
-			add(wafintel.ApplyEncoding(value, "hex"), "hex")
+			add(applyWAFTechnique(value, "hex"), "hex")
 		}
 	case "command_injection":
 		if strings.Contains(value, " ") && !looksLikeWindowsCommand(value) {
-			add(strings.ReplaceAll(value, " ", "${IFS}"), "ifs_substitution")
+			add(applyWAFTechnique(value, "ifs_substitution"), "ifs_substitution")
 		}
-		add(wafintel.ApplyEncoding(value, "url"), "url")
+		add(applyWAFTechnique(value, "selective_url"), "selective_url")
+		add(applyWAFTechnique(value, "url"), "url")
 	case "xss", "ssti":
 		// Context-aware mutations:
 		// In JSON context, HTML entities break JSON parser syntax; use Unicode escapes instead.
 		// In HTML attribute context, HTML entities and URL encodings are ideal.
 		switch ctx {
 		case reflection.ContextJSON:
-			add(wafintel.ApplyEncoding(value, "unicode"), "unicode")
-			add(wafintel.ApplyEncoding(value, "json_unicode"), "json_unicode")
-			add(wafintel.ApplyEncoding(value, "url"), "url")
+			add(applyWAFTechnique(value, "unicode"), "unicode")
+			add(applyWAFTechnique(value, "json_unicode"), "json_unicode")
+			add(applyWAFTechnique(value, "url"), "url")
 		case reflection.ContextJavaScript:
-			add(wafintel.ApplyEncoding(value, "unicode"), "unicode")
-			add(wafintel.ApplyEncoding(value, "js_hex_escape"), "js_hex_escape")
-			add(wafintel.EncodingCascade(value, "unicode", "url"), "unicode_url")
+			add(applyWAFTechnique(value, "unicode"), "unicode")
+			add(applyWAFTechnique(value, "js_hex_escape"), "js_hex_escape")
+			add(applyWAFTechnique(value, "unicode_url"), "unicode_url")
 		default:
-			add(wafintel.ApplyEncoding(value, "unicode_nfkc"), "unicode_nfkc")
+			add(applyWAFTechnique(value, "unicode_nfkc"), "unicode_nfkc")
 			switch {
 			case strings.Contains(v, "cloudflare") || strings.Contains(v, "imperva"):
-				add(wafintel.ApplyEncoding(value, "unicode"), "unicode")
-				add(wafintel.EncodingCascade(value, "unicode", "url"), "unicode_url")
+				add(applyWAFTechnique(value, "unicode"), "unicode")
+				add(applyWAFTechnique(value, "unicode_url"), "unicode_url")
 			case strings.Contains(v, "akamai"):
-				add(wafintel.ApplyEncoding(value, "html_entity"), "html_entity")
+				add(applyWAFTechnique(value, "html_entity"), "html_entity")
+				add(applyWAFTechnique(value, "hex_html_entity"), "hex_html_entity")
 			default:
-				add(wafintel.ApplyEncoding(value, "html_entity"), "html_entity")
-				add(wafintel.ApplyEncoding(value, "url"), "url")
+				add(applyWAFTechnique(value, "html_entity"), "html_entity")
+				add(applyWAFTechnique(value, "hex_html_entity"), "hex_html_entity")
+				add(applyWAFTechnique(value, "url"), "url")
 			}
 		}
 	case "ssrf", "lfi":
-		add(wafintel.ApplyEncoding(value, "url"), "url")
-		add(wafintel.ApplyEncoding(wafintel.ApplyEncoding(value, "url"), "double_url"), "double_url")
+		add(applyWAFTechnique(value, "url"), "url")
+		add(applyWAFTechnique(value, "double_url"), "double_url")
 	case "xxe":
-		add(strings.ReplaceAll(value, "<", "&#60;"), "html_entity")
+		add(applyWAFTechnique(value, "html_entity"), "html_entity")
+	}
+	return out
+}
+
+// applyWAFTechnique is the single source of truth for compound and primitive
+// transformations. Offensive payloads and their paired negative controls must
+// pass through exactly the same transformation path.
+func applyWAFTechnique(value, technique string) string {
+	technique = strings.ToLower(strings.TrimSpace(technique))
+	switch technique {
+	case "comment_case":
+		return deterministicCaseMix(commentSplit(value))
+	case "ifs_substitution":
+		return strings.ReplaceAll(value, " ", "${IFS}")
+	case "unicode_url":
+		return wafintel.EncodingCascade(value, "unicode", "url")
+	default:
+		if depth, ok := urlDepthFromTechnique(technique); ok {
+			return urlEncodeLayers(value, depth)
+		}
+		return wafintel.ApplyEncoding(value, technique)
+	}
+}
+
+// RuntimeWAFVariantSets applies each selected WAF technique to every related
+// value as an atomic set. This keeps differential semantics intact: a boolean
+// true/false pair or timing delay/zero control can never receive mismatched
+// encodings. The raw set is intentionally not returned; callers keep it as the
+// first attempt and append these WAF-adapted alternatives.
+func RuntimeWAFVariantSets(values []string, family string, ctx reflection.ContextType, location string, waf WAFHints, limit int) []WAFVariantSet {
+	if len(values) == 0 || !waf.AllowEvasion {
+		return nil
+	}
+	vendor := strings.TrimSpace(waf.Vendor)
+	if vendor == "" && !waf.CautiousModeRecommended {
+		return nil
+	}
+	if vendor == "" {
+		vendor = "generic"
+	}
+
+	available := wafVariantsForPayload(values[0], family, vendor, ctx)
+	tomographyTechnique := tomographyURLTechnique(waf, location)
+	if tomographyTechnique != "" && !containsWAFVariantTechnique(available, tomographyTechnique) {
+		available = append([]wafVariant{{value: applyWAFTechnique(values[0], tomographyTechnique), enc: tomographyTechnique}}, available...)
+	}
+	techniques := make([]string, 0, len(available))
+	seenTechnique := map[string]struct{}{}
+	for _, variant := range available {
+		technique := strings.ToLower(strings.TrimSpace(variant.enc))
+		if technique == "" {
+			continue
+		}
+		if _, exists := seenTechnique[technique]; exists {
+			continue
+		}
+		seenTechnique[technique] = struct{}{}
+		techniques = append(techniques, technique)
+	}
+	preferredRank := make(map[string]int, len(waf.PreferredTechniques))
+	for index, technique := range waf.PreferredTechniques {
+		technique = strings.ToLower(strings.TrimSpace(technique))
+		if technique == "" {
+			continue
+		}
+		if _, exists := preferredRank[technique]; !exists {
+			preferredRank[technique] = index
+		}
+	}
+	sort.SliceStable(techniques, func(i, j int) bool {
+		if techniques[i] == tomographyTechnique || techniques[j] == tomographyTechnique {
+			return techniques[i] == tomographyTechnique
+		}
+		iRank, iPreferred := preferredRank[techniques[i]]
+		jRank, jPreferred := preferredRank[techniques[j]]
+		if iPreferred != jPreferred {
+			return iPreferred
+		}
+		return iPreferred && iRank < jRank
+	})
+
+	out := make([]WAFVariantSet, 0, len(techniques))
+	seenSet := map[string]struct{}{}
+	for _, technique := range techniques {
+		transformed := make([]string, 0, len(values))
+		valid := true
+		for _, value := range values {
+			encoded := applyWAFTechnique(value, technique)
+			encoded, _ = adjustWAFForTransport(value, encoded, technique, location)
+			if encoded == "" || encoded == value {
+				valid = false
+				break
+			}
+			transformed = append(transformed, encoded)
+		}
+		if !valid {
+			continue
+		}
+		key := technique + "\x00" + strings.Join(transformed, "\x00")
+		if _, exists := seenSet[key]; exists {
+			continue
+		}
+		seenSet[key] = struct{}{}
+		out = append(out, WAFVariantSet{Values: transformed, Encoding: technique, Vendor: vendor})
+		if limit > 0 && len(out) >= limit {
+			break
+		}
 	}
 	return out
 }
@@ -885,8 +1005,54 @@ func adjustWAFForTransport(original, transformed, encoding, location string) (st
 	case "unicode_url":
 		return wafintel.ApplyEncoding(original, "unicode"), "unicode_url"
 	default:
+		if depth, ok := urlDepthFromTechnique(encoding); ok {
+			if transportEncodes {
+				depth--
+			}
+			if depth <= 0 {
+				return original, encoding
+			}
+			return urlEncodeLayers(original, depth), encoding
+		}
 		return transformed, encoding
 	}
+}
+
+func tomographyURLTechnique(waf WAFHints, location string) string {
+	location = strings.ToLower(strings.TrimSpace(location))
+	if !waf.QueryURLDecodeObserved || waf.QueryURLDecodeConflict || (location != "" && location != "query") || waf.QueryURLDecodeDepth < 2 {
+		return ""
+	}
+	if waf.QueryURLDecodeDepth == 2 {
+		return "double_url"
+	}
+	return "url_depth_" + strconv.Itoa(waf.QueryURLDecodeDepth)
+}
+
+func containsWAFVariantTechnique(variants []wafVariant, technique string) bool {
+	for _, variant := range variants {
+		if strings.EqualFold(strings.TrimSpace(variant.enc), technique) {
+			return true
+		}
+	}
+	return false
+}
+
+func urlDepthFromTechnique(technique string) (int, bool) {
+	const prefix = "url_depth_"
+	technique = strings.ToLower(strings.TrimSpace(technique))
+	if !strings.HasPrefix(technique, prefix) {
+		return 0, false
+	}
+	depth, err := strconv.Atoi(strings.TrimPrefix(technique, prefix))
+	return depth, err == nil && depth > 0
+}
+
+func urlEncodeLayers(value string, depth int) string {
+	for i := 0; i < depth; i++ {
+		value = wafintel.ApplyEncoding(value, "url")
+	}
+	return value
 }
 
 func deterministicCaseMix(value string) string {

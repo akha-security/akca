@@ -16,6 +16,22 @@ func ShouldDiscoverEndpoint(endpointURL, method string) bool {
 	if IsStaticAsset(endpointURL) {
 		return false
 	}
+	u, err := url.Parse(endpointURL)
+	if err == nil {
+		path := strings.ToLower(strings.TrimSuffix(u.Path, "/"))
+		base := path
+		if slash := strings.LastIndex(base, "/"); slash >= 0 {
+			base = base[slash+1:]
+		}
+		// Discovery documents are useful inputs to the crawler, but they are not
+		// application handlers. Actively appending hundreds of guessed parameter
+		// names to robots, sitemap and .well-known resources creates duplicate raw
+		// traffic without expanding the attack surface.
+		if base == "robots.txt" || strings.HasPrefix(base, "sitemap") ||
+			path == "/.well-known" || strings.HasPrefix(path, "/.well-known/") {
+			return false
+		}
+	}
 	lower := strings.ToLower(endpointURL)
 	if strings.Contains(lower, "/static/") || strings.Contains(lower, "/assets/") ||
 		strings.Contains(lower, "/_next/static/") {

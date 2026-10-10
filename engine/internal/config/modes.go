@@ -178,6 +178,28 @@ func ApplyScanModes(cfg *ScanConfig, modeStr string) error {
 	} else {
 		cfg.SmartScanProfile = "Full Scan"
 	}
+
+	// Directory/path fuzzing and 403 bypass are independent active attack
+	// phases, not prerequisites for SQLi/XSS/etc. A narrow --mode must therefore
+	// opt into them explicitly instead of inheriting the full-scan defaults.
+	// Mark the decisions explicit so ApplyScanProfile cannot turn them back on.
+	isFull := len(names) == 1 && names[0] == "Full Scan"
+	if !isFull {
+		hasFuzzMode := false
+		hasAuthMode := false
+		for _, name := range names {
+			switch name {
+			case "fuzz":
+				hasFuzzMode = true
+			case "auth":
+				hasAuthMode = true
+			}
+		}
+		cfg.EnableFuzzing = hasFuzzMode
+		cfg.Enable403BypassChecks = hasAuthMode
+		cfg.Explicit.EnableFuzzing = true
+		cfg.Explicit.Enable403BypassChecks = true
+	}
 	if isPassive {
 		cfg.EnableFuzzing = false
 		cfg.EnableOAST = false

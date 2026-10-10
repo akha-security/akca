@@ -421,12 +421,12 @@ func ssrfSignalConfirmed(p payloadgen.Payload, baseline, probe httpclient.Respon
 		}) >= 2
 	case "azure_metadata":
 		return newMarkerCount(body, base, []string{
-			"compute", "vmid", "subscriptionid", "microsoft.compute", "azureenvironment",
-		}) >= 1
+			"vmid", "subscriptionid", "resourcegroupname", "microsoft.compute", "azureenvironment",
+		}) >= 2
 	case "alibaba_metadata":
 		return newMarkerCount(body, base, []string{
 			"owner-account-id", "region-id", "zone-id", "image-id", "instance/instance-type",
-		}) >= 1
+		}) >= 2
 	case "do_metadata":
 		if strings.Contains(body, "droplet_id") && !strings.Contains(base, "droplet_id") {
 			return true
@@ -437,16 +437,16 @@ func ssrfSignalConfirmed(p payloadgen.Payload, baseline, probe httpclient.Respon
 	case "oracle_metadata":
 		return newMarkerCount(body, base, []string{
 			"compartmentid", "canonicalregionname", "ocid1.", "oraclecloud.com", "shape",
-		}) >= 1
+		}) >= 2
 	case "tencent_metadata":
 		return newMarkerCount(body, base, []string{
-			"app-id", "placement/region", "instance/instance-name", "tencentyun",
-		}) >= 1
+			"app-id", "placement/region", "instance/instance-name", "instance/instance-id",
+		}) >= 2
 	case "packet_metadata":
 		return newMarkerCount(body, base, []string{
-			"bonding_mode", "facility", "operating_system", "iqn", "metadata.packet.net",
-		}) >= 1
-	case "internal_ip", "protocol_smuggling":
+			"bonding_mode", "facility", "operating_system", "iqn",
+		}) >= 2
+	case "internal_ip":
 		// Disallow matching AWS metadata markers on internal IP probes
 		if strings.Contains(body, "ami-id") || strings.Contains(body, "instance-id") {
 			return false
@@ -457,8 +457,8 @@ func ssrfSignalConfirmed(p payloadgen.Payload, baseline, probe httpclient.Respon
 		}
 		// Check for internal service markers
 		for _, marker := range []string{
-			"docker engine", "k8s", "consul", "kubernetes.io/serviceaccount",
-			"redis_version", "+pong", "role:master", "stat pid", "memcached", "root:x:0:0:",
+			"docker engine", "kubernetes.io/serviceaccount",
+			"redis_version", "+pong", "root:x:0:0:",
 		} {
 			if strings.Contains(body, marker) && !strings.Contains(base, marker) {
 				return true
@@ -467,7 +467,24 @@ func ssrfSignalConfirmed(p payloadgen.Payload, baseline, probe httpclient.Respon
 		if newMarkerCount(body, base, []string{"apiversion", "goversion", "gitcommit", "kernelversion"}) >= 2 {
 			return true
 		}
-		return differentialWithStatusGuard(probe.Body, baseline.Body, p.Value, probe.StatusCode, baseline.StatusCode)
+		if newMarkerCount(body, base, []string{"datacenter", "node_name", "node_id", "server_name"}) >= 2 {
+			return true
+		}
+		return newMarkerCount(body, base, []string{"apiversion", `"kind"`, `"items"`}) >= 2
+	case "protocol_smuggling":
+		if probe.StatusCode != 0 && (probe.StatusCode < 200 || probe.StatusCode >= 300) {
+			return false
+		}
+		if strings.Contains(body, "+pong") && !strings.Contains(base, "+pong") {
+			return true
+		}
+		if newMarkerCount(body, base, []string{"redis_version", "role:master", "used_memory", "tcp_port"}) >= 2 {
+			return true
+		}
+		if newMarkerCount(body, base, []string{"stat pid", "stat uptime", "stat version"}) >= 2 {
+			return true
+		}
+		return newMarkerCount(body, base, []string{"objectclass", "namingcontexts", "supportedldapversion"}) >= 2
 	default:
 		return false
 	}

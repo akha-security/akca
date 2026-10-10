@@ -28,6 +28,47 @@ func moduleCoverageMessage(module string, failed, exhausted, unfinished int) str
 	return message
 }
 
+// classifyTargetRun keeps per-request failures from masking useful work that
+// completed on the same target. Active modules commonly try several payload
+// variants; a rejected or failed variant is diagnostic, but it must not turn a
+// target with a usable response (or a finding) into a module-wide failure.
+func classifyTargetRun(state *targetRun, panicked bool, findingCount int, ctxErr error) (status, reason string) {
+	if state == nil {
+		return "incomplete", "target was not processed"
+	}
+	state.mu.Lock()
+	reason = state.skip
+	state.mu.Unlock()
+
+	switch {
+	case state.budgetExhausted.Load():
+		return "incomplete", reason
+	case state.interrupted.Load() || state.pendingTiming.Load() > 0:
+		reason = "verification did not finish"
+		if ctxErr != nil {
+			reason = ctxErr.Error()
+		}
+		return "incomplete", reason
+	case panicked:
+		return "error", reason
+	case findingCount > 0:
+		return "completed", reason
+	case state.failures.Load() > 0 && reason != "":
+		return "error", reason
+	case state.blockedResponse.Load() && !state.usableResponse.Load():
+		if reason == "" {
+			reason = "only authentication, WAF, rate-limit or gateway rejection responses were observed"
+		}
+		return "blocked", reason
+	case state.failures.Load() > 0 && !state.usableResponse.Load() && !state.evidence.Load():
+		return "error", reason
+	case reason == "" && state.evidence.Load():
+		return "completed", reason
+	default:
+		return "skipped", reason
+	}
+}
+
 func (r *Runner) RunModuleFromDB(ctx context.Context, module string, limit int) ([]ModuleFinding, error) {
 	targets, err := r.LoadTargetsWithEndpointsFromDB(limit)
 	if err != nil {
@@ -152,31 +193,18 @@ feed:
 		gatewayBlocks += state.gatewayBlocks.Load()
 		timeoutFailures += state.timeoutFailures.Load()
 		transportErrors += state.transportErrors.Load()
-		state.mu.Lock()
-		reason := state.skip
-		state.mu.Unlock()
-		status := "skipped"
-		switch {
-		case state.budgetExhausted.Load():
-			status = "incomplete"
-			exhausted++
-		case state.interrupted.Load() || state.pendingTiming.Load() > 0:
-			status = "incomplete"
-			reason = "verification did not finish"
-			if ctx.Err() != nil {
-				reason = ctx.Err().Error()
-			}
-			unprocessed++
-		case result.panicked || state.failures.Load() > 0:
-			status = "error"
-			failed++
-		case state.blockedResponse.Load() && !state.usableResponse.Load() && len(result.findings) == 0 && reason == "":
-			status = "blocked"
-			reason = "only authentication, WAF, rate-limit or gateway rejection responses were observed"
-			failed++
-		case reason == "" && state.evidence.Load():
-			status = "completed"
+		status, reason := classifyTargetRun(state, result.panicked, len(result.findings), ctx.Err())
+		switch status {
+		case "completed":
 			tested++
+		case "error":
+			failed++
+		case "incomplete":
+			if state.budgetExhausted.Load() {
+				exhausted++
+			} else {
+				unprocessed++
+			}
 		default:
 			skipped++
 		}
@@ -210,6 +238,9 @@ feed:
 		data["requests_used"] = allocation.used
 	}
 	_ = r.emit("vuln_module_finished", module+" scanning finished", data)
+	// Failed payload variants are absorbed by classifyTargetRun when the target
+	// still produced usable coverage. Any target left in the failed bucket had
+	// no usable execution and therefore remains a real coverage gap.
 	if exhausted > 0 || unprocessed > 0 || failed > 0 {
 		_ = r.emit("coverage_gap", moduleCoverageMessage(module, failed, exhausted, unprocessed), data)
 	}

@@ -48,6 +48,58 @@ func TestSSRFRejectsBlockedPayloadEcho(t *testing.T) {
 	}
 }
 
+func TestSSRFRejectsEncodedAndScriptPayloadReflections(t *testing.T) {
+	tencent := payloadgen.Payload{
+		Value:          "http://metadata.tencentyun.com/latest/meta-data/",
+		ExpectedSignal: "tencent_metadata",
+	}
+	for _, body := range []string{
+		`<script>var dataText="cookieConsent=http%3A%2F%2Fmetadata.tencentyun.com%2Flatest%2Fmeta-data%2F";</script>`,
+		`<script>var dataText="cookieConsent=http%253A%252F%252Fmetadata.tencentyun.com%252Flatest%252Fmeta-data%252F";</script>`,
+		`<script>var value="http:\/\/metadata.tencentyun.com\/latest\/meta-data\/";</script>`,
+		`<script>var value="http\u003A\u002F\u002Fmetadata.tencentyun.com\u002Flatest\u002Fmeta-data\u002F";</script>`,
+	} {
+		if !injectionPayloadReflected(tencent.Value, body, "clean page") {
+			t.Fatalf("encoded payload echo was not recognized: %q", body)
+		}
+		if ssrfSignalConfirmed(tencent, httpclient.ResponseRecord{Body: "clean page"},
+			httpclient.ResponseRecord{Body: body, StatusCode: 200}, "tencent_metadata") {
+			t.Fatalf("encoded payload reflection must not prove SSRF: %q", body)
+		}
+	}
+
+	azure := payloadgen.Payload{
+		Value:          "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/",
+		ExpectedSignal: "azure_metadata",
+	}
+	htmlEcho := `value=http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&amp;resource=https://management.azure.com/`
+	if !injectionPayloadReflected(azure.Value, htmlEcho, "clean page") {
+		t.Fatal("HTML-escaped payload echo was not recognized")
+	}
+}
+
+func TestSSRFRejectsHostnameOnlyAndGenericBodyDifferences(t *testing.T) {
+	tencent := payloadgen.Payload{Value: "http://metadata.tencentyun.com/latest/meta-data/", ExpectedSignal: "tencent_metadata"}
+	if ssrfSignalConfirmed(tencent, httpclient.ResponseRecord{Body: "clean"},
+		httpclient.ResponseRecord{Body: "analytics referrer metadata.tencentyun.com", StatusCode: 200}, "tencent_metadata") {
+		t.Fatal("provider hostname alone must not prove Tencent metadata SSRF")
+	}
+	if !ssrfSignalConfirmed(tencent, httpclient.ResponseRecord{Body: "clean"},
+		httpclient.ResponseRecord{Body: "app-id\nplacement/region\ninstance/instance-name", StatusCode: 200}, "tencent_metadata") {
+		t.Fatal("multiple Tencent metadata fields should prove direct-response SSRF")
+	}
+
+	gopher := payloadgen.Payload{Value: "gopher://127.0.0.1:6379/_PING%0d%0a", ExpectedSignal: "protocol_smuggling"}
+	if ssrfSignalConfirmed(gopher, httpclient.ResponseRecord{Body: "normal page", StatusCode: 200},
+		httpclient.ResponseRecord{Body: "a completely different but generic page", StatusCode: 200}, "protocol_smuggling") {
+		t.Fatal("generic body differential must not prove protocol-smuggling SSRF")
+	}
+	if !ssrfSignalConfirmed(gopher, httpclient.ResponseRecord{Body: "normal page", StatusCode: 200},
+		httpclient.ResponseRecord{Body: "+PONG\r\n", StatusCode: 200}, "protocol_smuggling") {
+		t.Fatal("a Redis PONG response should prove protocol-smuggling SSRF")
+	}
+}
+
 func TestSSRFSignalsAreProviderSpecific(t *testing.T) {
 	internal := payloadgen.Payload{Value: "http://127.0.0.1/", ExpectedSignal: "internal_ip"}
 	if ssrfSignalConfirmed(internal, httpclient.ResponseRecord{Body: "ok"},

@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/akha-security/akca/actions/workflows/ci.yml"><img src="https://github.com/akha-security/akca/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/akha-security/akca/releases/tag/v0.2.7"><img src="https://img.shields.io/badge/version-v0.2.7-8b5cf6" alt="Version v0.2.7"></a>
+  <a href="https://github.com/akha-security/akca/releases/tag/v0.2.8"><img src="https://img.shields.io/badge/version-v0.2.8-8b5cf6" alt="Version v0.2.8"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25 or newer"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache License 2.0"></a>
 </p>
@@ -47,7 +47,7 @@ AKCA does not claim feature or detection parity with mature commercial platforms
 <p align="center">
   <img src="docs/assets/scanner.png" alt="AKCA scanner running against a local security testing lab" width="760">
   <br>
-  <sub>AKCA v0.2.7 scan session with live engine status, resource telemetry, and confirmed findings.</sub>
+  <sub>AKCA v0.2.8 scan session with live engine status, resource telemetry, and confirmed findings.</sub>
 </p>
 
 ## Installation
@@ -417,14 +417,15 @@ Discovered URLs are retained even when they cannot be visited. A crawl that exha
 
 Unconfigured rate-limit checks produce observations, not vulnerability findings. A configured threshold proof also requires `window_seconds`; if the requests do not fit inside that window, the check is inconclusive. SQLi does not treat a 400 response or arithmetic evaluation alone as proof. New vendor-specific SQL errors in 400/422 responses must pass the replay and control verification path.
 
-## What's new in v0.2.7
+## What's new in v0.2.8
 
-- Generate scan IDs automatically so every invocation and future GUI-created scan has a stable unique identity.
-- Allow independent scan processes to share the WAL-backed SQLite store without a machine-wide scan lock.
-- Remove the implicit per-URL Full Scan module budget so SQL injection and similar finite checks are not silently cut short.
-- Keep explicit operator budgets available, while moving unused request allocation forward across later module work.
-- Bound hidden-parameter discovery around realistic Arjun-style probing instead of treating every observed value as a useful parameter candidate.
-- Reject HTTP 200 WAF block pages as Server-Side JavaScript timing evidence and require matched, statistically consistent delay controls.
+- Preserve useful module coverage when individual payload variants fail, are blocked, or return unusable responses instead of incorrectly marking the whole target `PARTIAL`.
+- Add parser-tomography-driven WAF encodings and apply identical transformations to SQL boolean pairs and time-delay controls.
+- Detect non-reflected DOM XSS through independent browser execution with clean controls and CSP-tolerant canary fallbacks.
+- Reject reflected SSRF payloads and generic response differences unless provider-specific metadata evidence is present.
+- Pace and short-circuit backup archive enumeration, share passive response bodies across exposure analyzers, and honor host-level WAF/rate-limit cooldowns.
+- Reduce crawler and hidden-parameter traffic with bounded browser promotion, shared probe concurrency, safe batching, and metadata-document exclusions.
+- Continue discovery through nonstandard gateway statuses such as HTTP 556 and keep narrow `--mode` scans from enabling unrelated fuzzing or 403-bypass phases.
 
 See [CHANGELOG.md](CHANGELOG.md) for release details.
 

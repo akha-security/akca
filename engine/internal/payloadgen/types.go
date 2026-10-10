@@ -137,6 +137,21 @@ type WAFHints struct {
 	PreferredTechniques     []string
 	BlockedChars            []string
 	AllowedChars            []string
+	QueryURLDecodeDepth     int
+	QueryURLDecodeObserved  bool
+	QueryURLDecodeConflict  bool
+	QueryPlusAsSpace        bool
+	QueryPlusObserved       bool
+	QueryPlusConflict       bool
+}
+
+// WAFVariantSet contains values transformed with one identical WAF technique.
+// Keeping related values together is essential for differential probes such as
+// SQL boolean true/false pairs and timing delay/zero controls.
+type WAFVariantSet struct {
+	Values   []string
+	Encoding string
+	Vendor   string
 }
 
 type EventSink func(eventType, message string, payload map[string]interface{}) error

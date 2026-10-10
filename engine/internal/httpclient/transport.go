@@ -79,6 +79,7 @@ type WireTransport struct {
 	limiter         *ratelimit.Limiter
 	networkAttempts *atomic.Int64
 	maxBudget       int
+	hostGate        func(context.Context, string) error
 }
 
 func NewWireTransport(base http.RoundTripper, limiter *ratelimit.Limiter, counter *atomic.Int64, maxBudget int) *WireTransport {
@@ -94,8 +95,21 @@ func NewWireTransport(base http.RoundTripper, limiter *ratelimit.Limiter, counte
 }
 
 func (w *WireTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if w.hostGate != nil {
+		if err := w.hostGate(req.Context(), req.URL.Hostname()); err != nil {
+			return nil, err
+		}
+	}
 	if err := reserveNetwork(req.Context(), req.URL, w.limiter, w.networkAttempts, w.maxBudget); err != nil {
 		return nil, err
+	}
+	// Re-check after the rate-limiter wait. Another request may have received a
+	// 429 while this one was queued; without this gate the reserved queue would
+	// continue draining into an already blocking WAF.
+	if w.hostGate != nil {
+		if err := w.hostGate(req.Context(), req.URL.Hostname()); err != nil {
+			return nil, err
+		}
 	}
 	return w.base.RoundTrip(req)
 }

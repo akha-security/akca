@@ -162,6 +162,8 @@ type Runner struct {
 	tlsReported       map[string]struct{}
 	moduleSeenMu      sync.Mutex
 	moduleSeen        map[string]struct{}
+	backupOriginMu    sync.Mutex
+	backupOriginLocks map[string]*sync.Mutex
 	findingMu         sync.Mutex
 	findingSeen       map[string]int64
 	budgetExhausted   atomic.Bool
@@ -204,16 +206,17 @@ func NewRunner(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *st
 	r := &Runner{
 		scanID: scanID, client: observeHTTP(client), scope: scopeEngine, db: db,
 		verifier: verifier, oast: oastClient, emit: emit, cfg: cfg,
-		stored:          make(map[string]string),
-		baselineCache:   make(map[string]httpclient.RequestResponse),
-		secretScanCache: make(map[string][]secretscan.Match),
-		sqliBaselines:   make(map[string]*sqliBaselineCacheEntry),
-		notices:         make(map[string]struct{}),
-		tlsReported:     make(map[string]struct{}),
-		moduleSeen:      make(map[string]struct{}),
-		findingSeen:     make(map[string]int64),
-		moduleBudgets:   make(map[string]int64),
-		moduleUsage:     make(map[string]*atomic.Int64),
+		stored:            make(map[string]string),
+		baselineCache:     make(map[string]httpclient.RequestResponse),
+		secretScanCache:   make(map[string][]secretscan.Match),
+		sqliBaselines:     make(map[string]*sqliBaselineCacheEntry),
+		notices:           make(map[string]struct{}),
+		tlsReported:       make(map[string]struct{}),
+		moduleSeen:        make(map[string]struct{}),
+		backupOriginLocks: make(map[string]*sync.Mutex),
+		findingSeen:       make(map[string]int64),
+		moduleBudgets:     make(map[string]int64),
+		moduleUsage:       make(map[string]*atomic.Int64),
 	}
 	if cfg.RequestBudget > 0 {
 		r.categoryBudgets = map[string]int64{
@@ -639,8 +642,7 @@ func originScopedModule(module string) bool {
 		"cicd_exposure", "git_recovery", "source_code_disclosure", "cloud_storage", "cloud_posture",
 		"cloud_native_exposure", "host_poisoning", "wordpress_fuzz",
 		"framework_debug", "cpdos", "ws_cswsh", "react_rsc_rce",
-		"swagger_exposure", "http_smuggling", "debug_admin",
-		"vulnerable_components", "known_cve", "cors_oast":
+		"swagger_exposure", "http_smuggling", "debug_admin", "cors_oast":
 		return true
 	default:
 		return false

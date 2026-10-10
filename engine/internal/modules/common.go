@@ -25,6 +25,9 @@ func (r *Runner) probeForModule(ctx context.Context, module string, target ScanT
 	if target.coverage != nil {
 		ctx = withTargetRun(ctx, target.coverage)
 	}
+	if module == "rate_limit" {
+		ctx = httpclient.WithExpectedRateLimitResponse(ctx)
+	}
 	if module != "" && !managedTarget(ctx) && !r.canModuleProbe(module) {
 		err := fmt.Errorf("request budget exhausted for module %s", module)
 		noteExchange(ctx, err)

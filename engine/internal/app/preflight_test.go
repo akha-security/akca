@@ -18,6 +18,44 @@ func TestPreflightFailsFastOnBadGateway(t *testing.T) {
 	}
 }
 
+func TestPreflightContinuesOnNonstandardGatewayStatus(t *testing.T) {
+	if err := preflightStatusError(556, false); err != nil {
+		t.Fatalf("non-standard gateway status should remain scannable: %v", err)
+	}
+	if !isNonstandardServerStatus(556) {
+		t.Fatal("HTTP 556 was not classified as a non-standard server status")
+	}
+	if isNonstandardServerStatus(http.StatusInternalServerError) {
+		t.Fatal("registered HTTP 500 must retain fail-fast behavior")
+	}
+}
+
+func TestPreflightRunsAgainstHTTP556Target(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(556)
+		_, _ = w.Write([]byte("vendor gateway policy response"))
+	}))
+	defer target.Close()
+
+	storage.SetDataDirOverride(t.TempDir())
+	engine, err := New(noopWriter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	cfg := config.DefaultScanConfig()
+	cfg.ScanID = "scan-http-556"
+	cfg.Targets = []string{target.URL}
+	cfg.EnableOAST = false
+	cfg.EnableHeadlessCrawler = false
+	cfg.EnableBrowserWorkerPool = false
+	engine.session.Config = cfg
+	if err := engine.runPreflightValidation(context.Background(), cfg); err != nil {
+		t.Fatalf("HTTP 556 target should continue into discovery: %v", err)
+	}
+}
+
 func TestPreflightOnlyTreatsAuthStatusAsFatalWhenAuthConfigured(t *testing.T) {
 	if err := preflightStatusError(http.StatusUnauthorized, false); err != nil {
 		t.Fatalf("public 401 target should remain scannable: %v", err)

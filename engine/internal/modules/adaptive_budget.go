@@ -19,7 +19,7 @@ func estimatedTargetRequests(module string, target ScanTarget) int64 {
 	case "sqli":
 		n = 128 // baseline, error, matched boolean, timing and union families
 	case "backup_archives":
-		n = 1_500 // one origin dictionary plus route-derived candidates
+		n = archiveExpandedProbes + 8 // staged canary/expansion plus baseline and verification
 	case "sensitive_file_discovery":
 		n = 32 // root/prefix wildcard plus fingerprinted paths
 	case "prototype_pollution":
@@ -53,7 +53,7 @@ func budgetWorkKey(module string, t ScanTarget) string {
 		return module + "::" + parsed.Scheme + "://" + parsed.Host + firstRoutePrefix(parsed.Path)
 	}
 	switch module {
-	case "cookie_security", "sensitive_data", "secret_exposure", "script_source":
+	case "cookie_security", "sensitive_data", "secret_exposure", "script_source", "vulnerable_components", "known_cve":
 		return module + "::" + method + "::" + parsed.String()
 	case "prototype_pollution":
 		if clientPrototypeEligible(t) {
@@ -110,6 +110,8 @@ func (r *Runner) budgetEligible(module string, target ScanTarget) bool {
 	switch module {
 	case "xss", "sqli", "nosql", "blind_xss", "ssti", "command_injection":
 		return strings.TrimSpace(target.Parameter) != ""
+	case "vulnerable_components", "known_cve":
+		return target.ObservedResponse != nil && target.ObservedResponse.Response.StatusCode > 0
 	}
 	return true
 }

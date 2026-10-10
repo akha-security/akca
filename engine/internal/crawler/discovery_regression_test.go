@@ -112,7 +112,7 @@ func TestDeniedDocumentBrowserRecovery(t *testing.T) {
 }
 
 func TestBrowserRecoveryCoversAuthAndChallengeStatuses(t *testing.T) {
-	for _, responseStatus := range []int{401, 403, 429, 503} {
+	for _, responseStatus := range []int{401, 403, 429, 503, 556} {
 		t.Run(http.StatusText(responseStatus), func(t *testing.T) {
 			cfg := config.DefaultScanConfig()
 			cfg.IncludeDomains = []string{"example.test"}

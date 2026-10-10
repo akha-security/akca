@@ -14,6 +14,24 @@ func TestShouldDiscoverEndpointSkipsStatic(t *testing.T) {
 	}
 }
 
+func TestShouldDiscoverEndpointSkipsDiscoveryDocuments(t *testing.T) {
+	for _, rawURL := range []string{
+		"https://example.com/robots.txt",
+		"https://example.com/app/robots.txt?cache=1",
+		"https://example.com/sitemap.xml",
+		"https://example.com/sitemap-index.xml",
+		"https://example.com/.well-known/openid-configuration",
+		"https://example.com/.well-known/jwks.json",
+	} {
+		if ShouldDiscoverEndpoint(rawURL, http.MethodGet) {
+			t.Fatalf("discovery document should not receive hidden-parameter probes: %s", rawURL)
+		}
+	}
+	if !ShouldDiscoverEndpoint("https://example.com/api/.well-known-user", http.MethodGet) {
+		t.Fatal("ordinary API route containing a similar token was over-filtered")
+	}
+}
+
 func TestDifferentialWordlistCap(t *testing.T) {
 	wl := DifferentialWordlist("https://example.com/search", 20)
 	if len(wl) != 20 {

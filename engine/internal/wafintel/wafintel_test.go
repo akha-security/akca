@@ -1,6 +1,7 @@
 package wafintel_test
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 
@@ -44,16 +45,51 @@ func TestAdaptiveTechniqueLearningRanksSuccessfulEncodings(t *testing.T) {
 }
 
 func TestEncodingCascade(t *testing.T) {
-	out := wafintel.EncodingCascade("<script>", "url", "double_url")
+	original := "<script>"
+	out := wafintel.EncodingCascade(original, "url", "double_url")
 	if !strings.Contains(out, "%25") {
 		t.Fatalf("expected double encoding, got %q", out)
+	}
+	once, err := url.QueryUnescape(out)
+	if err != nil || once == original {
+		t.Fatalf("expected one encoded layer after first decode, got %q (err=%v)", once, err)
+	}
+	twice, err := url.QueryUnescape(once)
+	if err != nil || twice != original {
+		t.Fatalf("cascade must contain exactly two URL layers, got %q (err=%v)", twice, err)
 	}
 }
 
 func TestMutationEngine(t *testing.T) {
-	out := wafintel.MutatePayload(`<script>alert(1)</script>`)
-	if out == `<script>alert(1)</script>` {
+	original := `<script>alert(1)</script>`
+	out := wafintel.MutatePayload(original)
+	if out == original {
 		t.Fatal("expected mutation")
+	}
+	if !strings.Contains(out, "alert(1)") {
+		t.Fatalf("case-sensitive JavaScript identifier was changed: %q", out)
+	}
+	if repeated := wafintel.MutatePayload(original); repeated != out {
+		t.Fatalf("mutation must be deterministic: first=%q second=%q", out, repeated)
+	}
+}
+
+func TestByteEncodingsPreserveUTF8(t *testing.T) {
+	if got := wafintel.ApplyEncoding("é", "hex"); got != `\xC3\xA9` {
+		t.Fatalf("hex encoding must operate on UTF-8 bytes, got %q", got)
+	}
+	if got := wafintel.ApplyEncoding("é", "octal"); got != `\303\251` {
+		t.Fatalf("octal encoding must operate on UTF-8 bytes, got %q", got)
+	}
+	if got := wafintel.ApplyEncoding("é<", "mixed"); got != "%C3%A9&#60;" {
+		t.Fatalf("mixed encoding split a UTF-8 rune or encoded incorrectly: %q", got)
+	}
+}
+
+func TestMySQLVersionCommentMatchesKeywordCase(t *testing.T) {
+	got := wafintel.ApplyEncoding("select id FrOm users", "mysql_version_comment")
+	if !strings.Contains(got, "/*!50000select*/") || !strings.Contains(got, "/*!50000FrOm*/") {
+		t.Fatalf("case-insensitive SQL keywords were not transformed: %q", got)
 	}
 }
 

@@ -597,6 +597,30 @@ func TestXORTimingRequiresMatchedZeroAndFalsePredicateControls(t *testing.T) {
 	}
 }
 
+func TestSQLiEncodedTimingUsesMatchedEncodedControls(t *testing.T) {
+	delay := `0'XOR(if(now()=sysdate(),sleep(6),0))XOR'Z`
+	zero := timingblind.SQLiMatchedZeroDelayPayload(delay, "mysql").Value
+	falsePredicate := `0'XOR(if(now()!=now(),sleep(6),0))XOR'Z`
+	sets := payloadgen.RuntimeWAFVariantSets([]string{delay, zero, falsePredicate}, "sqli", reflection.ContextUnknown, "query", payloadgen.WAFHints{
+		Vendor: "Cloudflare", AllowEvasion: true, PreferredTechniques: []string{"comment_case"},
+	}, 1)
+	if len(sets) != 1 || len(sets[0].Values) != 3 {
+		t.Fatalf("expected one atomic encoded timing set, got %+v", sets)
+	}
+	encoded := sets[0].Values
+	baseline := timingblind.Calibrate([]int64{110, 120, 125, 115, 130})
+	target := ScanTarget{EndpointURL: "http://example.com/search", Method: "GET", Parameter: "q", Location: "query"}
+	client := &sqliTimingRecordClient{durations: map[string]time.Duration{
+		encoded[0]: 6120 * time.Millisecond,
+		encoded[1]: 120 * time.Millisecond,
+		encoded[2]: 125 * time.Millisecond,
+	}}
+	r := groupBRunner(t, client)
+	if ok, _, _, _ := r.sqliTimingVerified(context.Background(), target, encoded[0], "mysql", baseline, 6, encoded[1], encoded[2]); !ok {
+		t.Fatal("encoded timing payload should verify with controls using the same WAF technique")
+	}
+}
+
 func TestSQLiTimingNegativeUsesSingleScout(t *testing.T) {
 	payload := `0'XOR(if(now()=sysdate(),sleep(6),0))XOR'Z`
 	zero := timingblind.SQLiMatchedZeroDelayPayload(payload, "mysql").Value

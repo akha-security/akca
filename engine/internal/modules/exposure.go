@@ -172,7 +172,10 @@ func (r *Runner) cachedPassiveContentProbe(ctx context.Context, module string, t
 		return rr, nil
 	}
 	r.baselineMu.Unlock()
-	if rr, ok := observedResponse(ctx, target, true); ok {
+	// Passive analyzers can safely inspect a partial/truncated captured body:
+	// positive evidence remains useful, while a negative result simply produces
+	// no finding. Re-fetch only when discovery captured no body at all.
+	if rr, ok := observedResponse(ctx, target, false); ok && (target.ObservedComplete || rr.Response.Body != "") {
 		r.baselineMu.Lock()
 		r.baselineCache[key] = rr
 		r.baselineMu.Unlock()
@@ -189,8 +192,20 @@ func (r *Runner) cachedPassiveContentProbe(ctx context.Context, module string, t
 	return rr, nil
 }
 
-func passiveContentProbeKey(module string, target ScanTarget) string {
-	return fmt.Sprintf("passive-content|%s|%s|%s|%s", module, strings.ToUpper(target.Method), target.EndpointURL, target.Profile.ContentType)
+func passiveContentProbeKey(_ string, target ScanTarget) string {
+	// The response is shared by every passive content analyzer. Including the
+	// module name here caused Sensitive Data, Secret Exposure and Script Source
+	// to download the same URL independently.
+	method := strings.ToUpper(strings.TrimSpace(target.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+	rawURL := target.EndpointURL
+	if parsed, err := url.Parse(rawURL); err == nil {
+		parsed.Fragment = ""
+		rawURL = parsed.String()
+	}
+	return fmt.Sprintf("passive-content|%s|%s|%s", method, rawURL, target.Profile.ContentType)
 }
 
 func (r *Runner) cachedSecretMatches(content string) []secretscan.Match {

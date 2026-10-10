@@ -130,6 +130,11 @@ func noteCachedEvidence(ctx context.Context, rr httpclient.RequestResponse) {
 
 type observedHTTP struct{ HTTPDoer }
 
+func (c observedHTTP) IsLiveNetworkClient() bool {
+	live, ok := c.HTTPDoer.(interface{ IsLiveNetworkClient() bool })
+	return ok && live.IsLiveNetworkClient()
+}
+
 func (c observedHTTP) Do(ctx context.Context, m, u string, b []byte, h map[string]string) (httpclient.RequestResponse, error) {
 	if err := reserveClientBudget(ctx, c.HTTPDoer); err != nil {
 		noteExchange(ctx, err)

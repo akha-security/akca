@@ -38,6 +38,9 @@ var componentPatterns = []struct {
 	{"wordpress", "wordpress", "body", regexp.MustCompile(`(?i)(?:wordpress|generator)[ /"'=:-]+v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)`)},
 	{"drupal", "drupal", "body", regexp.MustCompile(`(?i)drupal[/ "'=:-]+v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)`)},
 	{"joomla", "joomla", "body", regexp.MustCompile(`(?i)joomla!?[/ "'=:-]+v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)`)},
+	{"jquery", "jquery", "asset", regexp.MustCompile(`(?i)jquery(?:[.@/-])v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)`)},
+	{"getbootstrap", "bootstrap", "asset", regexp.MustCompile(`(?i)bootstrap(?:[.@/-])v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)`)},
+	{"infomaniak", "site_creator", "asset", regexp.MustCompile(`(?i)website-builder/cdn/v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)`)},
 }
 
 type detectedComponent struct {
@@ -52,14 +55,12 @@ func (r *Runner) runVulnerableComponents(ctx context.Context, target ScanTarget)
 		r.emitSkip("vulnerable_components", target, reason)
 		return nil
 	}
-	if !r.endpointModuleOnce("vulnerable_components", target) {
+	if !r.contentModuleOnce("vulnerable_components", target) {
 		return nil
 	}
-	if orig, ok := originScanTarget(target); ok {
-		target = orig
-	}
-	rr, err := r.cachedEmptyProbe(ctx, target)
-	if err != nil {
+	rr, ok := observedResponse(ctx, target, false)
+	if !ok {
+		r.emitSkip("vulnerable_components", target, "no observed response was captured during discovery")
 		return nil
 	}
 	components := detectComponents(rr.Response.Headers, rr.Response.Body)
@@ -76,14 +77,12 @@ func (r *Runner) runKnownCVE(ctx context.Context, target ScanTarget) []ModuleFin
 		r.emitSkip("known_cve", target, reason)
 		return nil
 	}
-	if !r.endpointModuleOnce("known_cve", target) {
+	if !r.contentModuleOnce("known_cve", target) {
 		return nil
 	}
-	if orig, ok := originScanTarget(target); ok {
-		target = orig
-	}
-	rr, err := r.cachedEmptyProbe(ctx, target)
-	if err != nil {
+	rr, ok := observedResponse(ctx, target, false)
+	if !ok {
+		r.emitSkip("known_cve", target, "no observed response was captured during discovery")
 		return nil
 	}
 	if age := modcve.SnapshotAge(time.Now().UTC()); age > 45*24*time.Hour {
@@ -144,6 +143,10 @@ func detectComponents(headers map[string]string, body string) []detectedComponen
 
 func (r *Runner) persistComponentInventory(component detectedComponent) {
 	if r.db == nil {
+		return
+	}
+	key := strings.ToLower(component.Vendor + "|" + component.Product + "|" + component.Version)
+	if !r.moduleWorkOnce("component_inventory", key) {
 		return
 	}
 	raw, _ := json.Marshal(component)

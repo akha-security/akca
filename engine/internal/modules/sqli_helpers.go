@@ -521,7 +521,7 @@ func (r *Runner) sqliTimingMedianMs(ctx context.Context, target ScanTarget, payl
 }
 
 func (r *Runner) sqliTimingVerified(ctx context.Context, target ScanTarget, payload string, dbHint string,
-	timingBase timingblind.Baseline, sleepSec int) (ok bool, delayMs int64, samples []int64, zeroSamples []int64) {
+	timingBase timingblind.Baseline, sleepSec int, matchedControls ...string) (ok bool, delayMs int64, samples []int64, zeroSamples []int64) {
 	var delaySamples []int64
 	var delayStatus int
 	var delayDelivered, zeroDelivered, falseDelivered int
@@ -548,9 +548,12 @@ func (r *Runner) sqliTimingVerified(ctx context.Context, target ScanTarget, payl
 		return false, delayMs, delaySamples, nil
 	}
 
-	zeroPayload := timingblind.SQLiMatchedZeroDelayPayload(payload, dbHint)
+	zeroValue := timingblind.SQLiMatchedZeroDelayPayload(payload, dbHint).Value
+	if len(matchedControls) > 0 && strings.TrimSpace(matchedControls[0]) != "" {
+		zeroValue = matchedControls[0]
+	}
 	var zeroSamplesVal []int64
-	zeroMs, zeroSamplesVal, zeroStatus, delivered, zeroOK := r.sqliTimingMedianMs(ctx, target, zeroPayload.Value, 1)
+	zeroMs, zeroSamplesVal, zeroStatus, delivered, zeroOK := r.sqliTimingMedianMs(ctx, target, zeroValue, 1)
 	zeroDelivered = delivered
 	zeroSamples = zeroSamplesVal
 	if !zeroOK || !acceptableTimingStatusPair(delayStatus, zeroStatus) {
@@ -571,7 +574,7 @@ func (r *Runner) sqliTimingVerified(ctx context.Context, target ScanTarget, payl
 		return false, delayMs, delaySamples, zeroSamplesVal
 	}
 
-	extraZeroMs, extraZeroSamples, extraZeroStatus, delivered, extraZeroOK := r.sqliTimingMedianMs(ctx, target, zeroPayload.Value, 2)
+	extraZeroMs, extraZeroSamples, extraZeroStatus, delivered, extraZeroOK := r.sqliTimingMedianMs(ctx, target, zeroValue, 2)
 	zeroDelivered += delivered
 	zeroSamplesVal = append(zeroSamplesVal, extraZeroSamples...)
 	zeroSamples = zeroSamplesVal
@@ -586,8 +589,14 @@ func (r *Runner) sqliTimingVerified(ctx context.Context, target ScanTarget, payl
 		reason = "delay_not_above_zero_control"
 		return false, delayMs, delaySamples, zeroSamplesVal
 	}
-	if falseControl, hasFalseControl := timingblind.SQLiXORFalseConditionControl(payload); hasFalseControl {
-		falseMs, falseSamples, falseStatus, delivered, falseOK := r.sqliTimingMedianMs(ctx, target, falseControl.Value, 3)
+	falseValue := ""
+	if len(matchedControls) > 1 {
+		falseValue = matchedControls[1]
+	} else if falseControl, hasFalseControl := timingblind.SQLiXORFalseConditionControl(payload); hasFalseControl {
+		falseValue = falseControl.Value
+	}
+	if falseValue != "" {
+		falseMs, falseSamples, falseStatus, delivered, falseOK := r.sqliTimingMedianMs(ctx, target, falseValue, 3)
 		falseDelivered = delivered
 		zeroSamplesVal = append(zeroSamplesVal, falseSamples...)
 		zeroSamples = zeroSamplesVal

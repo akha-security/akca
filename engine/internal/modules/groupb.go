@@ -230,7 +230,9 @@ func (r *Runner) runSSRF(ctx context.Context, target ScanTarget) []ModuleFinding
 			if r.recordFinding(ctx, &out, f, "ssrf", signal) {
 				return out
 			}
-		} else if len(proofs) == 1 && ssrfHighConfidenceMetadata(proofs[0].rr.Response.Body) {
+		} else if len(proofs) == 1 && ssrfHighConfidenceMetadata(
+			proofs[0].payload, baseline.Response, proofs[0].rr.Response, signal,
+		) {
 			// Single probe with very high-confidence cloud metadata fingerprint.
 			// Accept as HighConfidence (not Confirmed) since only one probe matched.
 			first := proofs[0]
@@ -356,31 +358,37 @@ func normalizedSSRFSignal(p payloadgen.Payload) string {
 // cloud provider metadata fingerprints that cannot occur by accident. These
 // patterns are specific enough that a single matching probe is sufficient
 // to report at HighConfidence level.
-func ssrfHighConfidenceMetadata(body string) bool {
-	lower := strings.ToLower(body)
-	for _, marker := range []string{
-		// AWS EC2 instance metadata & IAM
-		"ami-id", "instance-id", "iam/security-credentials", "security-credentials",
-		"meta-data/hostname", "meta-data/local-ipv4", "accesskeyid", "secretaccesskey",
-		// GCP metadata
-		"computemetadata", "project/project-id",
-		"instance/service-accounts", "service-accounts/default/token",
-		// Azure IMDS & Managed Identity
-		"microsoft.compute", "azureenvironment",
-		"subscriptionid", "identity/oauth2/token",
-		// DigitalOcean, Alibaba, Oracle Cloud
-		"droplet_id", "droplet_v2", "owner-account-id", "alibaba-cloud", "compute_metadata",
-		"compartmentid", "canonicalregionname", "ocid1.",
-		"tencentyun", "bonding_mode",
-		// Docker / Consul / Kubernetes
-		"docker engine", "k8s", "consul", "kubernetes.io/serviceaccount",
-		"token/default-token", "ca.crt", "redis_version", "+pong",
-	} {
-		if strings.Contains(lower, marker) {
-			return true
-		}
+func ssrfHighConfidenceMetadata(p payloadgen.Payload, baseline, probe httpclient.ResponseRecord, signal string) bool {
+	if !ssrfSignalConfirmed(p, baseline, probe, signal) {
+		return false
 	}
-	return false
+	body := strings.ToLower(probe.Body)
+	base := strings.ToLower(baseline.Body)
+	switch canonicalSSRFSignal(p, signal) {
+	case "aws_metadata":
+		return newMarkerCount(body, base, []string{
+			"ami-id", "instance-id", "instance-type", "local-hostname", "accesskeyid", "secretaccesskey",
+		}) >= 2
+	case "gcp_metadata":
+		if strings.EqualFold(headerCI(probe.Headers, "Metadata-Flavor"), "Google") {
+			return newMarkerCount(body, base, []string{"project/project-id", "instance/id", "service-accounts/", "hostname"}) >= 1
+		}
+		return newMarkerCount(body, base, []string{"project/project-id", "instance/id", "service-accounts/", "email", "scopes"}) >= 2
+	case "azure_metadata":
+		return newMarkerCount(body, base, []string{"vmid", "subscriptionid", "resourcegroupname", "microsoft.compute", "azureenvironment"}) >= 2
+	case "alibaba_metadata":
+		return newMarkerCount(body, base, []string{"owner-account-id", "region-id", "zone-id", "image-id", "instance/instance-type"}) >= 2
+	case "do_metadata":
+		return newMarkerCount(body, base, []string{"droplet_id", "vendor_data", "public_keys", "region", "hostname"}) >= 2
+	case "oracle_metadata":
+		return newMarkerCount(body, base, []string{"compartmentid", "canonicalregionname", "ocid1.", "oraclecloud.com", "shape"}) >= 2
+	case "tencent_metadata":
+		return newMarkerCount(body, base, []string{"app-id", "placement/region", "instance/instance-name", "instance/instance-id"}) >= 2
+	case "packet_metadata":
+		return newMarkerCount(body, base, []string{"bonding_mode", "facility", "operating_system", "iqn"}) >= 2
+	default:
+		return false
+	}
 }
 
 func (r *Runner) probeSSRF(ctx context.Context, target ScanTarget, p payloadgen.Payload) (httpclient.RequestResponse, error) {
@@ -461,7 +469,7 @@ func (r *Runner) ssrfDirectResponseCheck(ctx context.Context, target ScanTarget)
 		if err != nil {
 			continue
 		}
-		if ssrfHighConfidenceMetadata(rr.Response.Body) || ssrfSignalConfirmed(p, baseline.Response, rr.Response, p.ExpectedSignal) {
+		if ssrfHighConfidenceMetadata(p, baseline.Response, rr.Response, p.ExpectedSignal) {
 			signal := normalizedSSRFSignal(p)
 			f := r.verifyAndBuild(ctx, "ssrf", target, p, baseline, rr, signal, false, false, "", "")
 			if f != nil {

@@ -125,6 +125,57 @@ func TestApplyScanModes(t *testing.T) {
 	if cfg.AllowsModule("command_injection") {
 		t.Error("expected command_injection to NOT be allowed in sql mode")
 	}
+	if cfg.EnableFuzzing || cfg.Enable403BypassChecks {
+		t.Fatalf("sql mode must not run unrelated discovery phases: fuzzing=%v bypass403=%v", cfg.EnableFuzzing, cfg.Enable403BypassChecks)
+	}
+}
+
+func TestNarrowModesOptIntoIndependentAttackPhases(t *testing.T) {
+	tests := []struct {
+		mode       string
+		wantFuzz   bool
+		wantBypass bool
+	}{
+		{"sql", false, false},
+		{"xss", false, false},
+		{"api", false, false},
+		{"graphql", false, false},
+		{"rce", false, false},
+		{"ssrf", false, false},
+		{"passive", false, false},
+		{"fuzz", true, false},
+		{"auth", false, true},
+		{"sql,fuzz", true, false},
+		{"sql,auth", false, true},
+		{"sql,fuzz,auth", true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			cfg := DefaultScanConfig()
+			if err := ApplyScanModes(&cfg, tt.mode); err != nil {
+				t.Fatal(err)
+			}
+			cfg = ApplyScanProfile(cfg)
+			if cfg.EnableFuzzing != tt.wantFuzz || cfg.Enable403BypassChecks != tt.wantBypass {
+				t.Fatalf("mode %q: fuzzing=%v bypass403=%v, want %v/%v", tt.mode,
+					cfg.EnableFuzzing, cfg.Enable403BypassChecks, tt.wantFuzz, tt.wantBypass)
+			}
+			if !cfg.Explicit.EnableFuzzing || !cfg.Explicit.Enable403BypassChecks {
+				t.Fatal("narrow mode phase decisions must survive profile normalization")
+			}
+		})
+	}
+}
+
+func TestFullModeKeepsIndependentAttackPhases(t *testing.T) {
+	cfg := DefaultScanConfig()
+	if err := ApplyScanModes(&cfg, "full"); err != nil {
+		t.Fatal(err)
+	}
+	cfg = ApplyScanProfile(cfg)
+	if !cfg.EnableFuzzing || !cfg.Enable403BypassChecks {
+		t.Fatalf("full mode unexpectedly disabled active discovery: fuzzing=%v bypass403=%v", cfg.EnableFuzzing, cfg.Enable403BypassChecks)
+	}
 }
 
 func TestPassiveModeRemainsPassiveAfterProfileNormalization(t *testing.T) {

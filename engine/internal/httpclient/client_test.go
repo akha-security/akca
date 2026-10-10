@@ -2,6 +2,7 @@ package httpclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -91,6 +92,86 @@ func TestHTTPClientReturns429WithoutRetrying(t *testing.T) {
 	}
 	if rr.Response.StatusCode != http.StatusTooManyRequests || rr.Response.Body != "account temporarily locked" {
 		t.Fatalf("429 evidence was not preserved: %+v", rr.Response)
+	}
+}
+
+func TestHTTPClientOpensCircuitOnFirst429WithoutRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("too many requests"))
+	}))
+	defer srv.Close()
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{srv.URL}
+	client, err := New(cfg, scope.NewEngine(cfg), ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Do(context.Background(), http.MethodGet, srv.URL, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(srv.URL)
+	until, open := client.circuitOpen(u.Hostname())
+	if !open || time.Until(until) < 25*time.Second {
+		t.Fatalf("first 429 without Retry-After did not open a protective circuit: open=%v until=%v", open, until)
+	}
+}
+
+func TestExpectedRateLimitResponseDoesNotOpenGlobalCircuit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("account rate limit reached"))
+	}))
+	defer srv.Close()
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{srv.URL}
+	client, err := New(cfg, scope.NewEngine(cfg), ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithExpectedRateLimitResponse(context.Background())
+	rr, err := client.Do(ctx, http.MethodPost, srv.URL, []byte("account=known"), nil)
+	if err != nil || rr.Response.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 evidence, response=%+v err=%v", rr.Response, err)
+	}
+	u, _ := url.Parse(srv.URL)
+	if _, open := client.circuitOpen(u.Hostname()); open {
+		t.Fatal("deliberate rate-limit verification must not park unrelated host traffic")
+	}
+}
+
+func TestHTTPClientOpensCircuitOnWAFChallengeBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("Web Application Firewall: request blocked; support ID 42"))
+	}))
+	defer srv.Close()
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{srv.URL}
+	client, err := New(cfg, scope.NewEngine(cfg), ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Do(context.Background(), http.MethodGet, srv.URL, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(srv.URL)
+	if _, open := client.circuitOpen(u.Hostname()); !open {
+		t.Fatal("WAF challenge response did not open the host circuit")
+	}
+}
+
+func TestHostBlockRequiresThreeHealthyResponsesToClear(t *testing.T) {
+	client := &Client{hostBlocks: map[string]int{}, hostHealthy: map[string]int{}, blockedUntil: map[string]time.Time{}}
+	client.recordHostBlock("example.com", 30*time.Second)
+	client.recordHostSuccess("example.com")
+	client.recordHostSuccess("example.com")
+	if _, open := client.circuitOpen("example.com"); !open {
+		t.Fatal("two healthy responses must not immediately erase host pressure history")
+	}
+	client.recordHostSuccess("example.com")
+	if _, open := client.circuitOpen("example.com"); open {
+		t.Fatal("three consecutive healthy responses should clear the host circuit")
 	}
 }
 
@@ -216,6 +297,62 @@ func TestHostCircuitOpensAfterRepeatedBlocks(t *testing.T) {
 	c.clearHostBlocks("example.com")
 	if _, open := c.circuitOpen("example.com"); open {
 		t.Fatal("expected successful recovery to close circuit")
+	}
+}
+
+func TestHTTPClientWaitsForHostCircuitInsteadOfSkippingRequest(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{srv.URL}
+	client, err := New(cfg, scope.NewEngine(cfg), ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.blockedUntil[host.Hostname()] = time.Now().Add(40 * time.Millisecond)
+
+	started := time.Now()
+	if _, err := client.Do(context.Background(), http.MethodGet, srv.URL, nil, nil); err != nil {
+		t.Fatalf("request was skipped while the host circuit was cooling down: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 25*time.Millisecond {
+		t.Fatalf("request ignored the host cooldown: elapsed=%s", elapsed)
+	}
+}
+
+func TestHostCircuitWaitHonorsCancellation(t *testing.T) {
+	client := &Client{hostBlocks: map[string]int{}, blockedUntil: map[string]time.Time{
+		"example.com": time.Now().Add(time.Minute),
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := client.waitForHostCircuit(ctx, "example.com"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait error = %v, want context cancellation", err)
+	}
+}
+
+func TestHostCircuitWaitObservesConcurrentRecovery(t *testing.T) {
+	client := &Client{hostBlocks: map[string]int{"example.com": 3}, blockedUntil: map[string]time.Time{
+		"example.com": time.Now().Add(time.Minute),
+	}}
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		client.clearHostBlocks("example.com")
+	}()
+
+	started := time.Now()
+	if err := client.waitForHostCircuit(context.Background(), "example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("circuit recovery was not observed promptly: %s", elapsed)
 	}
 }
 

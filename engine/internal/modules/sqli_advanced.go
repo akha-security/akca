@@ -574,6 +574,12 @@ type sqliBooleanPair struct {
 	variant                       string
 }
 
+type runtimeSQLiBooleanPair struct {
+	sqliBooleanPair
+	encoding  string
+	wafVendor string
+}
+
 func sqliBooleanPairs(scanID string, target ScanTarget) []sqliBooleanPair {
 	seed := sha256.Sum256([]byte(scanID + "|" + target.EndpointURL + "|" + target.Parameter + "|boolean-pair"))
 	left := 10000 + int(binary.BigEndian.Uint32(seed[:4])%80000)
@@ -685,8 +691,34 @@ func sqliBooleanPairs(scanID string, target ScanTarget) []sqliBooleanPair {
 	return pairs
 }
 
+func (r *Runner) sqliBooleanPairsWithWAF(target ScanTarget) []runtimeSQLiBooleanPair {
+	basePairs := sqliBooleanPairs(r.scanID, target)
+	hints := r.wafHintsForTarget(target)
+	out := make([]runtimeSQLiBooleanPair, 0, len(basePairs)*2)
+	for _, pair := range basePairs {
+		out = append(out, runtimeSQLiBooleanPair{sqliBooleanPair: pair})
+		sets := r.runtimeSQLiWAFVariantSetsWithHints(target, []string{
+			pair.trueVal, pair.falseVal, pair.secondTrueVal, pair.secondFalseVal,
+		}, hints)
+		for _, set := range sets {
+			if len(set.Values) != 4 {
+				continue
+			}
+			out = append(out, runtimeSQLiBooleanPair{
+				sqliBooleanPair: sqliBooleanPair{
+					trueVal: set.Values[0], falseVal: set.Values[1],
+					secondTrueVal: set.Values[2], secondFalseVal: set.Values[3],
+					variant: pair.variant + "_waf_" + set.Encoding,
+				},
+				encoding: set.Encoding, wafVendor: set.Vendor,
+			})
+		}
+	}
+	return out
+}
+
 func (r *Runner) booleanBlindSQLiProbe(ctx context.Context, target ScanTarget, baseline httpclient.RequestResponse) []ModuleFinding {
-	pairs := sqliBooleanPairs(r.scanID, target)
+	pairs := r.sqliBooleanPairsWithWAF(target)
 	pairsAttempted, requestsDelivered, candidatePairs := 0, 0, 0
 	defer func() {
 		r.emitSQLiCoverage("sqli_boolean_probe_coverage", target, map[string]interface{}{
@@ -724,6 +756,11 @@ func (r *Runner) booleanBlindSQLiProbe(ctx context.Context, target ScanTarget, b
 		orientation := booleanPairOrientation(baseline.Response.Body, trueRR.Body, falseRR.Body)
 		p := payloadgen.Payload{
 			Value: pair.trueVal, VulnClass: "sqli", Variant: pair.variant, ExpectedSignal: signal,
+			Family: "sqli", Encoding: pair.encoding, WAFAdapted: pair.encoding != "", WAFVendor: pair.wafVendor,
+		}
+		if pair.encoding != "" {
+			p.Technique = payloadgen.TechniqueWAFMutation
+			p.Mutations = []payloadgen.MutationSpec{{Layer: "waf", Technique: pair.encoding}}
 		}
 		if !sqliSignalConfirmed(p, trueRR.Body, baseline.Response.Body, signal) {
 			continue

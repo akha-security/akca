@@ -23,6 +23,19 @@ type groupDClient struct {
 	statuses  map[string]int
 }
 
+type passiveCountingClient struct {
+	calls int
+	body  string
+}
+
+func (c *passiveCountingClient) Do(_ context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	c.calls++
+	return httpclient.RequestResponse{
+		Request:  httpclient.RequestRecord{Method: method, URL: rawURL, Body: string(body), Headers: headers},
+		Response: httpclient.ResponseRecord{StatusCode: 200, Body: c.body, Headers: map[string]string{"Content-Type": "application/json"}},
+	}, nil
+}
+
 type putCleanupClient struct {
 	content       string
 	cleanupFails  bool
@@ -128,7 +141,7 @@ func (m *groupDClient) Do(_ context.Context, method, rawURL string, body []byte,
 	}, nil
 }
 
-func groupDRunner(t *testing.T, c *groupDClient, opts ...RunnerOption) *Runner {
+func groupDRunner(t *testing.T, c HTTPDoer, opts ...RunnerOption) *Runner {
 	t.Helper()
 	cfg := config.DefaultScanConfig()
 	cfg.EnableBusinessLogicChecks = true
@@ -220,6 +233,33 @@ func TestSensitiveDataExposure(t *testing.T) {
 	findings := groupDRunner(t, c).runSensitiveData(context.Background(), target)
 	if len(findings) == 0 {
 		t.Fatal("expected sensitive data finding")
+	}
+}
+
+func TestSensitiveDataUsesIncompleteObservedBodyWithoutRefetch(t *testing.T) {
+	client := &passiveCountingClient{body: `{"fallback":"must not be fetched"}`}
+	observed := &httpclient.RequestResponse{
+		Request:  httpclient.RequestRecord{Method: "GET", URL: "http://example.com/profile"},
+		Response: httpclient.ResponseRecord{StatusCode: 200, Body: `{"ssn":"123-45-6789"}`, BodyTruncated: true, Headers: map[string]string{"Content-Type": "application/json"}},
+	}
+	target := ScanTarget{EndpointURL: "http://example.com/profile", Method: "GET", ObservedResponse: observed, ObservedComplete: false}
+	findings := groupDRunner(t, client).runSensitiveData(context.Background(), target)
+	if len(findings) == 0 {
+		t.Fatal("expected sensitive data finding from captured partial response")
+	}
+	if client.calls != 0 {
+		t.Fatalf("passive sensitive-data analysis re-fetched the endpoint %d times", client.calls)
+	}
+}
+
+func TestPassiveContentCacheIsSharedAcrossModules(t *testing.T) {
+	client := &passiveCountingClient{body: `{"ssn":"123-45-6789","token":"` + testfixtures.GitHubToken() + `"}`}
+	runner := groupDRunner(t, client)
+	target := ScanTarget{EndpointURL: "http://example.com/profile", Method: "GET"}
+	_ = runner.runSensitiveData(context.Background(), target)
+	_ = runner.runSecretExposure(context.Background(), target)
+	if client.calls != 1 {
+		t.Fatalf("passive modules downloaded the same endpoint %d times, want 1", client.calls)
 	}
 }
 

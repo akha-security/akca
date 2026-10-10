@@ -603,12 +603,18 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget, req
 	}
 
 	var browserState *BrowserSnapshot
-	hasScripts := strings.Contains(strings.ToLower(body), "<script")
 	// Retry browser-only authentication and anti-bot responses once through the
 	// configured browser. Do not launch browsers for speculative API-doc probes.
 	deniedDocument := browserRecoverableDocumentStatus(rr.Response.StatusCode) && method == http.MethodGet &&
 		(source == SourceSeed || source == SourceSeedIngest || source == SourceLink || source == SourceBrowserXHR)
-	if ((isHTML && hasScripts) || deniedDocument) && c.cfg.EnableHeadlessCrawler && c.browser != nil {
+	// A script tag alone is not evidence that Chromium will reveal anything new:
+	// analytics, widgets and progressively-enhanced multi-page sites all have
+	// scripts. Rendering every such page doubled the network work and made the
+	// crawler wait on browser navigation for otherwise static documents. Always
+	// render scripted entry pages, but render linked pages only when their HTML
+	// has an application-shell/runtime signal.
+	needsRuntimeRender := isHTML && shouldRenderWithBrowser(body, source, method, rr.Response.StatusCode)
+	if (needsRuntimeRender || deniedDocument) && c.cfg.EnableHeadlessCrawler && c.browser != nil {
 		c.mu.Lock()
 		c.browserAttempts++
 		c.mu.Unlock()
@@ -702,8 +708,46 @@ func browserRecoverableDocumentStatus(status int) bool {
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests, http.StatusServiceUnavailable:
 		return true
 	default:
+		// Custom gateway/WAF statuses (such as 556) are frequently tied to the
+		// raw HTTP client profile or root path. Give the instrumented browser one
+		// chance to recover the actual application before accepting the gap.
+		return status >= 500 && status <= 599 && http.StatusText(status) == ""
+	}
+}
+
+// shouldRenderWithBrowser selects documents where JavaScript execution is
+// likely to add coverage beyond the static HTML/JS extractors. Authentication
+// and anti-bot recovery is handled separately by browserRecoverableDocumentStatus.
+func shouldRenderWithBrowser(body string, source DiscoverySource, method string, status int) bool {
+	if method != http.MethodGet || status < 200 || status >= 300 {
 		return false
 	}
+	lower := strings.ToLower(body)
+	if !strings.Contains(lower, "<script") {
+		return false
+	}
+	if source == SourceSeed || source == SourceSeedIngest {
+		return true
+	}
+
+	// Strong SPA/application-shell markers. These pages frequently expose their
+	// routes and API calls only after the runtime has booted.
+	for _, marker := range []string{
+		`id="root"`, `id='root'`, `id="app"`, `id='app'`, `id="__next"`, `id='__next'`,
+		"__next_data__", "data-reactroot", "ng-version", "webpack", "vite/client",
+		`type="module"`, `type='module'`, "xmlhttprequest", "fetch(", "axios.",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+
+	// A scripted document without ordinary navigation or forms is typically an
+	// empty application shell. Chromium is valuable here; on conventional pages
+	// the static extractor already sees the navigable surface.
+	hasNavigation := strings.Contains(lower, "<a ") || strings.Contains(lower, "<a\n") ||
+		strings.Contains(lower, "<a\t") || strings.Contains(lower, "<form")
+	return !hasNavigation
 }
 
 type crawlSessionUpdater interface {

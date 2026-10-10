@@ -7,6 +7,42 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.2.8] - 2026-10-10
+
+### Added
+
+- Add parser tomography for observed URL decode depth and plus-to-space behavior, with persisted WAF decoder profiles.
+- Add atomic runtime WAF variant sets so SQL boolean pairs, timing delays and matched controls always receive the same transformation.
+- Add independent browser-backed DOM XSS execution proof for non-reflected client-side flows, including clean baseline controls and CSP-tolerant canary fallbacks.
+- Add regression coverage for HTTP 556 preflight handling, narrow scan modes, host circuit recovery, passive response reuse, SSRF reflection filtering, discovery-document exclusion and DOM XSS controls.
+
+### Changed
+
+- Treat failed or blocked payload variants as diagnostic observations when the same target still produced usable module coverage, preventing false `PARTIAL` module results.
+- Apply compound WAF techniques through one transformation path and preserve UTF-8, SQL keyword grammar and exact URL-encoding depth.
+- Generate dynamic encoded SQL timing and boolean variants with matched zero-delay and false-branch controls.
+- Share captured response bodies across passive exposure analyzers and allow incomplete captured bodies to provide positive evidence without a network refetch.
+- Pace backup archive probes per origin, prioritize high-yield candidates and stop expansion at the first pressure signal or verified archive.
+- Gate browser crawling to application-shell/runtime surfaces, bound hidden-parameter concurrency globally, batch safe candidate prefilters and avoid redundant cross-endpoint rediscovery.
+- Keep directory fuzzing and 403-bypass testing disabled for narrow `--mode` scans unless explicitly selected.
+- Continue scanning through nonstandard gateway/WAF statuses such as HTTP 556 while retaining fail-fast behavior for registered server errors.
+
+### Fixed
+
+- Reject SSRF candidates caused by encoded payload reflection, script/analytics echoes, hostname-only matches and generic body differences; require provider-specific metadata structure for high-confidence signals.
+- Honor `429`, `Retry-After` and WAF challenge pressure through a host circuit that waits and resumes instead of flooding the origin or skipping queued modules.
+- Preserve deliberate rate-limit `429` responses as module evidence without opening the global WAF circuit for unrelated scan traffic.
+- Avoid repeated active parameter probing of `robots.txt`, sitemap and `.well-known` discovery documents.
+- Prevent DOM XSS from being discarded merely because the server response is unchanged, while rejecting pre-existing browser execution markers and non-replayable header/body surfaces.
+- Avoid unnecessary network traffic in passive vulnerable-component and offline CVE catalog modules.
+
+### Validation
+
+- Full Go package tests pass with `go test ./... -count=1`.
+- Static analysis passes with `go vet ./...`.
+- The strict observed benchmark gate passes before release tagging; the advisory complete-corpus audit continues to publish outstanding per-module fixture coverage.
+- Release assets are built for Windows x64, Linux x64/ARM64 and macOS Intel/Apple Silicon with SHA-256 checksums and GitHub provenance attestations.
+
 ## [v0.2.7] - 2026-10-04
 
 ### Changed
@@ -369,7 +405,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - HTML, JSON, Markdown, CSV and SARIF reporting.
 - CWE and OWASP Top 10:2025 report classification.
 
-[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.7...HEAD
+[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.8...HEAD
+[v0.2.8]: https://github.com/akha-security/akca/compare/v0.2.7...v0.2.8
 [v0.2.7]: https://github.com/akha-security/akca/compare/v0.2.6...v0.2.7
 [v0.2.6]: https://github.com/akha-security/akca/compare/v0.2.5...v0.2.6
 [v0.2.5]: https://github.com/akha-security/akca/compare/v0.2.4...v0.2.5

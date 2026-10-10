@@ -1186,8 +1186,8 @@ func moduleFriendlyName(name string) string {
 		"tls_misconfig":            "TLS Misconfiguration",
 		"sensitive_data":           "Sensitive Data Exposure",
 		"secret_exposure":          "Secret Exposure",
-		"vulnerable_components":    "Vulnerable Components",
-		"known_cve":                "Known CVEs",
+		"vulnerable_components":    "Component Inventory (Passive)",
+		"known_cve":                "Known CVEs (Offline Catalog)",
 		"script_source":            "Script Source Analysis",
 		"debug_admin":              "Debug & Admin Exposure",
 		"actuator":                 "Spring Actuator Exposure",
@@ -2979,7 +2979,6 @@ func runScanCommand(args []string) int {
 		cfg.OASTServerURL = strings.TrimSpace(oastServer)
 	}
 	cfg.OASTDrainTimeout = time.Duration(oastWait) * time.Second
-	cfg.EnableFuzzing = !noFuzzing
 	cfg.EnableJSAnalysis = !noJS
 	if wafEvasionSet {
 		cfg.EnableWAFBypassHeaders = wafEvasion
@@ -2993,6 +2992,7 @@ func runScanCommand(args []string) int {
 		cfg.Explicit.EnableOAST = true
 	}
 	if noFuzzing {
+		cfg.EnableFuzzing = false
 		cfg.Explicit.EnableFuzzing = true
 	}
 	if noJS {

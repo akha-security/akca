@@ -198,32 +198,37 @@ func (r *Runner) runSQLi(ctx context.Context, target ScanTarget) []ModuleFinding
 	// unconditionally for all parameter targets to guarantee zero missed vulnerabilities.
 
 	for _, dyn := range sqliDynamicTimingPayloads(sleepSec, dbHint) {
-		if ctx.Err() != nil {
-			break
-		}
-		ok, elapsed, samples, zeroS := r.sqliTimingVerified(ctx, target, dyn.Value, dbHint, timingBase, sleepSec)
-		if !ok {
-			continue
-		}
-		attempt, ok := r.sqliBestAttempt(ctx, target, dyn.Value, baseline.Response.Body)
-		if !ok {
-			continue
-		}
-		probeTarget := attempt.Target
-		if probeTarget.EndpointURL == "" {
-			probeTarget = target
-		}
-		if timingblind.UseDelayedVerification(r.cfg) {
-			r.scheduleDelayedTimingProbe(delayedTimingProbe{
-				Target: target, Module: "sqli", Payload: dyn,
-				Baseline: timingBase, SleepSec: sleepSec, FirstMs: elapsed, Scheduled: time.Now(),
-			})
-			continue
-		}
-		f := r.buildSQLiFinding(ctx, probeTarget, dyn, baseline, attempt.RR, "timing_differential", "", elapsed, timingBase, sleepSec, samples, zeroS)
-		if f != nil {
-			if r.recordFinding(ctx, &out, f, "sqli", "timing_differential") {
-				return out
+		for _, runtimeProbe := range r.sqliTimingPayloadVariants(target, dyn, dbHint) {
+			if ctx.Err() != nil {
+				break
+			}
+			probePayload := runtimeProbe.Payload
+			ok, elapsed, samples, zeroS := r.sqliTimingVerified(ctx, target, probePayload.Value, dbHint, timingBase, sleepSec,
+				runtimeProbe.ZeroValue, runtimeProbe.FalseValue)
+			if !ok {
+				continue
+			}
+			attempt, ok := r.sqliBestAttempt(ctx, target, probePayload.Value, baseline.Response.Body)
+			if !ok {
+				continue
+			}
+			probeTarget := attempt.Target
+			if probeTarget.EndpointURL == "" {
+				probeTarget = target
+			}
+			if timingblind.UseDelayedVerification(r.cfg) {
+				r.scheduleDelayedTimingProbe(delayedTimingProbe{
+					Target: target, Module: "sqli", Payload: probePayload,
+					ZeroValue: runtimeProbe.ZeroValue, FalseValue: runtimeProbe.FalseValue,
+					Baseline: timingBase, SleepSec: sleepSec, FirstMs: elapsed, Scheduled: time.Now(),
+				})
+				continue
+			}
+			f := r.buildSQLiFinding(ctx, probeTarget, probePayload, baseline, attempt.RR, "timing_differential", "", elapsed, timingBase, sleepSec, samples, zeroS)
+			if f != nil {
+				if r.recordFinding(ctx, &out, f, "sqli", "timing_differential") {
+					return out
+				}
 			}
 		}
 	}
@@ -476,6 +481,44 @@ func sqliDynamicTimingPayloads(sleepSec int, dbHint string) []payloadgen.Payload
 		add(payloadgen.Payload{Value: fmt.Sprintf("'; WAITFOR DELAY '0:0:%d'--", sleepSec), VulnClass: "sqli", Variant: "mssql_waitfor_delay", ExpectedSignal: "time_delay"})
 		add(payloadgen.Payload{Value: fmt.Sprintf("' AND 1=1; WAITFOR DELAY '0:0:%d'--", sleepSec), VulnClass: "sqli", Variant: "mssql_waitfor_delay_and", ExpectedSignal: "time_delay"})
 		add(payloadgen.Payload{Value: fmt.Sprintf("1; WAITFOR DELAY '0:0:%d'--", sleepSec), VulnClass: "sqli", Variant: "mssql_waitfor_delay_numeric", ExpectedSignal: "time_delay"})
+	}
+	return out
+}
+
+type runtimeSQLiTimingProbe struct {
+	Payload    payloadgen.Payload
+	ZeroValue  string
+	FalseValue string
+}
+
+func (r *Runner) sqliTimingPayloadVariants(target ScanTarget, payload payloadgen.Payload, dbHint string) []runtimeSQLiTimingProbe {
+	zeroValue := timingblind.SQLiMatchedZeroDelayPayload(payload.Value, dbHint).Value
+	falseValue := ""
+	if falseControl, ok := timingblind.SQLiXORFalseConditionControl(payload.Value); ok {
+		falseValue = falseControl.Value
+	}
+	out := []runtimeSQLiTimingProbe{{Payload: payload, ZeroValue: zeroValue, FalseValue: falseValue}}
+	values := []string{payload.Value, zeroValue}
+	if falseValue != "" {
+		values = append(values, falseValue)
+	}
+	for _, set := range r.runtimeSQLiWAFVariantSets(target, values) {
+		if len(set.Values) != len(values) {
+			continue
+		}
+		adapted := payload
+		adapted.Value = set.Values[0]
+		adapted.Variant += "_waf_" + set.Encoding
+		adapted.Encoding = set.Encoding
+		adapted.WAFAdapted = true
+		adapted.WAFVendor = set.Vendor
+		adapted.Technique = payloadgen.TechniqueWAFMutation
+		adapted.Mutations = append(adapted.Mutations, payloadgen.MutationSpec{Layer: "waf", Technique: set.Encoding})
+		probe := runtimeSQLiTimingProbe{Payload: adapted, ZeroValue: set.Values[1]}
+		if len(set.Values) > 2 {
+			probe.FalseValue = set.Values[2]
+		}
+		out = append(out, probe)
 	}
 	return out
 }
