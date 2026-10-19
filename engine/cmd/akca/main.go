@@ -1645,6 +1645,21 @@ func urlProgress(value, limit int) string {
 	return fmt.Sprintf("%s / %s pages", formattedCount(value), formattedCount(limit))
 }
 
+func discoveryProgressVariants(pages, limit, endpoints int) []string {
+	full := urlProgress(pages, limit) + fmt.Sprintf(" · %s endpoints", formattedCount(endpoints))
+	compactPages := "P:" + formattedCount(pages)
+	minimalPages := fmt.Sprintf("%d", pages)
+	if limit > 0 {
+		compactPages += "/" + formattedCount(limit)
+		minimalPages += "/" + fmt.Sprintf("%d", limit)
+	}
+	return []string{
+		full,
+		compactPages + " E:" + formattedCount(endpoints),
+		minimalPages + "p " + fmt.Sprintf("%d", endpoints) + "e",
+	}
+}
+
 func memoryUsage(value, limit int) string {
 	format := func(mb int) string {
 		if mb >= 1024 {
@@ -1755,17 +1770,27 @@ func (cw *ConsoleWriter) runningStatusLine() string {
 	if w < 68 {
 		barWidth = 8
 	}
-	prefix := fmt.Sprintf("%sSCAN%s  [%s] %s%3d%%%s  %sElapsed %s%s",
-		bLavender, rst, progressBar(percent, barWidth), bCloud, percent, rst,
-		cCloud, elapsed, rst)
+	prefix := fmt.Sprintf("%sSCAN%s  [%s] %s%3d%%%s",
+		bLavender, rst, progressBar(percent, barWidth), bCloud, percent, rst)
+	if w >= 68 {
+		prefix += fmt.Sprintf("  %sElapsed %s%s", cCloud, elapsed, rst)
+	}
 	separator := fmt.Sprintf("  %s│%s  ", cGhost, rst)
 	suffix := ""
-	urlSuffix := separator + urlProgress(urls, urlLimit)
-	if endpoints > 0 {
-		urlSuffix += fmt.Sprintf(" · %s endpoints", formattedCount(endpoints))
+	const minimumPhaseWidth = 5
+	availableSuffixWidth := w - visibleLen(prefix) - 2*visibleLen(separator) - minimumPhaseWidth
+	for _, candidate := range discoveryProgressVariants(urls, urlLimit, endpoints) {
+		if visibleLen(candidate) <= availableSuffixWidth {
+			suffix = separator + candidate
+			break
+		}
 	}
-	if w-visibleLen(prefix)-visibleLen(separator)-visibleLen(urlSuffix) >= 12 {
-		suffix = urlSuffix
+	// Counts are more useful than an unabridged phase label. The final compact
+	// form is intentionally forced into the row on unusually narrow terminals.
+	if suffix == "" {
+		candidate := discoveryProgressVariants(urls, urlLimit, endpoints)[2]
+		maxWidth := max(1, w-visibleLen(prefix)-2*visibleLen(separator)-1)
+		suffix = separator + truncateText(candidate, maxWidth)
 	}
 	phaseWidth := w - visibleLen(prefix) - visibleLen(separator) - visibleLen(suffix)
 	if phaseWidth < 1 {

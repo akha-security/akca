@@ -522,6 +522,55 @@ func TestRunningStatusUsesPortableSingleLine(t *testing.T) {
 	}
 }
 
+func TestRunningStatusKeepsPageAndEndpointCountsAsTheyGrow(t *testing.T) {
+	oldWidth := activeUIWidth
+	activeUIWidth = uiWidth
+	defer func() { activeUIWidth = oldWidth }()
+
+	cw := NewConsoleWriter()
+	cw.lastPhase = "crawling"
+	cw.urlsCrawled = 1_234
+	cw.urlLimit = 1_500
+	cw.maxDiscovered = 98_765
+	cw.progressPercent = 82
+	cw.startTime = time.Now().Add(-130 * time.Second)
+
+	got := cw.runningStatusLine()
+	for _, want := range []string{"P:1,234/1,500", "E:98,765"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("growing discovery counters disappeared; missing %q in %q", want, got)
+		}
+	}
+	if visibleLen(got) > currentUIWidth()+4 {
+		t.Fatalf("running status overflowed terminal width: width=%d line=%q", visibleLen(got), got)
+	}
+}
+
+func TestRunningStatusKeepsCountsAtMinimumWidth(t *testing.T) {
+	oldWidth := activeUIWidth
+	activeUIWidth = minUIWidth
+	defer func() { activeUIWidth = oldWidth }()
+
+	cw := NewConsoleWriter()
+	cw.lastPhase = "crawling"
+	cw.urlsCrawled = 321
+	cw.urlLimit = 1_500
+	cw.maxDiscovered = 987
+	cw.progressPercent = 40
+	cw.startTime = time.Now().Add(-130 * time.Second)
+
+	got := cw.runningStatusLine()
+	if !strings.Contains(got, "P:321/1,500") || !strings.Contains(got, "E:987") {
+		t.Fatalf("minimum-width status dropped discovery counters: %q", got)
+	}
+	if strings.Contains(got, "Elapsed") {
+		t.Fatalf("minimum-width status should yield elapsed time to discovery counters: %q", got)
+	}
+	if visibleLen(got) > currentUIWidth()+4 {
+		t.Fatalf("minimum-width status overflowed: width=%d line=%q", visibleLen(got), got)
+	}
+}
+
 func TestTerminalTextStripsControlSequencesAndBidiOverrides(t *testing.T) {
 	input := "safe\x1b[31m-red\x1b[0m\x1b]0;owned\x07\u202Etxt\nnext"
 	got := safeTerminalText(input)

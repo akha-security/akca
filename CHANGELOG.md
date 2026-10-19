@@ -7,6 +7,10 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep crawled-page and discovered-endpoint counters visible as their values grow by compacting the counters before truncating the live phase label, and prioritize counters over elapsed time on very narrow terminals.
+
 ## [v0.2.9] - 2026-10-19
 
 ### Added
