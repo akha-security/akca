@@ -7,10 +7,6 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed
-
-- Keep crawled-page and discovered-endpoint counters visible as their values grow by compacting the counters before truncating the live phase label, and prioritize counters over elapsed time on very narrow terminals.
-
 ## [v0.2.9] - 2026-10-19
 
 ### Added
@@ -29,6 +25,7 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Keep crawled-page and discovered-endpoint counters visible as their values grow by compacting the counters before truncating the live phase label, and prioritize counters over elapsed time on very narrow terminals.
 - Require two distinct per-attempt queued canary responses for HTTP request-smuggling confirmation; suppress status-only parser errors such as `400 Invalid Header`, detach unrelated endpoint parameters, preserve exact raw-wire evidence, and omit misleading cURL reproductions.
 - Prefer framework-specific Next.js and Nuxt fingerprints before generic React detection so their dedicated checks remain eligible.
 - Accept integer and decoded numeric crawler counters consistently in completion events.
