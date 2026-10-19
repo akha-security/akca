@@ -67,6 +67,9 @@ func (g *Generator) Run(ctx context.Context, profiles []reflection.ReflectionPro
 				BackendLanguage: tech.BackendLanguage,
 				Framework:       tech.Framework,
 				Database:        tech.Database,
+				ServerCDN:       tech.ServerCDN,
+				JSFramework:     tech.JSFramework,
+				Hints:           append([]string(nil), tech.Hints...),
 			},
 			WAF: WAFHints{
 				Vendor:                  waf.Vendor,

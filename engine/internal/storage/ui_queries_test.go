@@ -2,6 +2,7 @@ package storage
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,20 @@ func TestShellQuotePreservesSingleQuotes(t *testing.T) {
 		if !strings.Contains(command, want) {
 			t.Fatalf("curl command omitted valid quote sequence %q: %s", want, command)
 		}
+	}
+}
+
+func TestSmugglingEvidencePreservesRawRequestAndOmitsMisleadingCurl(t *testing.T) {
+	rawRequest := "POST / HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+	evidence := `{"module":"http_smuggling","signal":"http_desync_cl_te","raw_request":` +
+		strconv.Quote(rawRequest) + `,"request":{"method":"POST","url":"https://example.test/","body":"wire bytes"},` +
+		`"response":{"status_code":404,"body":"akca-smuggle-proof"}}`
+	body := ParseEvidenceBody(evidence)
+	if body.RawRequest != rawRequest {
+		t.Fatalf("raw request changed: %q", body.RawRequest)
+	}
+	if body.CurlCommand != "" {
+		t.Fatalf("curl cannot faithfully reproduce raw request smuggling bytes: %s", body.CurlCommand)
 	}
 }
 

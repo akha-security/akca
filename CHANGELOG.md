@@ -7,6 +7,35 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.2.9] - 2026-10-19
+
+### Added
+
+- Add technology-aware module preconditions backed by persisted fingerprints so framework-, server-, protocol-, and platform-specific checks run only on applicable or genuinely unknown surfaces.
+- Add hard per-origin request limits and cache-aware request accounting for high-cost IIS short-name, Nginx alias and Next.js probes.
+- Add grouped hidden-parameter endpoint error diagnostics and explicit coverage-gap events while allowing partially successful discovery runs to continue.
+
+### Changed
+
+- Restrict hidden-parameter guessing to request-shaped endpoints, deduplicate URL variants by route and parameter shape, persist already-observed query names without re-probing them, and apply a separate bounded discovery budget.
+- Restrict Server-Side JavaScript Injection probes to Node.js or code-evaluation surfaces, deduplicate equivalent URL variants, reuse observed baselines, cap targets per origin, and remove the redundant generic OAST delivery.
+- Propagate persisted backend, framework, database, server/CDN and JavaScript fingerprints into payload planning and evaluate deterministic module preconditions before queueing or budgeting work.
+- Bound technology-specific enumeration, reduce low-yield Nginx and IIS candidates, and stop probing after repeated blocking or infrastructure failures.
+- Display crawled pages, discovered endpoints and sent requests as separate live counters instead of presenting the page count as discovered URLs.
+
+### Fixed
+
+- Require two distinct per-attempt queued canary responses for HTTP request-smuggling confirmation; suppress status-only parser errors such as `400 Invalid Header`, detach unrelated endpoint parameters, preserve exact raw-wire evidence, and omit misleading cURL reproductions.
+- Prefer framework-specific Next.js and Nuxt fingerprints before generic React detection so their dedicated checks remain eligible.
+- Accept integer and decoded numeric crawler counters consistently in completion events.
+
+### Validation
+
+- Full Go package tests pass with `go test ./... -count=1`.
+- Static analysis passes with `go vet ./...`.
+- The strict observed benchmark gate passes before release tagging; the advisory complete-corpus audit continues to report capability and fixture coverage separately.
+- Release assets are built for Windows x64, Linux x64/ARM64 and macOS Intel/Apple Silicon with SHA-256 checksums and GitHub provenance attestations.
+
 ## [v0.2.8] - 2026-10-10
 
 ### Added
@@ -405,7 +434,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - HTML, JSON, Markdown, CSV and SARIF reporting.
 - CWE and OWASP Top 10:2025 report classification.
 
-[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.8...HEAD
+[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.9...HEAD
+[v0.2.9]: https://github.com/akha-security/akca/compare/v0.2.8...v0.2.9
 [v0.2.8]: https://github.com/akha-security/akca/compare/v0.2.7...v0.2.8
 [v0.2.7]: https://github.com/akha-security/akca/compare/v0.2.6...v0.2.7
 [v0.2.6]: https://github.com/akha-security/akca/compare/v0.2.5...v0.2.6

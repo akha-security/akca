@@ -2,26 +2,17 @@ package modules
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 )
 
 var nginxAliasSuffixes = []string{
-	"static", "assets", "uploads", "images", "img", "css", "js",
-	"fonts", "media", "files", "content", "resources", "public",
-	"dist", "build", "lib", "vendor", "node_modules",
-	"app", "application", "src", "source", "web", "www", "htdocs",
-	"html", "templates", "views", "pages", "layouts", "components",
-	"admin", "administrator", "panel", "dashboard", "config",
-	"configuration", "settings", "setup", "install",
-	"api", "api-docs", "swagger", "graphql", "rest", "v1", "v2", "v3",
-	"data", "database", "db", "backup", "backups", "dump", "export",
-	"logs", "log", "tmp", "temp", "cache", "storage",
-	"docs", "doc", "documentation",
-	"wp-content", "wp-includes", "wp-admin",
-	".env", ".git", "server-status",
+	"admin", ".env", ".git/HEAD", "config", "backup", "html", "www",
 }
+
+const nginxAliasMaxRequestsPerOrigin = 30
 
 func (r *Runner) runNginxAlias(ctx context.Context, target ScanTarget) []ModuleFinding {
 	if ok, reason := r.shouldRunModule("nginx_alias", target); !ok {
@@ -43,19 +34,23 @@ func (r *Runner) runNginxAlias(ctx context.Context, target ScanTarget) []ModuleF
 
 	// Check if the host is a wildcard SPA / catch-all host (returns 200 for any random path)
 	wildcardURL := origin + "/" + segment + "-akca-nonexistent-path-check-" + randomProbeToken()
-	wildcardRR, err := r.client.Do(ctx, "GET", wildcardURL, nil, nil)
+	wildcardRR, err := r.limitedModuleDo(ctx, "nginx_alias", nginxAliasMaxRequestsPerOrigin, "GET", wildcardURL, nil, nil)
+	if errors.Is(err, errModuleHardProbeLimit) {
+		return nil
+	}
 	if err == nil && wildcardRR.Response.StatusCode == 200 && len(wildcardRR.Response.Body) > 100 {
 		// Server returns 200 for nonexistent paths under this prefix (SPA/catch-all); skip to avoid false positives
 		return nil
 	}
 
-	baseline, baselineErr := r.cachedEmptyProbe(ctx, target)
+	baseline, baselineErr := r.cachedEmptyProbeWithHardLimit(ctx, "nginx_alias", nginxAliasMaxRequestsPerOrigin, target)
 	if baselineErr != nil {
 		return nil
 	}
 
 	var out []ModuleFinding
-	injections := []string{"..", "..;", "..%3B"}
+	injections := []string{"..", "..;"}
+	consecutiveFailures := 0
 
 	for _, inj := range injections {
 		if ctx.Err() != nil {
@@ -71,8 +66,19 @@ func (r *Runner) runNginxAlias(ctx context.Context, target ScanTarget) []ModuleF
 				continue
 			}
 
-			rr, err := r.client.Do(ctx, "GET", probeURL, nil, nil)
-			if err != nil || rr.Response.StatusCode != 200 || len(rr.Response.Body) < 50 {
+			rr, err := r.limitedModuleDo(ctx, "nginx_alias", nginxAliasMaxRequestsPerOrigin, "GET", probeURL, nil, nil)
+			if errors.Is(err, errModuleHardProbeLimit) {
+				return out
+			}
+			if err != nil || rr.Response.StatusCode == 403 || rr.Response.StatusCode == 429 || rr.Response.StatusCode >= 500 {
+				consecutiveFailures++
+				if consecutiveFailures >= 3 {
+					return out
+				}
+				continue
+			}
+			consecutiveFailures = 0
+			if rr.Response.StatusCode != 200 || rr.Response.Redirected || len(rr.Response.Body) < 50 {
 				continue
 			}
 
@@ -86,7 +92,10 @@ func (r *Runner) runNginxAlias(ctx context.Context, target ScanTarget) []ModuleF
 
 			// Differential Control 1: Must NOT match the in-alias path /{segment}/{suffix}
 			inAliasURL := origin + "/" + segment + "/" + suffix
-			inAliasRR, inErr := r.client.Do(ctx, "GET", inAliasURL, nil, nil)
+			inAliasRR, inErr := r.limitedModuleDo(ctx, "nginx_alias", nginxAliasMaxRequestsPerOrigin, "GET", inAliasURL, nil, nil)
+			if errors.Is(inErr, errModuleHardProbeLimit) {
+				return out
+			}
 			if inErr == nil && inAliasRR.Response.StatusCode == 200 && bodiesSimilar(body, inAliasRR.Response.Body) {
 				// Server routes /{segment}{inj}/{suffix} identically to in-alias path (prefix routing/SPA)
 				return nil
@@ -94,7 +103,10 @@ func (r *Runner) runNginxAlias(ctx context.Context, target ScanTarget) []ModuleF
 
 			// Differential Control 2: Must NOT match a random nonexistent suffix under the same traversal prefix
 			canaryURL := origin + "/" + segment + inj + "/akca-canary-" + randomProbeToken()
-			canaryRR, canErr := r.client.Do(ctx, "GET", canaryURL, nil, nil)
+			canaryRR, canErr := r.limitedModuleDo(ctx, "nginx_alias", nginxAliasMaxRequestsPerOrigin, "GET", canaryURL, nil, nil)
+			if errors.Is(canErr, errModuleHardProbeLimit) {
+				return out
+			}
 			if canErr == nil && canaryRR.Response.StatusCode == 200 && bodiesSimilar(body, canaryRR.Response.Body) {
 				// Server is suffix-invariant under /{segment}{inj}/ (a catch-all); skip
 				continue
@@ -102,15 +114,21 @@ func (r *Runner) runNginxAlias(ctx context.Context, target ScanTarget) []ModuleF
 
 			// Differential Control 3: Must NOT match /{suffix} already reachable at the web root
 			rootURL := origin + "/" + suffix
-			rootRR, rootErr := r.client.Do(ctx, "GET", rootURL, nil, nil)
+			rootRR, rootErr := r.limitedModuleDo(ctx, "nginx_alias", nginxAliasMaxRequestsPerOrigin, "GET", rootURL, nil, nil)
+			if errors.Is(rootErr, errModuleHardProbeLimit) {
+				return out
+			}
 			if rootErr == nil && rootRR.Response.StatusCode == 200 && bodiesSimilar(body, rootRR.Response.Body) {
 				// Plain unescaped path already serves this body without traversal; skip
 				continue
 			}
 
 			// Stability confirmation: re-fetch once more to guarantee reproducibility
-			reRR, reErr := r.client.Do(ctx, "GET", probeURL, nil, nil)
-			if reErr != nil || reRR.Response.StatusCode != 200 || !bodiesSimilar(body, reRR.Response.Body) {
+			reRR, reErr := r.limitedModuleDo(ctx, "nginx_alias", nginxAliasMaxRequestsPerOrigin, "GET", probeURL, nil, nil)
+			if errors.Is(reErr, errModuleHardProbeLimit) {
+				return out
+			}
+			if reErr != nil || reRR.Response.StatusCode != 200 || reRR.Response.Redirected || !bodiesSimilar(body, reRR.Response.Body) {
 				continue
 			}
 

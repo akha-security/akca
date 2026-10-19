@@ -156,6 +156,12 @@ func (r *Runner) runHTTPSmuggling(ctx context.Context, target ScanTarget) []Modu
 		r.emitSkip("http_smuggling", target, "target URL is invalid or outside scan scope")
 		return nil
 	}
+	// Request smuggling is a protocol/path property, not a parameter finding.
+	// Do not inherit an arbitrary query/header parameter from target expansion.
+	target.Method = http.MethodGet
+	target.Parameter = ""
+	target.Location = ""
+	target.Profile.ParameterLocation = ""
 	baseline, err := r.cachedEmptyProbe(ctx, target)
 	if err != nil {
 		r.emitSkip("http_smuggling", target, "HTTP baseline failed: "+err.Error())
@@ -177,7 +183,8 @@ func (r *Runner) runHTTPSmuggling(ctx context.Context, target ScanTarget) []Modu
 		r.emitSkip("http_smuggling", target, "raw protocol negative control failed: "+err.Error())
 		return nil
 	}
-	if control.Response.StatusCode < 200 || control.Response.StatusCode >= 400 {
+	if control.Response.InitialStatus < 200 || control.Response.InitialStatus >= 400 ||
+		control.Response.StatusCode < 200 || control.Response.StatusCode >= 400 {
 		r.emitSkip("http_smuggling", target, "raw protocol negative control returned an unusable status")
 		return nil
 	}
@@ -193,7 +200,6 @@ func (r *Runner) runHTTPSmuggling(ctx context.Context, target ScanTarget) []Modu
 		}
 		var runs []httpclient.RequestResponse
 		var lastCanary string
-		evidenceMode := ""
 		for i := 0; i < 2; i++ {
 			canary := randomProbeToken()
 			attack := variant.buildRawReq(u.Host, path, canary)
@@ -202,18 +208,17 @@ func (r *Runner) runHTTPSmuggling(ctx context.Context, target ScanTarget) []Modu
 			if e != nil {
 				break
 			}
-			mode := ""
-			if strings.Contains(rr.Response.Body, "akca-smuggle-"+canary) {
-				mode = "canary"
-			} else if rr.Response.StatusCode >= 400 && rr.Response.StatusCode <= 599 &&
-				rr.Response.StatusCode != control.Response.StatusCode {
-				mode = "status"
-			}
-			if mode == "" || (evidenceMode != "" && mode != evidenceMode) ||
-				(len(runs) > 0 && mode == "status" && runs[0].Response.StatusCode != rr.Response.StatusCode) {
+			// A rejected ambiguous request followed by a 4xx only proves parser
+			// rejection. It does not prove that a queued request crossed a
+			// frontend/backend parsing boundary.
+			if rr.Response.InitialStatus < 200 || rr.Response.InitialStatus >= 400 {
+				r.noteSmugglingStatusOnly(target, variant.name, rr, control, "ambiguous request rejected before follow-up")
 				break
 			}
-			evidenceMode = mode
+			if !smugglingCanaryResponse(rr.Response, canary) {
+				r.noteSmugglingStatusOnly(target, variant.name, rr, control, "queued response did not contain the per-attempt canary")
+				break
+			}
 			runs = append(runs, rr)
 			lastCanary = canary
 		}
@@ -221,9 +226,6 @@ func (r *Runner) runHTTPSmuggling(ctx context.Context, target ScanTarget) []Modu
 			continue
 		}
 		signal := "http_desync_" + variant.name
-		if evidenceMode == "status" {
-			signal = "http_desync_status_" + variant.name
-		}
 		p := defaultPayload("http_smuggling", signal, lastCanary, signal)
 		f := r.verifyAndBuildWithCandidate(ctx, "http_smuggling", target, p, baseline, runs[1], signal, false, false, "", "", func(c *verification.Candidate) {
 			c.RequestedProofType = verification.ProofProtocolDesync
@@ -235,17 +237,59 @@ func (r *Runner) runHTTPSmuggling(ctx context.Context, target ScanTarget) []Modu
 		if f != nil {
 			f.Severity = "critical"
 			f.Title = variant.title
-			if evidenceMode == "status" {
-				f.Severity = "high"
-				f.Description = variant.description + " Two independent raw connections shifted the queued follow-up request to the same unexpected error status while the clean same-connection control stayed successful. No response-body reflection was required."
-			} else {
-				f.Description = variant.description + " Two independent raw connections reproduced a canary response absent from the clean sequence."
-			}
+			f.Description = variant.description + " Two independent raw connections reproduced their distinct per-attempt canary responses, both absent from the clean same-connection control."
+			f.Evidence.RawRequest = runs[1].Request.Body
 			r.recordFinding(ctx, &out, f, "http_smuggling", signal)
 			return out
 		}
 	}
 	return out
+}
+
+func smugglingCanaryResponse(response httpclient.ResponseRecord, canary string) bool {
+	if strings.TrimSpace(canary) == "" || response.StatusCode <= 0 || smugglingParserRejection(response) {
+		return false
+	}
+	marker := canary
+	if !strings.HasPrefix(marker, "akca-smuggle-") {
+		marker = "akca-smuggle-" + marker
+	}
+	return strings.Contains(response.Body, marker)
+}
+
+func smugglingParserRejection(response httpclient.ResponseRecord) bool {
+	lower := strings.ToLower(response.Body)
+	for _, marker := range []string{
+		"invalid header", "malformed header", "malformed request", "bad request",
+		"invalid request", "request header too large", "invalid content-length",
+		"invalid transfer-encoding", "invalid chunk", "request rejected",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	switch response.StatusCode {
+	case http.StatusBadRequest, http.StatusLengthRequired, http.StatusRequestEntityTooLarge,
+		http.StatusRequestURITooLong, http.StatusRequestHeaderFieldsTooLarge,
+		http.StatusNotImplemented:
+		return true
+	}
+	return isInfrastructureError(response.StatusCode)
+}
+
+func (r *Runner) noteSmugglingStatusOnly(target ScanTarget, variant string, probe, control httpclient.RequestResponse, reason string) {
+	if probe.Response.StatusCode < 400 || probe.Response.StatusCode > 599 ||
+		probe.Response.StatusCode == control.Response.StatusCode {
+		return
+	}
+	r.emitOnce("http-smuggling-status-only:"+target.EndpointURL, "verification_suppressed",
+		"HTTP smuggling status anomaly was suppressed because no queued canary response was proven", map[string]interface{}{
+			"scan_id": r.scanID, "module": "http_smuggling", "endpoint": target.EndpointURL,
+			"variant": variant, "signal": "status_only_parser_anomaly",
+			"probe_status": probe.Response.StatusCode, "control_status": control.Response.StatusCode,
+			"proof_type": verification.ProofProtocolDesync, "proof_satisfied": false,
+			"reasons": []string{reason, "missing_per_attempt_canary"},
+		})
 }
 
 func (r *Runner) rawSmugglingExchange(ctx context.Context, target ScanTarget, first, second string) (httpclient.RequestResponse, error) {
@@ -281,7 +325,8 @@ func (r *Runner) rawSmugglingExchange(ctx context.Context, target ScanTarget, fi
 	if _, err = io.WriteString(conn, first); err != nil {
 		return httpclient.RequestResponse{}, err
 	}
-	if status, _ := readHTTPResponse(reader); status == 0 {
+	firstStatus, _ := readHTTPResponse(reader)
+	if firstStatus == 0 {
 		return httpclient.RequestResponse{}, fmt.Errorf("raw protocol response unavailable")
 	}
 	if err = reserve(); err != nil {
@@ -294,7 +339,10 @@ func (r *Runner) rawSmugglingExchange(ctx context.Context, target ScanTarget, fi
 	if status == 0 {
 		return httpclient.RequestResponse{}, fmt.Errorf("raw protocol follow-up unavailable")
 	}
-	return httpclient.RequestResponse{Request: httpclient.RequestRecord{Method: "POST", URL: target.EndpointURL, Body: first + second}, Response: httpclient.ResponseRecord{StatusCode: status, Body: body}}, nil
+	return httpclient.RequestResponse{
+		Request:  httpclient.RequestRecord{Method: "POST", URL: target.EndpointURL, Body: first + second},
+		Response: httpclient.ResponseRecord{StatusCode: status, InitialStatus: firstStatus, Body: body},
+	}, nil
 }
 
 func noteRawProtocolExchange(ctx context.Context, rr httpclient.RequestResponse, err error) {
@@ -340,12 +388,10 @@ func readHTTPResponse(reader *bufio.Reader) (int, string) {
 }
 
 func httpSmugglingSignalConfirmed(signal, body, expectedCanary string, status, baselineStatus int) bool {
-	if status <= 0 || !strings.HasPrefix(signal, "http_desync_") {
+	if status <= 0 || !strings.HasPrefix(signal, "http_desync_") || strings.HasPrefix(signal, "http_desync_status_") {
 		return false
 	}
-	statusEvidence := strings.HasPrefix(signal, "http_desync_status_")
 	variantSignal := strings.TrimPrefix(signal, "http_desync_")
-	variantSignal = strings.TrimPrefix(variantSignal, "status_")
 	knownVariant := false
 	for _, variant := range smugglingVariants {
 		if variantSignal == variant.name {
@@ -356,14 +402,13 @@ func httpSmugglingSignalConfirmed(signal, body, expectedCanary string, status, b
 	if !knownVariant {
 		return false
 	}
-	if statusEvidence {
-		return status >= 400 && status <= 599 && baselineStatus >= 200 && baselineStatus < 400
-	}
-	if strings.TrimSpace(body) == "" {
+	if strings.TrimSpace(body) == "" || expectedCanary == "" || baselineStatus <= 0 || baselineStatus >= 500 ||
+		smugglingParserRejection(httpclient.ResponseRecord{StatusCode: status, Body: body}) {
 		return false
 	}
-	if expectedCanary != "" && strings.Contains(body, expectedCanary) {
-		return true
+	marker := expectedCanary
+	if !strings.HasPrefix(marker, "akca-smuggle-") {
+		marker = "akca-smuggle-" + marker
 	}
-	return strings.Contains(body, "akca-smuggle-")
+	return strings.Contains(body, marker)
 }

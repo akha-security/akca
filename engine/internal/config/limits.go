@@ -42,10 +42,21 @@ func (c ScanConfig) ModuleTargetLimit() int {
 	return 0
 }
 
-// ParameterDiscoveryEndpointLimit follows the page cap so every crawled
-// endpoint participates in hidden-parameter discovery. Zero means unlimited.
+// ParameterDiscoveryEndpointLimit bounds active hidden-name guessing separately
+// from crawling. Parameter discovery is multiplicative (endpoints x names), and
+// scanning every crawled content page can otherwise dominate the entire run.
 func (c ScanConfig) ParameterDiscoveryEndpointLimit() int {
-	return c.EffectiveMaxPages()
+	limit := 240
+	switch c.ScanIntensity {
+	case "fast":
+		limit = 100
+	case "stealth":
+		limit = 60
+	}
+	if c.MaxPages > 0 && c.MaxPages < limit {
+		return c.MaxPages
+	}
+	return limit
 }
 
 // ParameterMaxProbes returns differential probes per endpoint during parameter
@@ -54,11 +65,11 @@ func (c ScanConfig) ParameterDiscoveryEndpointLimit() int {
 func (c ScanConfig) ParameterMaxProbes() int {
 	switch c.ScanIntensity {
 	case "stealth":
-		return 60
+		return 40
 	case "normal", "":
-		return 320
+		return 160
 	default: // fast
-		return 96
+		return 64
 	}
 }
 
@@ -66,11 +77,11 @@ func (c ScanConfig) ParameterMaxProbes() int {
 func (c ScanConfig) ParameterWordlistCap() int {
 	switch c.ScanIntensity {
 	case "stealth":
-		return 40
+		return 32
 	case "normal", "":
-		return 160
+		return 96
 	default: // fast
-		return 64
+		return 48
 	}
 }
 

@@ -176,15 +176,13 @@ func validCandidateName(name string) bool {
 
 func parseQueryParams(rawURL string) map[string]struct{} {
 	out := map[string]struct{}{}
-	idx := strings.Index(rawURL, "?")
-	if idx < 0 {
+	u, err := url.Parse(rawURL)
+	if err != nil {
 		return out
 	}
-	q := rawURL[idx+1:]
-	for _, part := range strings.Split(q, "&") {
-		kv := strings.SplitN(part, "=", 2)
-		if kv[0] != "" {
-			out[kv[0]] = struct{}{}
+	for name := range u.Query() {
+		if name = strings.TrimSpace(name); validCandidateName(name) {
+			out[name] = struct{}{}
 		}
 	}
 	return out

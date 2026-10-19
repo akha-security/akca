@@ -84,7 +84,8 @@ func IsDiagnosticEvent(eventType string) bool {
 	case "plugin_skipped", "oast_probe_failed", "oast_probe_sent", "oast_verification_pending",
 		"scan_error", "coverage_gap", "waf_detected", "resource_limit_reached",
 		"module_budget_planned", "module_target_finished", "vuln_module_finished", "module_readiness",
-		"session_expired", "session_reauthenticated", "crawler_finished", "js_analysis_finished":
+		"session_expired", "session_reauthenticated", "crawler_finished", "js_analysis_finished",
+		"parameter_discovery_error_summary", "verification_suppressed":
 		return true
 	}
 	return false

@@ -2,6 +2,7 @@ package modules
 
 import (
 	"context"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -214,6 +215,33 @@ func TestSSJSTimingRequiresThreeMatchedDelayedControls(t *testing.T) {
 	proof := findings[0].Evidence.Verification
 	if !proof.TimingConfirmed || proof.ProofType != verification.ProofTiming {
 		t.Fatalf("SSJS timing finding lacked timing proof: %+v", proof)
+	}
+}
+
+func TestSSJSSkipsUnknownGenericParameterWithoutRequests(t *testing.T) {
+	client := &hardLimitCountingClient{}
+	runner := newActiveRunner(t, client)
+	findings := runner.runSSJS(context.Background(), ScanTarget{
+		EndpointURL: "https://example.com/profile?id=1", Parameter: "id", Method: http.MethodGet, Location: "query",
+	})
+	if len(findings) != 0 || client.calls != 0 {
+		t.Fatalf("generic unknown-stack target was probed: findings=%d calls=%d", len(findings), client.calls)
+	}
+}
+
+func TestSSJSDeduplicatesEquivalentURLVariants(t *testing.T) {
+	client := &hardLimitCountingClient{}
+	runner := newActiveRunner(t, client)
+	first := ScanTarget{EndpointURL: "https://example.com/eval?code=1", Parameter: "code", Method: http.MethodGet, Location: "query"}
+	second := ScanTarget{EndpointURL: "https://example.com/eval?code=2", Parameter: "code", Method: http.MethodGet, Location: "query"}
+	runner.runSSJS(context.Background(), first)
+	firstCalls := client.calls
+	runner.runSSJS(context.Background(), second)
+	if firstCalls == 0 {
+		t.Fatal("first SSJS target was not probed")
+	}
+	if client.calls != firstCalls {
+		t.Fatalf("equivalent URL value variant was re-probed: first=%d total=%d", firstCalls, client.calls)
 	}
 }
 

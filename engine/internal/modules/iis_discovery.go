@@ -25,6 +25,8 @@ var iisPathSuffixes = []string{
 
 var iisHTTPMethods = []string{"OPTIONS", "DEBUG", "GET", "TRACE", "HEAD", "POST"}
 
+const iisDiscoveryMaxRequestsPerOrigin = 30
+
 // Common shortname prefixes to attempt extraction once vulnerability is confirmed
 var iisCommonPrefixes = []string{
 	"ADMIN", "BACKUP", "CONFIG", "SECRET", "PASSW", "DATABASE", "DATA", "UPLOAD",
@@ -116,11 +118,11 @@ func (r *Runner) runIISDiscovery(ctx context.Context, target ScanTarget) []Modul
 					continue
 				}
 
-				negRR1, nErr1 := r.client.Do(ctx, method, negURL1, nil, nil)
+				negRR1, nErr1 := r.limitedModuleDo(ctx, "iis_discovery", iisDiscoveryMaxRequestsPerOrigin, method, negURL1, nil, nil)
 				if nErr1 != nil || negRR1.Response.StatusCode == 0 {
 					continue
 				}
-				negRR2, nErr2 := r.client.Do(ctx, method, negURL2, nil, nil)
+				negRR2, nErr2 := r.limitedModuleDo(ctx, "iis_discovery", iisDiscoveryMaxRequestsPerOrigin, method, negURL2, nil, nil)
 				if nErr2 != nil || negRR1.Response.StatusCode != negRR2.Response.StatusCode {
 					// Negative response is unstable on this method/suffix combination
 					continue
@@ -130,7 +132,7 @@ func (r *Runner) runIISDiscovery(ctx context.Context, target ScanTarget) []Modul
 				// 2. Send positive requests (*~1*, *~2*) for potential existing 8.3 files
 				for tildeIdx := 1; tildeIdx <= 4; tildeIdx++ {
 					posURL := fmt.Sprintf("%s%s*~%d*%s", origin, basePathPrefix, tildeIdx, suffix)
-					posRR, pErr := r.client.Do(ctx, method, posURL, nil, nil)
+					posRR, pErr := r.limitedModuleDo(ctx, "iis_discovery", iisDiscoveryMaxRequestsPerOrigin, method, posURL, nil, nil)
 					if pErr != nil || posRR.Response.StatusCode == 0 {
 						continue
 					}
@@ -139,7 +141,7 @@ func (r *Runner) runIISDiscovery(ctx context.Context, target ScanTarget) []Modul
 					if statusPos != statusNeg {
 						// FP Guard 1: Double check with *~0* to rule out rate limiting / server errors
 						ctrlURL := origin + basePathPrefix + "*~0*" + suffix
-						ctrlRR, cErr := r.client.Do(ctx, method, ctrlURL, nil, nil)
+						ctrlRR, cErr := r.limitedModuleDo(ctx, "iis_discovery", iisDiscoveryMaxRequestsPerOrigin, method, ctrlURL, nil, nil)
 						if cErr != nil || ctrlRR.Response.StatusCode != statusNeg {
 							// If *~0* doesn't match negative status, the setup is unstable
 							continue
@@ -148,20 +150,20 @@ func (r *Runner) runIISDiscovery(ctx context.Context, target ScanTarget) []Modul
 						// FP Guard 2: Impossible non-existent filename prefix (e.g. ZZZNONEXIST99*~1*) MUST return statusNeg!
 						// If the server returns statusPos for any random prefix, it is NOT parsing 8.3 names (e.g. SPA / custom 404 router).
 						fakeURL1 := fmt.Sprintf("%s%sZZZNONEXIST99*~%d*%s", origin, basePathPrefix, tildeIdx, suffix)
-						fakeRR1, fErr1 := r.client.Do(ctx, method, fakeURL1, nil, nil)
+						fakeRR1, fErr1 := r.limitedModuleDo(ctx, "iis_discovery", iisDiscoveryMaxRequestsPerOrigin, method, fakeURL1, nil, nil)
 						if fErr1 != nil || fakeRR1.Response.StatusCode != statusNeg {
 							continue
 						}
 
 						// FP Guard 3: Second impossible random prefix check
 						fakeURL2 := fmt.Sprintf("%s%sQQQNOFILE88*~%d*%s", origin, basePathPrefix, tildeIdx, suffix)
-						fakeRR2, fErr2 := r.client.Do(ctx, method, fakeURL2, nil, nil)
+						fakeRR2, fErr2 := r.limitedModuleDo(ctx, "iis_discovery", iisDiscoveryMaxRequestsPerOrigin, method, fakeURL2, nil, nil)
 						if fErr2 != nil || fakeRR2.Response.StatusCode != statusNeg {
 							continue
 						}
 
 						// FP Guard 4: Re-verify positive URL stability
-						reVerifyRR, rErr := r.client.Do(ctx, method, posURL, nil, nil)
+						reVerifyRR, rErr := r.limitedModuleDo(ctx, "iis_discovery", iisDiscoveryMaxRequestsPerOrigin, method, posURL, nil, nil)
 						if rErr != nil || reVerifyRR.Response.StatusCode != statusPos {
 							continue
 						}
@@ -196,16 +198,16 @@ func (r *Runner) runIISDiscovery(ctx context.Context, target ScanTarget) []Modul
 		seenShortnames := map[string]struct{}{}
 
 		// 2a. Common High-Yield Prefix Enumeration
-		for _, prefix := range iisCommonPrefixes {
+		for _, prefix := range iisCommonPrefixes[:min(5, len(iisCommonPrefixes))] {
 			if ctx.Err() != nil {
 				break
 			}
 			enumURL := fmt.Sprintf("%s%s%s*~%d*%s", origin, foundSetup.basePath, prefix, foundSetup.activeTilde, foundSetup.suffix)
-			enumRR, enumErr := r.client.Do(ctx, foundSetup.method, enumURL, nil, nil)
+			enumRR, enumErr := r.limitedModuleDo(ctx, "iis_discovery", iisDiscoveryMaxRequestsPerOrigin, foundSetup.method, enumURL, nil, nil)
 			if enumErr == nil && enumRR.Response.StatusCode == foundSetup.statusPos {
 				// Verify candidate isn't a false match
 				negCandidateURL := fmt.Sprintf("%s%s%sZZZ99*~%d*%s", origin, foundSetup.basePath, prefix, foundSetup.activeTilde, foundSetup.suffix)
-				negCandidateRR, ncErr := r.client.Do(ctx, foundSetup.method, negCandidateURL, nil, nil)
+				negCandidateRR, ncErr := r.limitedModuleDo(ctx, "iis_discovery", iisDiscoveryMaxRequestsPerOrigin, foundSetup.method, negCandidateURL, nil, nil)
 				if ncErr == nil && negCandidateRR.Response.StatusCode == foundSetup.statusNeg {
 					sname := fmt.Sprintf("%s*~%d*", prefix, foundSetup.activeTilde)
 					if _, seen := seenShortnames[sname]; !seen {
@@ -218,29 +220,29 @@ func (r *Runner) runIISDiscovery(ctx context.Context, target ScanTarget) []Modul
 
 		// 2b. Character Map Filter (Shortscan stage 2: probe existing characters)
 		var activeChars strings.Builder
-		for _, ch := range iisAlphanumChars {
+		for _, ch := range iisAlphanumChars[:min(5, len(iisAlphanumChars))] {
 			if ctx.Err() != nil {
 				break
 			}
 			charURL := fmt.Sprintf("%s%s*%s*~%d*%s", origin, foundSetup.basePath, string(ch), foundSetup.activeTilde, foundSetup.suffix)
-			charRR, cErr := r.client.Do(ctx, foundSetup.method, charURL, nil, nil)
+			charRR, cErr := r.limitedModuleDo(ctx, "iis_discovery", iisDiscoveryMaxRequestsPerOrigin, foundSetup.method, charURL, nil, nil)
 			if cErr == nil && charRR.Response.StatusCode == foundSetup.statusPos {
 				activeChars.WriteRune(ch)
 			}
 		}
 
 		// 2c. Autocomplete Long Filenames via Wordlist & Method _ (IIS 405)
-		for _, item := range iisWordlistEntries {
+		for _, item := range iisWordlistEntries[:min(3, len(iisWordlistEntries))] {
 			if ctx.Err() != nil {
 				break
 			}
 			// Test if 8.3 prefix of this wordlist item matches
 			checkURL := fmt.Sprintf("%s%s%s%s", origin, foundSetup.basePath, item.short83, foundSetup.suffix)
-			chkRR, chkErr := r.client.Do(ctx, foundSetup.method, checkURL, nil, nil)
+			chkRR, chkErr := r.limitedModuleDo(ctx, "iis_discovery", iisDiscoveryMaxRequestsPerOrigin, foundSetup.method, checkURL, nil, nil)
 			if chkErr == nil && chkRR.Response.StatusCode == foundSetup.statusPos {
 				// Verify using IIS Method _ existence check (returns 405 Method Not Allowed when file exists)
 				candidateURL := origin + foundSetup.basePath + item.full
-				methodRR, mErr := r.client.Do(ctx, "_", candidateURL, nil, nil)
+				methodRR, mErr := r.limitedModuleDo(ctx, "iis_discovery", iisDiscoveryMaxRequestsPerOrigin, "_", candidateURL, nil, nil)
 				if mErr == nil && (methodRR.Response.StatusCode == 405 || methodRR.Response.StatusCode == 200 || methodRR.Response.StatusCode == 403) {
 					autocompletedFiles = append(autocompletedFiles, fmt.Sprintf("%s (%s)", item.full, item.short83))
 				}
@@ -266,13 +268,13 @@ func (r *Runner) runIISDiscovery(ctx context.Context, target ScanTarget) []Modul
 		}
 	}
 
-	baseline, _ := r.cachedEmptyProbe(ctx, target)
+	baseline, _ := r.cachedEmptyProbeWithHardLimit(ctx, "iis_discovery", iisDiscoveryMaxRequestsPerOrigin, target)
 
 	// Check 2: IIS Extension Confusion & Source Disclosure (::$DATA / .( / .asp;.jpg)
 	if strings.Contains(u.Path, ".asp") || strings.Contains(u.Path, ".aspx") || strings.Contains(u.Path, ".php") {
 		dataURL := target.EndpointURL + "::$DATA"
 		if r.scope.IsInScope(dataURL) {
-			dRR, dErr := r.client.Do(ctx, "GET", dataURL, nil, nil)
+			dRR, dErr := r.limitedModuleDo(ctx, "iis_discovery", iisDiscoveryMaxRequestsPerOrigin, "GET", dataURL, nil, nil)
 			if dErr == nil && dRR.Response.StatusCode == 200 {
 				body := dRR.Response.Body
 				if strings.Contains(body, "<%@") || strings.Contains(body, "<script runat") || strings.Contains(body, "<?php") {

@@ -173,12 +173,15 @@ func detectDatabase(combined string) string {
 
 func detectJSFramework(combined string) string {
 	switch {
-	case reReact.MatchString(combined):
-		return "React"
 	case reNuxt.MatchString(combined):
 		return "Nuxt"
 	case reNext.MatchString(combined):
 		return "Next.js"
+	// Next.js pages also contain React markers. Check framework-specific
+	// signatures before the generic React signature or Next.js is downgraded
+	// to React and its dedicated checks cannot be scheduled intelligently.
+	case reReact.MatchString(combined):
+		return "React"
 	case reVue.MatchString(combined):
 		return "Vue"
 	case reAngular.MatchString(combined):

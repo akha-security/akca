@@ -19,10 +19,22 @@ func (r *Runner) runSSJS(ctx context.Context, target ScanTarget) []ModuleFinding
 	if target.Parameter == "" {
 		return nil
 	}
-
-	baseline, baselineErr := r.cachedEmptyProbe(ctx, target)
-	if baselineErr != nil {
+	if !r.moduleWorkOnce("server_side_js_target", ssjsWorkKey(target)) {
+		r.emitSkip("server_side_js_injection", target, "equivalent route and parameter already tested")
 		return nil
+	}
+	if !r.reserveHardModuleProbe("server_side_js_targets", r.ssjsTargetLimitPerOrigin(), target.EndpointURL) {
+		r.emitSkip("server_side_js_injection", target, "per-origin Server-Side JS target limit reached")
+		return nil
+	}
+
+	baseline, baselineAvailable := observedResponse(ctx, target, true)
+	if !baselineAvailable {
+		var baselineErr error
+		baseline, baselineErr = r.cachedEmptyProbe(ctx, target)
+		if baselineErr != nil {
+			return nil
+		}
 	}
 
 	var out []ModuleFinding
@@ -65,11 +77,10 @@ func (r *Runner) runSSJS(ctx context.Context, target ScanTarget) []ModuleFinding
 		}
 	}
 
-	// Test 3: OAST Out-of-band SSRF via require('http')
+	// Test 3: JavaScript-specific OAST execution via require('http'). A plain
+	// callback URL was previously sent as a second probe on every target; that
+	// measured generic SSRF rather than server-side JavaScript execution.
 	if r.cfg.EnableOAST && r.oast != nil {
-		if oastURL := strings.TrimSpace(r.oastURL(ctx, "ssjs-oast", target, "server_side_js_injection")); oastURL != "" {
-			r.sendOASTProbe(ctx, target, oastURL)
-		}
 		if codeOASTURL := strings.TrimSpace(r.oastURL(ctx, "ssjs-code-oast", target, "server_side_js_injection")); codeOASTURL != "" {
 			if callback := appendOASTURLPath(codeOASTURL, "ssjs"); callback != "" {
 				r.sendOASTProbe(ctx, target, fmt.Sprintf("require('http').get('%s')", callback))

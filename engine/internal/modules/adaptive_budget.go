@@ -105,6 +105,12 @@ func (r *Runner) budgetEligible(module string, target ScanTarget) bool {
 	if r.scope != nil && !r.scope.IsInScope(target.EndpointURL) {
 		return false
 	}
+	// Module preconditions are deterministic applicability rules, not optional
+	// recommendations. Apply them before budgeting and queueing so irrelevant
+	// technology/protocol modules never consume workers or inflate coverage.
+	if ok, _ := r.shouldRunModule(module, target); !ok {
+		return false
+	}
 	// Do not use heuristic recommendations to remove coverage. Only surfaces
 	// that the injection implementations cannot mutate are excluded here.
 	switch module {

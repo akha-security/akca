@@ -2,7 +2,7 @@ package config
 
 import "testing"
 
-func TestZeroCoverageLimitsAreUnlimited(t *testing.T) {
+func TestZeroCoverageLimitsKeepActiveParameterDiscoveryBounded(t *testing.T) {
 	cfg := ScanConfig{}
 	if got := cfg.EffectiveMaxPages(); got != 0 {
 		t.Fatalf("expected unlimited pages, got %d", got)
@@ -13,8 +13,8 @@ func TestZeroCoverageLimitsAreUnlimited(t *testing.T) {
 	if got := cfg.ModuleTargetLimit(); got != 0 {
 		t.Fatalf("expected unlimited module targets, got %d", got)
 	}
-	if got := cfg.ParameterDiscoveryEndpointLimit(); got != 0 {
-		t.Fatalf("expected unlimited parameter discovery, got %d", got)
+	if got := cfg.ParameterDiscoveryEndpointLimit(); got != 240 {
+		t.Fatalf("expected bounded parameter discovery, got %d", got)
 	}
 	if got := cfg.ReflectionProfileLimit(); got != 0 {
 		t.Fatalf("expected unlimited reflection profiles, got %d", got)
@@ -26,7 +26,7 @@ func TestExplicitCoverageLimitsRemainHonored(t *testing.T) {
 	cfg.MaxPages = 10_000
 	cfg.MaxEndpoints = 10_000
 	if cfg.EffectiveMaxPages() != 10_000 || cfg.ModuleTargetLimit() != 0 ||
-		cfg.ParameterDiscoveryEndpointLimit() != 10_000 || cfg.ReflectionProfileLimit() != 0 ||
+		cfg.ParameterDiscoveryEndpointLimit() != 240 || cfg.ReflectionProfileLimit() != 0 ||
 		cfg.MaxEndpointsLimit() != 10_000 {
 		t.Fatalf("explicit limits were not preserved: %+v", cfg)
 	}
@@ -40,9 +40,9 @@ func TestParameterDiscoveryBudgetsFollowIntensity(t *testing.T) {
 		maxHits          int
 		maxTransferProbe int
 	}{
-		{intensity: "fast", maxProbes: 96, wordlistCap: 64, maxHits: 12, maxTransferProbe: 256},
-		{intensity: "normal", maxProbes: 320, wordlistCap: 160, maxHits: 24, maxTransferProbe: 1000},
-		{intensity: "stealth", maxProbes: 60, wordlistCap: 40, maxHits: 8, maxTransferProbe: 100},
+		{intensity: "fast", maxProbes: 64, wordlistCap: 48, maxHits: 12, maxTransferProbe: 256},
+		{intensity: "normal", maxProbes: 160, wordlistCap: 96, maxHits: 24, maxTransferProbe: 1000},
+		{intensity: "stealth", maxProbes: 40, wordlistCap: 32, maxHits: 8, maxTransferProbe: 100},
 	}
 	for _, tt := range tests {
 		cfg := DefaultScanConfig()
@@ -67,7 +67,7 @@ func TestFullCoverageParameterDiscoveryFollowsIntensity(t *testing.T) {
 	if cfg.ScanIntensity != "normal" {
 		t.Fatalf("default full scan intensity=%q, want normal", cfg.ScanIntensity)
 	}
-	if cfg.ParameterMaxProbes() != 320 || cfg.ParameterWordlistCap() != 160 || cfg.ParameterMaxHits() != 24 || cfg.ParameterTransferMaxProbes() != 1000 {
+	if cfg.ParameterMaxProbes() != 160 || cfg.ParameterWordlistCap() != 96 || cfg.ParameterMaxHits() != 24 || cfg.ParameterTransferMaxProbes() != 1000 {
 		t.Fatalf("full coverage parameter discovery must retain normal phase bounds: probes=%d words=%d hits=%d transfers=%d",
 			cfg.ParameterMaxProbes(), cfg.ParameterWordlistCap(), cfg.ParameterMaxHits(), cfg.ParameterTransferMaxProbes())
 	}
@@ -76,7 +76,7 @@ func TestFullCoverageParameterDiscoveryFollowsIntensity(t *testing.T) {
 func TestFiniteFullScanBudgetPreservesModuleCapacity(t *testing.T) {
 	cfg := DefaultScanConfig()
 	cfg.RequestBudget = 4000
-	if cfg.ParameterMaxProbes() != 320 || cfg.ParameterWordlistCap() != 160 || cfg.ParameterTransferMaxProbes() != 1000 {
+	if cfg.ParameterMaxProbes() != 160 || cfg.ParameterWordlistCap() != 96 || cfg.ParameterTransferMaxProbes() != 1000 {
 		t.Fatalf("finite full scan must reserve capacity for vulnerability modules: probes=%d words=%d transfers=%d",
 			cfg.ParameterMaxProbes(), cfg.ParameterWordlistCap(), cfg.ParameterTransferMaxProbes())
 	}

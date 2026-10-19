@@ -50,31 +50,31 @@ var GroupBRegistry = []ModuleDescriptor{
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "nginx_alias", Description: "Nginx off-by-slash alias traversal detection", Version: "0.1.0"},
-		Precondition: alwaysReady,
+		Precondition: nginxReady,
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "nextjs_bypass", Description: "Next.js middleware bypass and image SSRF detection", Version: "0.1.0"},
-		Precondition: alwaysReady,
+		Precondition: nextJSReady,
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "framework_debug", Description: "Framework debuggers and devtools exposure detection", Version: "0.1.0"},
-		Precondition: alwaysReady,
+		Precondition: frameworkDebugReady,
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "iis_discovery", Description: "IIS shortname and extension confusion detection", Version: "0.1.0"},
-		Precondition: alwaysReady,
+		Precondition: iisReady,
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "firebase_misconfig", Description: "Firebase RTDB and Storage misconfiguration detection", Version: "0.1.0"},
-		Precondition: alwaysReady,
+		Precondition: firebaseReady,
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "spring_cloud_jolokia", Description: "Spring Cloud Config and Jolokia exposure detection", Version: "0.1.0"},
-		Precondition: alwaysReady,
+		Precondition: springReady,
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "saas_exposure", Description: "ServiceNow and Salesforce exposure detection", Version: "0.1.0"},
-		Precondition: alwaysReady,
+		Precondition: saasReady,
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "cpdos", Description: "Cache-Poisoned Denial of Service detection", Version: "0.1.0"},
@@ -86,11 +86,11 @@ var GroupBRegistry = []ModuleDescriptor{
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "ws_cswsh", Description: "Cross-Site WebSocket Hijacking detection", Version: "0.1.0"},
-		Precondition: alwaysReady,
+		Precondition: websocketReady,
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "pdf_injection", Description: "PDF generation SSRF and LFI injection detection", Version: "0.1.0"},
-		Precondition: alwaysReady,
+		Precondition: pdfReady,
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "jsonp_callback", Description: "JSONP callback injection and XSSI detection", Version: "0.1.0"},
@@ -98,15 +98,15 @@ var GroupBRegistry = []ModuleDescriptor{
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "react_rsc_rce", Description: "React Server Components RCE detection", Version: "0.1.0"},
-		Precondition: alwaysReady,
+		Precondition: reactRSCReady,
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "server_side_js_injection", Description: "Server-Side JavaScript injection detection", Version: "0.1.0"},
-		Precondition: hasParameter,
+		Precondition: serverSideJSReady,
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "csti_detection", Description: "Client-Side Template Injection detection", Version: "0.1.0"},
-		Precondition: hasParameter,
+		Precondition: cstiReady,
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "swagger_exposure", Description: "Swagger and OpenAPI specification exposure detection", Version: "0.1.0"},
@@ -126,7 +126,7 @@ var GroupBRegistry = []ModuleDescriptor{
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "oauth_flow_audit", Description: "OAuth 2.0 and OIDC flow security auditing", Version: "0.1.0"},
-		Precondition: alwaysReady,
+		Precondition: oauthFlowReady,
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "cloud_native_exposure", Description: "Cloud native, container and cluster API exposure detection", Version: "0.1.0"},
@@ -134,7 +134,7 @@ var GroupBRegistry = []ModuleDescriptor{
 	},
 	{
 		Manifest:     models.PluginManifest{Name: "grpc_scan", Description: "gRPC and gRPC-Web protocol security auditor", Version: "0.1.0"},
-		Precondition: alwaysReady,
+		Precondition: grpcReady,
 	},
 }
 
@@ -286,14 +286,6 @@ func stateChangingOrBody(t ScanTarget) (bool, string) {
 		return true, ""
 	}
 	return false, "not state-changing or body-capable"
-}
-
-func wordpressReady(t ScanTarget) (bool, string) {
-	lower := strings.ToLower(t.EndpointURL)
-	if strings.Contains(lower, "wp-") || strings.Contains(lower, "wordpress") {
-		return true, ""
-	}
-	return false, "not wordpress surface"
 }
 
 func hasStoredMarker(t ScanTarget) (bool, string) {

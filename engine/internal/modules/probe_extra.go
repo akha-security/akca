@@ -38,7 +38,7 @@ func (r *Runner) probeWithRawBodyForModule(ctx context.Context, module string, t
 }
 
 func (r *Runner) cachedEmptyProbe(ctx context.Context, target ScanTarget) (httpclient.RequestResponse, error) {
-	key := fmt.Sprintf("%s|%s|%s|%s|%s|%s", target.EndpointURL, strings.ToUpper(target.Method), target.Parameter, target.Location, target.Profile.ParameterLocation, target.Profile.ContentType)
+	key := emptyProbeCacheKey(target)
 	r.baselineMu.Lock()
 	if rr, ok := r.baselineCache["probe|"+key]; ok {
 		r.baselineMu.Unlock()
@@ -55,6 +55,36 @@ func (r *Runner) cachedEmptyProbe(ctx context.Context, target ScanTarget) (httpc
 	r.baselineCache["probe|"+key] = rr
 	r.baselineMu.Unlock()
 	return rr, nil
+}
+
+// cachedEmptyProbeWithHardLimit counts a baseline only when it actually has to
+// reach the network. The former call sites reserved a request slot before the
+// cache lookup, so cache hits silently consumed scarce module capacity.
+func (r *Runner) cachedEmptyProbeWithHardLimit(ctx context.Context, module string, limit int, target ScanTarget) (httpclient.RequestResponse, error) {
+	key := emptyProbeCacheKey(target)
+	r.baselineMu.Lock()
+	if rr, ok := r.baselineCache["probe|"+key]; ok {
+		r.baselineMu.Unlock()
+		noteCachedEvidence(ctx, rr)
+		return rr, nil
+	}
+	r.baselineMu.Unlock()
+
+	if !r.reserveHardModuleProbe(module, limit, target.EndpointURL) {
+		return httpclient.RequestResponse{}, errModuleHardProbeLimit
+	}
+	rr, err := r.probe(ctx, target, "")
+	if err != nil {
+		return httpclient.RequestResponse{}, err
+	}
+	r.baselineMu.Lock()
+	r.baselineCache["probe|"+key] = rr
+	r.baselineMu.Unlock()
+	return rr, nil
+}
+
+func emptyProbeCacheKey(target ScanTarget) string {
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%s", target.EndpointURL, strings.ToUpper(target.Method), target.Parameter, target.Location, target.Profile.ParameterLocation, target.Profile.ContentType)
 }
 
 func observedResponse(ctx context.Context, target ScanTarget, requireComplete bool) (httpclient.RequestResponse, bool) {

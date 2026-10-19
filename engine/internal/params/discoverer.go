@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -723,13 +726,24 @@ func (d *Discoverer) getBaseline(ctx context.Context, endpointURL, method string
 }
 
 func (d *Discoverer) Run(ctx context.Context, limit int) error {
-	_ = d.emit("parameter_discovery_started", "parameter discovery started", map[string]interface{}{
-		"scan_id": d.scanID,
-	})
-	endpoints, err := d.db.ListDiscoveryEndpoints(d.scanID, limit)
+	allEndpoints, err := d.db.ListDiscoveryEndpoints(d.scanID, 0)
 	if err != nil {
 		return err
 	}
+	// URL query names are already observed inputs, not hidden guesses. Persist
+	// them for every concrete endpoint variant without sending any request. This
+	// also means an existing ?id=1 is excluded from the active candidate list.
+	for _, endpoint := range allEndpoints {
+		for name := range parseQueryParams(endpoint.URL) {
+			_ = d.db.SaveParameter(endpoint.ID, name, string(LocationQuery), 96)
+		}
+	}
+	endpoints, selection := selectDiscoveryEndpoints(allEndpoints, limit)
+	_ = d.emit("parameter_discovery_started", "parameter discovery started", map[string]interface{}{
+		"scan_id": d.scanID, "inventory_endpoints": selection.Inventory,
+		"endpoints": len(endpoints), "skipped_low_value": selection.SkippedLowValue,
+		"skipped_duplicate": selection.SkippedDuplicate, "skipped_by_limit": selection.SkippedByLimit,
+	})
 
 	// Cross-endpoint names are folded into DifferentialCandidates inside
 	// DiscoverEndpoint. The former eager transfer pass repeated a fresh
@@ -744,6 +758,8 @@ func (d *Discoverer) Run(ctx context.Context, limit int) error {
 	var wg sync.WaitGroup
 	completed := 0
 	failures := 0
+	panicFailures := 0
+	errorGroups := make(map[string]*parameterDiscoveryErrorGroup)
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -762,6 +778,19 @@ func (d *Discoverer) Run(ctx context.Context, limit int) error {
 						completed++
 						if discoverErr != nil {
 							failures++
+							class := parameterDiscoveryErrorClass(discoverErr)
+							if class == "panic" {
+								panicFailures++
+							}
+							group := errorGroups[class]
+							if group == nil {
+								group = &parameterDiscoveryErrorGroup{Class: class, Example: discoverErr.Error()}
+								errorGroups[class] = group
+							}
+							group.Count++
+							if len(group.Endpoints) < 3 {
+								group.Endpoints = append(group.Endpoints, ep.URL)
+							}
 						}
 						current := completed
 						d.mu.Unlock()
@@ -791,16 +820,88 @@ feedLoop:
 	if err := d.flushEvents(); err != nil {
 		return err
 	}
+	classes := make([]string, 0, len(errorGroups))
+	for class := range errorGroups {
+		classes = append(classes, class)
+	}
+	sort.Strings(classes)
+	for _, class := range classes {
+		group := errorGroups[class]
+		_ = d.emit("parameter_discovery_error_summary", "parameter discovery endpoint errors grouped", map[string]interface{}{
+			"scan_id": d.scanID, "class": group.Class, "count": group.Count,
+			"example": group.Example, "sample_endpoints": group.Endpoints,
+		})
+	}
+	if failures > 0 {
+		_ = d.emit("coverage_gap", "parameter discovery could not probe some selected endpoints", map[string]interface{}{
+			"scan_id": d.scanID, "module": "parameter_discovery", "failed_endpoints": failures,
+			"successful_endpoints": completed - failures, "selected_endpoints": len(endpoints),
+			"error_classes": classes,
+		})
+	}
 	_ = d.emit("parameter_discovery_finished", "parameter discovery finished", map[string]interface{}{
-		"scan_id": d.scanID, "endpoints": len(endpoints),
+		"scan_id": d.scanID, "endpoints": len(endpoints), "inventory_endpoints": selection.Inventory,
+		"skipped_low_value": selection.SkippedLowValue, "skipped_duplicate": selection.SkippedDuplicate,
+		"skipped_by_limit": selection.SkippedByLimit, "failed_endpoints": failures,
+		"successful_endpoints": completed - failures, "completed_endpoints": completed,
 	})
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if failures > 0 {
+	// Ordinary endpoint-level transport failures are a coverage gap, not a
+	// phase failure. A phase error is reserved for an implementation panic or
+	// the case where no selected endpoint could be inspected at all.
+	if panicFailures > 0 || (len(endpoints) > 0 && failures == len(endpoints)) {
 		return fmt.Errorf("parameter discovery completed with %d endpoint errors", failures)
 	}
 	return nil
+}
+
+type parameterDiscoveryErrorGroup struct {
+	Class     string
+	Count     int
+	Example   string
+	Endpoints []string
+}
+
+func parameterDiscoveryErrorClass(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "parameter discovery panic") {
+		return "panic"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	lower := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(lower, "request budget"), strings.Contains(lower, "budget exhausted"):
+		return "budget_exhausted"
+	case strings.Contains(lower, "too many redirects"), strings.Contains(lower, "redirect loop"):
+		return "redirect_loop"
+	case strings.Contains(lower, "scope blocked"), strings.Contains(lower, "out of scope"):
+		return "scope_blocked"
+	case strings.Contains(lower, "x509"), strings.Contains(lower, "certificate"), strings.Contains(lower, "tls"):
+		return "tls_error"
+	case strings.Contains(lower, "no such host"), strings.Contains(lower, "dns"):
+		return "dns_error"
+	case strings.Contains(lower, "connection refused"):
+		return "connection_refused"
+	case strings.Contains(lower, "connection reset"), strings.Contains(lower, "forcibly closed"), strings.Contains(lower, "unexpected eof"), lower == "eof":
+		return "connection_closed"
+	case strings.Contains(lower, "proxy"):
+		return "proxy_error"
+	default:
+		return "transport_error"
+	}
 }
 
 func (d *Discoverer) crossEndpointTransfer(ctx context.Context, endpoints []storage.DiscoveryEndpoint) {

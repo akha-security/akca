@@ -83,6 +83,7 @@ type Evidence struct {
 	Module          string                    `json:"module"`
 	Signal          string                    `json:"signal"`
 	Payload         payloadgen.Payload        `json:"payload"`
+	RawRequest      string                    `json:"raw_request,omitempty"`
 	Parameter       string                    `json:"parameter,omitempty"`
 	Location        string                    `json:"location,omitempty"`
 	ResponseMarkers []string                  `json:"response_markers,omitempty"`
@@ -176,6 +177,8 @@ type Runner struct {
 	moduleBudgetsMu   sync.RWMutex
 	moduleBudgets     map[string]int64
 	moduleUsage       map[string]*atomic.Int64
+	hardProbeMu       sync.Mutex
+	hardProbeUsage    map[string]int
 
 	adaptiveBudgetMu       sync.Mutex
 	adaptiveBudget         *adaptiveScanBudget
@@ -217,6 +220,7 @@ func NewRunner(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *st
 		findingSeen:       make(map[string]int64),
 		moduleBudgets:     make(map[string]int64),
 		moduleUsage:       make(map[string]*atomic.Int64),
+		hardProbeUsage:    make(map[string]int),
 	}
 	if cfg.RequestBudget > 0 {
 		r.categoryBudgets = map[string]int64{

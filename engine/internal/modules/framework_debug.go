@@ -148,6 +148,9 @@ func (r *Runner) runFrameworkDebug(ctx context.Context, target ScanTarget) []Mod
 		if ctx.Err() != nil {
 			break
 		}
+		if !frameworkDebugProbeApplies(target, pr.kind) {
+			continue
+		}
 		probeURL := origin + pr.path
 		if !r.scope.IsInScope(probeURL) {
 			continue
@@ -177,6 +180,26 @@ func (r *Runner) runFrameworkDebug(ctx context.Context, target ScanTarget) []Mod
 	}
 
 	return out
+}
+
+func frameworkDebugProbeApplies(target ScanTarget, kind string) bool {
+	if !backendTechnologyKnown(target) {
+		return true
+	}
+	switch {
+	case strings.HasPrefix(kind, "werkzeug_"):
+		return hasTechnology(target, "flask", "werkzeug")
+	case strings.HasPrefix(kind, "laravel_"):
+		return hasTechnology(target, "laravel")
+	case strings.HasPrefix(kind, "django_"):
+		return hasTechnology(target, "django")
+	case strings.HasPrefix(kind, "fastapi_"):
+		return hasTechnology(target, "fastapi")
+	case strings.HasPrefix(kind, "rails_"):
+		return hasTechnology(target, "rails", "ruby on rails")
+	default:
+		return false
+	}
 }
 
 func frameworkDebugSignalConfirmed(signal, body string, status int) bool {

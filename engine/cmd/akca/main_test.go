@@ -18,8 +18,8 @@ import (
 )
 
 func TestVersionIsStableReleaseString(t *testing.T) {
-	if version != "0.2.8" {
-		t.Fatalf("version=%q, want 0.2.8", version)
+	if version != "0.2.9" {
+		t.Fatalf("version=%q, want 0.2.9", version)
 	}
 }
 
@@ -48,7 +48,7 @@ func TestUsageHelpAndVersionPrintBrandBanner(t *testing.T) {
 			if !strings.Contains(combined, akcaASCII[0]) {
 				t.Fatalf("ASCII wordmark missing for %s: %q", tc.name, combined)
 			}
-			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.8") {
+			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.9") {
 				t.Fatalf("brand/version line missing for %s: %q", tc.name, combined)
 			}
 		})
@@ -333,7 +333,7 @@ func TestUnlimitedDiscoveryLimitsAreNotDisplayedAsZero(t *testing.T) {
 	cw := NewConsoleWriter()
 	cw.urlsCrawled = 12
 	cw.urlLimit = 0
-	if got := cw.runningStatusPanel(); !strings.Contains(got, "12 URLs discovered") {
+	if got := cw.runningStatusPanel(); !strings.Contains(got, "12 pages") {
 		t.Fatalf("running panel displayed zero as a crawl limit: %q", got)
 	}
 }
@@ -347,12 +347,14 @@ func TestRunningStatusPanelShowsScanHealth(t *testing.T) {
 	cw.peakRequestRate = 52
 	cw.urlsCrawled = 318
 	cw.urlLimit = 1000
+	cw.maxDiscovered = 742
+	cw.requests = 911
 	cw.progressPercent = 50
 	cw.processMemoryMB = 620
 	cw.memoryLimitMB = 12_284
 	cw.startTime = time.Now().Add(-130 * time.Second)
 	panel := cw.runningStatusPanel()
-	for _, want := range []string{"LIVE SCAN", "Running", "http://example.test/", "Full Scan", "42.5 requests/sec", "peak 52.0", "Ready and active", "50%", "Elapsed", "00:02:", "318 / 1,000 URLs", "620 MB / 12.0 GB"} {
+	for _, want := range []string{"LIVE SCAN", "Running", "http://example.test/", "Full Scan", "42.5 requests/sec", "peak 52.0", "Ready and active", "50%", "Elapsed", "00:02:", "318 / 1,000 pages", "742", "911", "620 MB / 12.0 GB"} {
 		if !strings.Contains(panel, want) {
 			t.Fatalf("running panel omitted %q: %q", want, panel)
 		}
@@ -429,6 +431,24 @@ func TestSilentCrawlerEventsDoNotEraseLiveStatus(t *testing.T) {
 	}
 	if output.Len() != 0 || !cw.progressLineOpen {
 		t.Fatalf("silent crawler event disturbed live status: output=%q open=%v", output.String(), cw.progressLineOpen)
+	}
+}
+
+func TestCrawlerFinishedSeparatesPagesEndpointsAndRequests(t *testing.T) {
+	var output bytes.Buffer
+	cw := NewConsoleWriter()
+	cw.out = &output
+	cw.interactive = false
+	if err := cw.WriteEvent(events.Event{Type: "crawler_finished", Payload: map[string]interface{}{
+		"pages": 101, "discovered": 245, "requests": 257,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(output.String()), "CRAWLER COMPLETE pages=101 endpoints=245 requests=257"; got != want {
+		t.Fatalf("crawler summary mismatch: got %q want %q", got, want)
+	}
+	if cw.urlsCrawled != 101 || cw.maxDiscovered != 245 || cw.requests != 257 {
+		t.Fatalf("crawler counters mismatch: pages=%d endpoints=%d requests=%d", cw.urlsCrawled, cw.maxDiscovered, cw.requests)
 	}
 }
 

@@ -185,6 +185,67 @@ func TestDiscovererDifferentialAndPersistence(t *testing.T) {
 	}
 }
 
+func TestDiscovererDoesNotReprobeObservedQueryParameter(t *testing.T) {
+	var replacedObservedID atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("id"); got != "1" {
+			replacedObservedID.Store(true)
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("stable response"))
+	}))
+	defer srv.Close()
+
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"127.0.0.1"}
+	scopeEngine := scope.NewEngine(cfg)
+	client, err := httpclient.New(cfg, scopeEngine, ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := storage.Open(t.TempDir() + "/known-query.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureScan("known-query"); err != nil {
+		t.Fatal(err)
+	}
+	endpointURL := srv.URL + "?id=1"
+	if err := db.SaveDiscoveredEndpoint("known-query", map[string]interface{}{
+		"url": endpointURL, "method": http.MethodGet, "normalized_url": endpointURL, "source": "test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	endpointID, err := db.GetEndpointID("known-query", endpointURL, http.MethodGet)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewDiscoverer("known-query", client, scopeEngine, db, nil)
+	d.SetWordlistCap(8)
+	d.SetMaxProbes(12)
+	found, err := d.DiscoverEndpoint(context.Background(), endpointID, endpointURL, http.MethodGet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacedObservedID.Load() {
+		t.Fatal("observed id=1 parameter was replaced by an active hidden-parameter probe")
+	}
+	var observed bool
+	for _, parameter := range found {
+		if parameter.Name == "id" && parameter.Location == LocationQuery && parameter.Source == "url_query" {
+			observed = true
+		}
+	}
+	if !observed {
+		t.Fatalf("observed query parameter was not retained: %+v", found)
+	}
+}
+
 func TestDiscovererFindsHiddenPOSTParamInBodyNotQuery(t *testing.T) {
 	var sawQueryProbe bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

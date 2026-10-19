@@ -1640,9 +1640,9 @@ func sentenceCase(value string) string {
 
 func urlProgress(value, limit int) string {
 	if limit <= 0 {
-		return fmt.Sprintf("%s URLs discovered", formattedCount(value))
+		return fmt.Sprintf("%s pages", formattedCount(value))
 	}
-	return fmt.Sprintf("%s / %s URLs", formattedCount(value), formattedCount(limit))
+	return fmt.Sprintf("%s / %s pages", formattedCount(value), formattedCount(limit))
 }
 
 func memoryUsage(value, limit int) string {
@@ -1698,6 +1698,8 @@ func (cw *ConsoleWriter) runningStatusPanel() string {
 	peakRate := cw.peakRequestRate
 	urlsCrawled := cw.urlsCrawled
 	urlLimit := cw.urlLimit
+	endpointsDiscovered := cw.maxDiscovered
+	requests := cw.requests
 	percent := cw.progressPercent
 	processMemoryMB := cw.processMemoryMB
 	memoryLimitMB := cw.memoryLimitMB
@@ -1729,7 +1731,8 @@ func (cw *ConsoleWriter) runningStatusPanel() string {
 		cSlate, "Progress", rst, progressBar(percent, 18), bCloud, percent, rst,
 		cSlate, "Elapsed", rst, cCloud, elapsed, rst)
 	b.WriteString(boxText(progress, w) + "\n")
-	b.WriteString(boxText(statusPair("Crawled", crawled, 30, "Memory", memory), w) + "\n")
+	b.WriteString(boxText(statusPair("Crawled", crawled, 30, "Endpoints", formattedCount(endpointsDiscovered)), w) + "\n")
+	b.WriteString(boxText(statusPair("Requests", formattedCount(requests), 30, "Memory", memory), w) + "\n")
 	b.WriteString(panelBottom(w, cLavender))
 	return b.String()
 }
@@ -1740,6 +1743,7 @@ func (cw *ConsoleWriter) runningStatusLine() string {
 	phase := phaseLabel(cw.lastPhase)
 	urls := cw.urlsCrawled
 	urlLimit := cw.urlLimit
+	endpoints := cw.maxDiscovered
 	started := cw.startTime
 	cw.mu.Unlock()
 	if phase == "" {
@@ -1757,6 +1761,9 @@ func (cw *ConsoleWriter) runningStatusLine() string {
 	separator := fmt.Sprintf("  %s│%s  ", cGhost, rst)
 	suffix := ""
 	urlSuffix := separator + urlProgress(urls, urlLimit)
+	if endpoints > 0 {
+		urlSuffix += fmt.Sprintf(" · %s endpoints", formattedCount(endpoints))
+	}
 	if w-visibleLen(prefix)-visibleLen(separator)-visibleLen(urlSuffix) >= 12 {
 		suffix = urlSuffix
 	}
@@ -2198,25 +2205,28 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 			cGhost, rst, cSlate, rst)
 
 	case "crawler_finished":
-		pages := 0
-		if p, ok := e.Payload["pages"].(float64); ok {
-			pages = int(p)
-		} else if p, ok := e.Payload["pages_crawled"].(float64); ok {
-			pages = int(p)
+		pages := payloadInt(e.Payload, "pages")
+		if pages <= 0 {
+			pages = payloadInt(e.Payload, "pages_crawled")
 		}
+		requests := payloadInt(e.Payload, "requests")
+		discovered := payloadInt(e.Payload, "discovered")
 		cw.mu.Lock()
-		cw.requests = max(cw.requests, payloadInt(e.Payload, "requests"))
+		cw.requests = max(cw.requests, requests)
 		if pages > cw.urlsCrawled {
 			cw.urlsCrawled = pages
 		}
+		if discovered > cw.maxDiscovered {
+			cw.maxDiscovered = discovered
+		}
 		cw.mu.Unlock()
 		if !cw.interactive {
-			fmt.Fprintf(cw.outputWriter(), "CRAWLER COMPLETE urls=%d requests=%d\n", pages, payloadInt(e.Payload, "requests"))
+			fmt.Fprintf(cw.outputWriter(), "CRAWLER COMPLETE pages=%d endpoints=%d requests=%d\n", pages, discovered, requests)
 			return nil
 		}
 		if cw.mode == "verbose" {
-			fmt.Fprintf(cw.outputWriter(), "%sTRACE%s  %sCrawler completed: %d pages%s\n",
-				cGhost, rst, cSlate, pages, rst)
+			fmt.Fprintf(cw.outputWriter(), "%sTRACE%s  %sCrawler completed: %d pages crawled, %d endpoints discovered%s\n",
+				cGhost, rst, cSlate, pages, discovered, rst)
 		}
 
 	// ── Health snapshots ────────────────────────────────────────────────

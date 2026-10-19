@@ -103,6 +103,8 @@ func TestIsDiagnosticEvent(t *testing.T) {
 		{"module_readiness", true},
 		{"session_reauthenticated", true},
 		{"crawler_finished", true},
+		{"parameter_discovery_error_summary", true},
+		{"verification_suppressed", true},
 		{"finding_detected", false},
 		{"health_snapshot", false},
 		{"log", false},

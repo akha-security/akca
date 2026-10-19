@@ -128,6 +128,9 @@ type TechHints struct {
 	BackendLanguage string
 	Framework       string
 	Database        string
+	ServerCDN       string
+	JSFramework     string
+	Hints           []string
 }
 
 type WAFHints struct {

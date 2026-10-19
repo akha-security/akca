@@ -361,6 +361,7 @@ func (r *Runner) applySmartPlan(targets []ScanTarget) ([]ScanTarget, error) {
 		return nil, err
 	}
 	profiles := map[string]learning.Profile{}
+	techByHost := map[string]payloadgen.TechHints{}
 	store := learning.NewStore(r.db)
 	items := make([]planner.RequestItem, 0, len(targets))
 	byKey := map[string][]ScanTarget{}
@@ -380,6 +381,21 @@ func (r *Runner) applySmartPlan(targets []ScanTarget) ([]ScanTarget, error) {
 			}
 		}
 		host := hostFromModuleURL(t.EndpointURL)
+		tech, cached := techByHost[host]
+		if !cached {
+			if fp, fpErr := r.db.GetTechFingerprint(r.scanID, host); fpErr == nil {
+				tech = payloadgen.TechHints{
+					BackendLanguage: fp.BackendLanguage,
+					Framework:       fp.Framework,
+					Database:        fp.Database,
+					ServerCDN:       fp.ServerCDN,
+					JSFramework:     fp.JSFramework,
+					Hints:           append([]string(nil), fp.Hints...),
+				}
+			}
+			techByHost[host] = tech
+		}
+		t.Payloads.Tech = mergeTechHints(t.Payloads.Tech, tech)
 		if _, ok := profiles[host]; !ok {
 			profiles[host] = store.Load(host, "")
 		}
@@ -404,6 +420,28 @@ func (r *Runner) applySmartPlan(targets []ScanTarget) ([]ScanTarget, error) {
 		"scan_id": r.scanID, "targets": len(out), "intelligence_profiles": len(plans), "learning_domains": len(profiles),
 	})
 	return out, nil
+}
+
+func mergeTechHints(current, detected payloadgen.TechHints) payloadgen.TechHints {
+	if detected.BackendLanguage != "" {
+		current.BackendLanguage = detected.BackendLanguage
+	}
+	if detected.Framework != "" {
+		current.Framework = detected.Framework
+	}
+	if detected.Database != "" {
+		current.Database = detected.Database
+	}
+	if detected.ServerCDN != "" {
+		current.ServerCDN = detected.ServerCDN
+	}
+	if detected.JSFramework != "" {
+		current.JSFramework = detected.JSFramework
+	}
+	if len(detected.Hints) > 0 {
+		current.Hints = append([]string(nil), detected.Hints...)
+	}
+	return current
 }
 
 func (r *Runner) loadParameterTargets(limit int) ([]ScanTarget, error) {

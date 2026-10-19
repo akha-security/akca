@@ -24,8 +24,8 @@ func TestTechFingerprintHints(t *testing.T) {
 	if fp.BackendLanguage == "" {
 		t.Fatal("expected backend language")
 	}
-	if fp.JSFramework != "React" {
-		t.Fatalf("expected React, got %q", fp.JSFramework)
+	if fp.JSFramework != "Next.js" {
+		t.Fatalf("expected Next.js, got %q", fp.JSFramework)
 	}
 	if len(fp.Hints) == 0 {
 		t.Fatal("expected hints")

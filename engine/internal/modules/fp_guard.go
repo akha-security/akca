@@ -264,7 +264,8 @@ func moduleSignalConfirmed(
 			(baseStatus == 401 || baseStatus == 403 || !successfulResourceResponse(baseline)) &&
 			successfulResourceResponse(probe)
 	case "nginx_alias":
-		return signal == "alias_traversal" && probeStatus == 200 && len(body) >= 50
+		return signal == "alias_traversal" && probeStatus == 200 && !probe.Redirected &&
+			len(body) >= 50 && !bodiesSimilar(body, baseBody)
 	case "nextjs_bypass":
 		return nextJSBypassSignalConfirmed(signal, body, probeStatus, baseStatus)
 	case "framework_debug":

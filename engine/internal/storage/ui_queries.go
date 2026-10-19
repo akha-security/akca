@@ -711,7 +711,9 @@ func parseEvidenceBody(raw string) EvidenceBody {
 			body.RawResponse = buildRawResponse(body.StatusCode, body.RespHeaders, body.RespBody)
 		}
 	}
-	body.CurlCommand = buildCurlCommand(body.Method, body.URL, body.ReqHeaders, body.ReqBody)
+	if body.Module != "http_smuggling" {
+		body.CurlCommand = buildCurlCommand(body.Method, body.URL, body.ReqHeaders, body.ReqBody)
+	}
 	applyTypedEvidenceFallback(raw, &body)
 	return body
 }
@@ -821,7 +823,7 @@ func applyTypedEvidenceFallback(raw string, body *EvidenceBody) {
 	if body.RawResponse == "" && (body.StatusCode > 0 || body.RespHeaders != "") {
 		body.RawResponse = buildRawResponse(body.StatusCode, body.RespHeaders, body.RespBody)
 	}
-	if body.CurlCommand == "" {
+	if body.CurlCommand == "" && body.Module != "http_smuggling" {
 		body.CurlCommand = buildCurlCommand(body.Method, body.URL, body.ReqHeaders, body.ReqBody)
 	}
 }

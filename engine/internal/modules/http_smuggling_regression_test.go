@@ -11,6 +11,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/verification"
 	"io"
 	"net"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -127,7 +128,9 @@ func TestSmugglingKeepsRawReplayEvidence(t *testing.T) {
 	cfg := config.DefaultScanConfig()
 	cfg.Targets = []string{rawURL}
 	r.scope = scope.NewEngine(cfg)
-	findings := r.runHTTPSmuggling(context.Background(), ScanTarget{EndpointURL: rawURL, Method: "GET"})
+	findings := r.runHTTPSmuggling(context.Background(), ScanTarget{
+		EndpointURL: rawURL, Method: "GET", Parameter: "Upgrade-Insecure-Requests", Location: "header",
+	})
 	listener.Close()
 	<-done
 	if len(findings) != 1 {
@@ -139,5 +142,30 @@ func TestSmugglingKeepsRawReplayEvidence(t *testing.T) {
 	}
 	if !strings.Contains(f.Evidence.Request.Body, "Transfer-Encoding: chunked\r\n") || !strings.Contains(f.Evidence.Request.Body, "akca-smuggle-") {
 		t.Fatal("raw wire evidence lost")
+	}
+	if f.Parameter != "" || f.Location != "" || f.Evidence.Parameter != "" || f.Evidence.Location != "" {
+		t.Fatalf("protocol finding inherited unrelated parameter metadata: %+v", f)
+	}
+	if f.Evidence.RawRequest != f.Evidence.Request.Body || !strings.HasPrefix(f.Evidence.RawRequest, "POST / HTTP/1.1\r\n") {
+		t.Fatal("exact raw smuggling request was not preserved")
+	}
+}
+
+func TestSmugglingStatusOnlyInvalidHeaderIsRejected(t *testing.T) {
+	response := httpclient.ResponseRecord{
+		StatusCode: http.StatusBadRequest,
+		Body:       "Bad Request - Invalid Header: akca-smuggle-attempt-one",
+	}
+	if smugglingCanaryResponse(response, "attempt-one") {
+		t.Fatal("generic invalid-header page must not prove request smuggling even if it reflects the canary")
+	}
+	if httpSmugglingSignalConfirmed("http_desync_status_cl_te", response.Body, "attempt-one", response.StatusCode, http.StatusOK) {
+		t.Fatal("status-only CL.TE signal must be rejected")
+	}
+	if httpSmugglingSignalConfirmed("http_desync_cl_te", response.Body, "attempt-one", response.StatusCode, http.StatusOK) {
+		t.Fatal("an invalid-header reflection must not satisfy the protocol proof guard")
+	}
+	if httpSmugglingSignalConfirmed("http_desync_cl_te", "unrelated akca-smuggle-stale", "attempt-one", http.StatusNotFound, http.StatusOK) {
+		t.Fatal("a stale or different canary must not prove request smuggling")
 	}
 }
