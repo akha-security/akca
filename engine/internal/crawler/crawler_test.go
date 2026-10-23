@@ -15,7 +15,7 @@ func TestNormalizeURLAndRouteTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if norm != "https://example.com/path?a=1&b=2" {
+	if norm != "https://example.com/path/?a=1&b=2" {
 		t.Fatalf("normalize=%q", norm)
 	}
 

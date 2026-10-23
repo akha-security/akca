@@ -40,6 +40,9 @@ func extractForms(baseURL, rawHTML string) []DiscoveredEndpoint {
 				fields := url.Values{}
 				collectFormControls(n, fields)
 				tmpl := buildFormRequestTemplate(resolved, method, enctype, fields)
+				if method == http.MethodGet {
+					resolved = tmpl.URL
+				}
 				out = append(out, DiscoveredEndpoint{URL: resolved, Method: method, Source: SourceForm, Confidence: 0.98, WhyDiscovered: "parsed html form action", RequestTemplate: tmpl})
 			}
 		}
@@ -54,7 +57,7 @@ func extractForms(baseURL, rawHTML string) []DiscoveredEndpoint {
 func collectFormControls(form *html.Node, values url.Values) {
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode && nodeAttr(n, "disabled") == "" {
+		if n.Type == html.ElementNode && !hasNodeAttr(n, "disabled") {
 			name := strings.TrimSpace(nodeAttr(n, "name"))
 			switch n.Data {
 			case "input":
@@ -63,18 +66,26 @@ func collectFormControls(form *html.Node, values url.Values) {
 					inputType = "text"
 				}
 				if name != "" && inputType != "submit" && inputType != "button" && inputType != "image" && inputType != "reset" {
-					if (inputType == "checkbox" || inputType == "radio") && nodeAttr(n, "checked") == "" {
+					if (inputType == "checkbox" || inputType == "radio") && !hasNodeAttr(n, "checked") {
 						break
 					}
 					if inputType == "file" {
 						addFormValue(values, name, "test.png")
 					} else {
-						addFormValue(values, name, smartFormValue(name, inputType, nodeAttr(n, "value")))
+						value := nodeAttr(n, "value")
+						if !hasNodeAttr(n, "value") {
+							if inputType == "checkbox" || inputType == "radio" {
+								value = "on"
+							} else {
+								value = smartFormValue(name, inputType, "")
+							}
+						}
+						addFormValue(values, name, value)
 					}
 				}
 			case "textarea":
 				if name != "" {
-					addFormValue(values, name, smartFormValue(name, "textarea", nodeTextContent(n)))
+					addFormValue(values, name, nodeTextContent(n))
 				}
 			case "select":
 				if name != "" {
@@ -92,13 +103,19 @@ func collectFormControls(form *html.Node, values url.Values) {
 func nodeAttr(n *html.Node, name string) string {
 	for _, attr := range n.Attr {
 		if strings.EqualFold(attr.Key, name) {
-			if attr.Val == "" {
-				return name
-			}
 			return attr.Val
 		}
 	}
 	return ""
+}
+
+func hasNodeAttr(n *html.Node, name string) bool {
+	for _, attr := range n.Attr {
+		if strings.EqualFold(attr.Key, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func nodeTextContent(n *html.Node) string {
@@ -113,13 +130,10 @@ func nodeTextContent(n *html.Node) string {
 		}
 	}
 	walk(n)
-	return strings.TrimSpace(b.String())
+	return b.String()
 }
 
 func addFormValue(values url.Values, name, value string) {
-	if strings.TrimSpace(value) == "" {
-		value = smartFormValue(name, "", value)
-	}
 	values.Add(name, value)
 }
 
@@ -154,32 +168,40 @@ func smartFormValue(name, inputType, defaultValue string) string {
 }
 
 func addSelectValues(values url.Values, name string, selectNode *html.Node) {
-	added := false
-	// Walk all descendant <option> elements, including those nested inside
-	// <optgroup> containers that the previous flat iteration missed.
-	var walkOptions func(*html.Node)
-	walkOptions = func(n *html.Node) {
+	var options []*html.Node
+	var walkOptions func(*html.Node, bool)
+	walkOptions = func(n *html.Node, disabled bool) {
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
 			if child.Type == html.ElementNode && child.Data == "optgroup" {
-				walkOptions(child)
+				walkOptions(child, disabled || hasNodeAttr(child, "disabled"))
 				continue
 			}
-			if child.Type != html.ElementNode || child.Data != "option" {
+			if child.Type != html.ElementNode || child.Data != "option" || disabled || hasNodeAttr(child, "disabled") {
 				continue
 			}
-			if nodeAttr(child, "selected") != "" {
-				value := nodeAttr(child, "value")
-				if value == "" {
-					value = nodeTextContent(child)
-				}
-				addFormValue(values, name, value)
-				added = true
-			}
+			options = append(options, child)
 		}
 	}
-	walkOptions(selectNode)
-	if !added {
-		addFormValue(values, name, "akca")
+	walkOptions(selectNode, false)
+	multiple := hasNodeAttr(selectNode, "multiple")
+	var selected []*html.Node
+	for _, option := range options {
+		if hasNodeAttr(option, "selected") {
+			if !multiple {
+				selected = nil
+			}
+			selected = append(selected, option)
+		}
+	}
+	if len(selected) == 0 && !multiple && len(options) > 0 {
+		selected = options[:1]
+	}
+	for _, option := range selected {
+		value := nodeAttr(option, "value")
+		if !hasNodeAttr(option, "value") {
+			value = strings.Join(strings.Fields(nodeTextContent(option)), " ")
+		}
+		addFormValue(values, name, value)
 	}
 }
 

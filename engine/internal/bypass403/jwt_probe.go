@@ -47,7 +47,7 @@ func buildJWTBearerAttempts(rawURL, method string) []Attempt {
 		payloadAdmin,
 	))
 	add("jwt_empty_signature", unsignedJWT(`{"alg":"HS256","typ":"JWT"}`, payloadAdmin))
-	add("jwt_expired_admin", signedJWTStub(
+	add("jwt_fabricated_admin_claims", signedJWTStub(
 		`{"alg":"HS256","typ":"JWT"}`,
 		`{"sub":"admin","role":"admin","exp":9999999999}`,
 	))

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -231,16 +232,20 @@ func (c *Client) DoWithoutSession(ctx context.Context, method, rawURL string, bo
 // mutates the shared client session used by concurrent scanner workers.
 func (c *Client) DoWithAuthProfile(ctx context.Context, method, rawURL string, body []byte, headers map[string]string,
 	profile config.AuthProfile) (RequestResponse, error) {
-	explicit := cloneStringMap(headers)
-	for key, value := range profile.Headers {
-		explicit[key] = value
+	explicit := MergeHeaders(nil, headers)
+	for key := range explicit {
+		if isAuthenticationHeader(key) {
+			delete(explicit, key)
+		}
 	}
+	explicit = MergeHeaders(explicit, profile.Headers)
 	if len(profile.Cookies) > 0 {
 		parts := make([]string, 0, len(profile.Cookies))
 		for key, value := range profile.Cookies {
 			parts = append(parts, key+"="+value)
 		}
-		explicit["Cookie"] = strings.Join(parts, "; ")
+		sort.Strings(parts)
+		explicit = MergeHeaders(explicit, map[string]string{"Cookie": strings.Join(parts, "; ")})
 	}
 	return c.do(ctx, method, rawURL, body, explicit, false, true)
 }
@@ -288,21 +293,28 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 		customHeaders := cloneStringMap(c.cfg.CustomHeaders)
 		sessionCookies := cloneStringMap(c.cfg.SessionCookies)
 		c.sessionMu.RUnlock()
-		for k, v := range customHeaders {
+		for k, v := range MergeHeaders(nil, customHeaders) {
 			if !includeSession && isAuthenticationHeader(k) {
 				continue
 			}
 			setRequestHeader(req, k, v)
 		}
-		for k, v := range headers {
+		for k, v := range MergeHeaders(nil, headers) {
 			if !includeSession && !allowExplicitAuth && isAuthenticationHeader(k) {
 				continue
 			}
 			setRequestHeader(req, k, v)
 		}
 		if includeSession {
+			cookieNames := make(map[string]bool)
+			for _, cookie := range req.Cookies() {
+				cookieNames[cookie.Name] = true
+			}
+			_, cookieExplicit := req.Header["Cookie"]
 			for k, v := range sessionCookies {
-				req.AddCookie(&http.Cookie{Name: k, Value: v})
+				if !cookieNames[k] && !(cookieExplicit && req.Header.Get("Cookie") == "") {
+					req.AddCookie(&http.Cookie{Name: k, Value: v})
+				}
 			}
 		}
 		if req.Header.Get("Accept") == "" {
@@ -312,7 +324,9 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 			req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 		}
 
-		req.Header.Set("User-Agent", c.pickUserAgent())
+		if _, explicit := req.Header["User-Agent"]; !explicit {
+			req.Header.Set("User-Agent", c.pickUserAgent())
+		}
 		if c.cfg.EnableWAFBypassHeaders {
 			c.applyWafBypassHeaders(req)
 		}
@@ -348,11 +362,14 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 
 		if resp.StatusCode >= 520 && resp.StatusCode <= 527 {
 			c.recordHostBlock(u.Hostname(), 15*time.Second)
+			c.limiter.SetWAFSlowDown(3.0)
+			if !isSafeMethod(method) || attempt == 2 {
+				break
+			}
 			resp.Body.Close()
 			if err := c.waitForHostCircuit(ctx, u.Hostname()); err != nil {
 				return RequestResponse{}, err
 			}
-			c.limiter.SetWAFSlowDown(3.0)
 
 			select {
 			case <-ctx.Done():
@@ -449,6 +466,29 @@ func cloneStringMap(input map[string]string) map[string]string {
 	out := make(map[string]string, len(input))
 	for key, value := range input {
 		out[key] = value
+	}
+	return out
+}
+
+// MergeHeaders provides deterministic, case-insensitive override semantics.
+// Call-specific values always win over captured/default values.
+func MergeHeaders(base, override map[string]string) map[string]string {
+	out := make(map[string]string, len(base)+len(override))
+	for _, source := range []map[string]string{base, override} {
+		keys := make([]string, 0, len(source))
+		for key := range source {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			name := strings.TrimSpace(key)
+			for existing := range out {
+				if strings.EqualFold(existing, name) {
+					delete(out, existing)
+				}
+			}
+			out[name] = source[key]
+		}
 	}
 	return out
 }

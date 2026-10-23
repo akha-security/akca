@@ -26,6 +26,7 @@ var fullScanModuleOrder = []vulnModulePhase{
 	{name: "vulnerable_components", title: "Passive component inventory"},
 	{name: "known_cve", title: "Offline CVE catalog matching"},
 	{name: "script_source", title: "Script source scanning"},
+	{name: "php2shell", title: "PHP2Shell non-invasive exposure assessment"},
 
 	// 2. Lightweight Active & Exposure Probing
 	{name: "debug_admin", title: "Debug/admin exposure scanning"},
@@ -146,19 +147,41 @@ func (e *Engine) vulnModuleRunner() *modules.Runner {
 }
 
 func (e *Engine) runVulnModulesSequential(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	runner := e.vulnModuleRunner()
+	moduleOrder := fullScanModuleOrder
+	if e.session.Config.OnlyPHP2Shell() {
+		moduleOrder = []vulnModulePhase{{name: "php2shell", title: "PHP2Shell exposure assessment"}}
+	}
+	// Discovery and reflection are complete before this phase. Reuse one
+	// scan-local target snapshot instead of querying/planning it per module.
+	// A new invocation (including resume) always loads a fresh snapshot.
+	var targets []modules.ScanTarget
+	if e.session.Config.OnlyPHP2Shell() {
+		for _, endpoint := range e.session.Config.Targets {
+			targets = append(targets, modules.ScanTarget{EndpointURL: endpoint, Method: "GET"})
+		}
+	} else {
+		var err error
+		targets, err = runner.LoadTargetsWithEndpointsFromDB(e.moduleTargetLimit())
+		if err != nil {
+			return err
+		}
+	}
 	hasError := false
 	hasCoverageGap := false
 
 	lastModuleForCategory := make(map[string]int)
-	for i, item := range fullScanModuleOrder {
+	for i, item := range moduleOrder {
 		if e.session.Config.AllowsModule(item.name) {
 			cat := modules.ModuleCategory(item.name)
 			lastModuleForCategory[cat] = i
 		}
 	}
 
-	for moduleOffset, item := range fullScanModuleOrder {
+	for moduleOffset, item := range moduleOrder {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -168,11 +191,11 @@ func (e *Engine) runVulnModulesSequential(ctx context.Context) error {
 		phase := "vuln_module_" + item.name
 		e.session.SetPhase(phase)
 		moduleIndex := moduleOffset + 1
-		moduleTotal := len(fullScanModuleOrder)
+		moduleTotal := len(moduleOrder)
 		_ = e.Emit("phase_started", item.title, map[string]interface{}{
 			"phase": phase, "module": item.name, "module_index": moduleIndex, "module_total": moduleTotal,
 		})
-		findings, err := runner.RunModuleFromDB(ctx, item.name, e.moduleTargetLimit())
+		findings, err := runner.RunModule(ctx, item.name, targets)
 		status := "completed"
 		if err != nil {
 			if errors.Is(err, modules.ErrModuleCoverageIncomplete) {

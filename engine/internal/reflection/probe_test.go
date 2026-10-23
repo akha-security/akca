@@ -1,9 +1,42 @@
 package reflection
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
+
+func TestCancelledAnalyzerReturnsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := new(Analyzer).Run(ctx, 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancel swallowed: %v", err)
+	}
+}
+
+func TestJSONWireUnicodePreservesSemanticValueAndLiteralBackslashes(t *testing.T) {
+	value := `<tag price="$USD">\u003c 😀`
+	req, err := MutateRequest(RequestTemplate{URL: "https://api.test", Body: `{"name":"old","id":9007199254740993,"csrf":"keep"}`, WireEncoding: "json_unicode"}, "name", "json", value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(req.Body, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := json.Unmarshal(doc["name"], &got); err != nil || got != value {
+		t.Fatalf("semantic value changed: %q %v", got, err)
+	}
+	if !strings.Contains(string(doc["name"]), `\u003c`) || strings.Contains(string(doc["name"]), `\\u003c`) {
+		t.Fatalf("not wire unicode: %s", doc["name"])
+	}
+	if string(doc["id"]) != "9007199254740993" {
+		t.Fatal("sibling number changed")
+	}
+}
 
 func TestBuildProbeRequestReplacesTemplatedPathParameter(t *testing.T) {
 	rawURL, _, _, err := BuildProbeRequest(
@@ -47,7 +80,7 @@ func TestBuildProbeRequestPreservesJSONScalarTypes(t *testing.T) {
 	if fallbackErr != nil {
 		t.Fatal(fallbackErr)
 	}
-	if string(fallbackBody) != `{"active":true,"quantity":"' OR 1=1"}` && string(fallbackBody) != `{"quantity":"' OR 1=1"}` {
+	if string(fallbackBody) != `{"active":true,"quantity":"' OR 1=1"}` {
 		t.Fatalf("string injection payload failed to produce valid JSON body: %s", fallbackBody)
 	}
 }
@@ -163,7 +196,72 @@ func TestMutateRequestNestedArrayJSON(t *testing.T) {
 	_, err4 := MutateRequest(template, "users", "json", "' OR 1=1--")
 	// Must not overwrite array container with string!
 	if err4 == nil {
-		// BuildProbeRequest fallback might be called, but setJSONPath should not turn users into string
+		t.Fatal("container mutation must fail without reconstructing the request")
+	}
+}
+
+func TestMutationFailureNeverFallsBackToAnotherRequest(t *testing.T) {
+	for _, tc := range []struct{ location, body, param, ct string }{
+		{"json", `{"users":[],"csrf":"keep"}`, "users", "application/json"},
+		{"json", `{"csrf":`, "name", "application/json"},
+		{"json", `null`, "name", "application/json"},
+		{"json", `{} {}`, "name", "application/json"},
+		{"graphql_query", `{user(id:$id){name}}`, "missing", "application/graphql"},
+		{"xml", `<root><csrf>keep</csrf></root>`, "root.missing", "application/xml"},
+		{"multipart", `broken`, "name", "multipart/form-data; boundary=x"},
+		{"form", `csrf=keep&name=%zz`, "name", "application/x-www-form-urlencoded"},
+	} {
+		t.Run(tc.location+tc.body, func(t *testing.T) {
+			template := RequestTemplate{Method: "PATCH", URL: "https://api.test/action?keep=1", Body: tc.body, ContentType: tc.ct, Headers: map[string]string{"X-Tenant": "keep"}}
+			req, err := MutateRequest(template, tc.param, tc.location, "probe")
+			if err == nil || req.URL != "" {
+				t.Fatalf("failed mutation produced a sendable request: %+v, %v", req, err)
+			}
+			if template.Body != tc.body || template.Headers["X-Tenant"] != "keep" {
+				t.Fatal("template modified")
+			}
+		})
+	}
+}
+
+func TestMutationPreservesNumbersEmptyXMLAndEscapedPath(t *testing.T) {
+	req, err := MutateRequest(RequestTemplate{URL: "https://api.test/", Body: `{"id":9007199254740993,"name":"old"}`}, "name", "json", "new")
+	if err != nil || !strings.Contains(string(req.Body), `9007199254740993`) {
+		t.Fatalf("number changed: %s %v", req.Body, err)
+	}
+	req, err = MutateRequest(RequestTemplate{URL: "https://api.test/", Body: `<root><name/><csrf>keep</csrf></root>`}, "root.name", "xml", "<&")
+	if err != nil || !strings.Contains(string(req.Body), `<name>&lt;&amp;</name>`) || !strings.Contains(string(req.Body), `<csrf>keep</csrf>`) {
+		t.Fatalf("empty XML: %s %v", req.Body, err)
+	}
+	req, err = MutateRequest(RequestTemplate{URL: "https://api.test/files/a%2Fb/123/"}, "path_segment_2", "path", "456/7")
+	if err != nil || req.URL != "https://api.test/files/a%2Fb/456%2F7/" {
+		t.Fatalf("escaped path changed: %s %v", req.URL, err)
+	}
+}
+
+func TestGraphQLLiteralReplacement(t *testing.T) {
+	for _, tc := range []struct{ query, value, want string }{
+		{`{search(name:"old"){id}}`, "price$USD", `{search(name:"price$USD"){id}}`},
+		{`{search(name:"a\"b"){id}}`, "false", `{search(name:"false"){id}}`},
+		{`query Q($n:Float = 1e3){search(n:$n){id}}`, "2e4", `query Q($n:Float = 2e4){search(n:$n){id}}`},
+	} {
+		param := "name"
+		if strings.Contains(tc.query, "$n") {
+			param = "n"
+		}
+		got, ok := mutateGraphQLQuery(tc.query, param, tc.value)
+		if !ok || got != tc.want {
+			t.Fatalf("GraphQL = %q, %v; want %q", got, ok, tc.want)
+		}
+	}
+	if _, ok := mutateGraphQLQuery(`{search(text:"name:123"){id}}`, "name", "x"); ok {
+		t.Fatal("mutated inside string")
+	}
+	if _, ok := mutateGraphQLQuery(`{search(name:"""block data"""){id}}`, "name", "x"); ok {
+		t.Fatal("rewrote prefix of block string")
+	}
+	if _, ok := mutateGraphQLQuery(`{search(text:"""data \""" name:"old" """){id}}`, "name", "x"); ok {
+		t.Fatal("mutated inside escaped block string")
 	}
 }
 

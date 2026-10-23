@@ -75,6 +75,7 @@ var proofPolicies = map[string]ModuleProofPolicy{
 	"cloud_posture":          contentPolicy("cloud_posture"),
 	"script_source":          contentPolicy("script_source"),
 	"vulnerable_components":  contentPolicy("vulnerable_components"),
+	"php2shell":              contentPolicy("php2shell"),
 	// Version/banner matching is inventory, not exploitability proof. A CVE
 	// finding therefore needs the same replay/control discipline as an active
 	// differential probe.
@@ -381,6 +382,13 @@ func evaluateProofPolicy(candidate Candidate, result Result) (ProofType, bool) {
 	if candidate.ProofPolicyVersion != policy.Version || !ValidateObservations(candidate.Observations) {
 		return proofType, false
 	}
+	for _, observation := range candidate.Observations {
+		if observation.ScanID != candidate.ScanID || observation.Module != candidateModule(candidate) ||
+			observation.Endpoint != candidate.EndpointURL || observation.Parameter != candidate.Parameter ||
+			(candidate.Location != "" && !strings.EqualFold(observation.Location, candidate.Location)) {
+			return proofType, false
+		}
+	}
 	if !proofAllowed(policy.AllowedProofTypes, proofType) {
 		return proofType, false
 	}
@@ -389,6 +397,9 @@ func evaluateProofPolicy(candidate Candidate, result Result) (ProofType, bool) {
 	}
 	roles := observationRoles(candidate.Observations)
 	if policy.RequiresNativeBaseline && roles[RoleNativeBaseline] == 0 {
+		return proofType, false
+	}
+	if policy.RequiresStateProof && (roles[RoleStateBefore] == 0 || roles[RoleStateAfter] == 0) {
 		return proofType, false
 	}
 	switch proofType {
@@ -510,18 +521,21 @@ func observationRoles(items []Observation) map[ObservationRole]int {
 	out := make(map[ObservationRole]int)
 	seen := make(map[string]bool)
 	for _, item := range items {
-		// Use the original role in the dedup key so that a probe and its
-		// replay are counted independently even when they share a RequestID.
-		// The previous normalisation collapsed both into RolePositiveProbe,
-		// causing replays to be silently dropped and MinimumIndependentRuns
-		// to be unsatisfiable.
-		if item.RequestID != "" {
-			key := string(item.Role) + "|" + item.RequestID
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
+		role := item.Role
+		if role == RolePositiveReplay {
+			role = RolePositiveProbe
 		}
+		exchange := item.RequestID
+		// An observation without an exchange ID cannot prove a new execution
+		// merely by changing its role or attempt number.
+		if exchange == "" {
+			exchange = item.RequestHash + "|" + item.ResponseHash
+		}
+		key := string(role) + "|" + exchange
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		out[item.Role]++
 	}
 	return out

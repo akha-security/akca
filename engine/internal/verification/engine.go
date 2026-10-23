@@ -237,6 +237,13 @@ func equivalenceFromRuns(base ResponseSnapshot, runs []ResponseSnapshot) []bool 
 }
 
 func (e *Engine) finalize(candidate Candidate, result Result) Result {
+	if result.Confidence == Suppressed {
+		result.Suppressed = true
+	}
+	if result.Suppressed {
+		result.Confidence = Suppressed
+		result.Score = 0
+	}
 	if e.db != nil {
 		_ = e.db.SaveVerificationResult(candidate.ScanID, candidate, result)
 	}

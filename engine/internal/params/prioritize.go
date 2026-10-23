@@ -74,7 +74,7 @@ func DifferentialCandidates(endpointURL string, hints []DiscoveredParameter, lea
 	sort.SliceStable(orderedHints, func(i, j int) bool { return orderedHints[i].Priority > orderedHints[j].Priority })
 	seen := make(map[string]struct{}, len(known)+len(orderedHints)+len(learned))
 	for name := range known {
-		seen[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
+		seen[strings.TrimSpace(name)] = struct{}{}
 	}
 	capacity := maxItems
 	if capacity < 0 {
@@ -83,7 +83,7 @@ func DifferentialCandidates(endpointURL string, hints []DiscoveredParameter, lea
 	out := make([]string, 0, capacity)
 	add := func(name string) bool {
 		name = strings.TrimSpace(name)
-		key := strings.ToLower(name)
+		key := name
 		if !validCandidateName(name) {
 			return true
 		}

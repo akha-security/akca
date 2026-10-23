@@ -893,6 +893,10 @@ func (c *Crawler) enqueueCandidate(rawURL, method string, depth int, source Disc
 	if method == "" {
 		method = "GET"
 	}
+	method = strings.ToUpper(method)
+	if method == http.MethodGet && tmpl != nil && tmpl.URL != "" {
+		rawURL = tmpl.URL
+	}
 	if !c.scope.IsInScope(rawURL) {
 		return
 	}
@@ -936,6 +940,11 @@ func (c *Crawler) enqueueCandidate(rawURL, method string, depth int, source Disc
 	c.mu.Lock()
 	if _, ok := c.seen[key]; ok {
 		c.mu.Unlock()
+		// A visited URL may later acquire a captured request. Deduplicate work,
+		// not the richer evidence needed to replay it in subsequent phases.
+		if tmpl != nil {
+			c.recordEndpoint(rawURL, method, source, confidence, depth, why, previewTemplate(rawURL, method, tmpl))
+		}
 		return
 	}
 	// The hard endpoint cap applies to queued candidates, not only successfully

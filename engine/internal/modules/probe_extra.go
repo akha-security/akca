@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
@@ -124,44 +123,14 @@ func (r *Runner) probeWithHeaders(ctx context.Context, target ScanTarget, payloa
 // URL exactly. It is intended for endpoint/header tests where upgrading GET to
 // POST or injecting an empty parameter would change the tested behavior.
 func (r *Runner) probeHeadersOnlyForModule(ctx context.Context, module string, target ScanTarget, headers map[string]string) (httpclient.RequestResponse, error) {
-	if target.coverage != nil {
-		ctx = withTargetRun(ctx, target.coverage)
-	}
-	if module != "" && !managedTarget(ctx) && !r.canModuleProbe(module) {
-		err := fmt.Errorf("request budget exhausted for module %s", module)
-		noteExchange(ctx, err)
-		return httpclient.RequestResponse{}, err
-	}
-	r.probeCount.Add(1)
-	if module != "" && !managedTarget(ctx) {
-		r.recordModuleProbeUsage(module)
-	}
-	method := strings.ToUpper(strings.TrimSpace(target.Method))
-	if method == "" {
-		method = http.MethodGet
-	}
-	headers = mergeHeaders(headers, r.wafHeadersForModule(module, target.EndpointURL))
-	headers = sanitizeProbeHeaders(method, nil, headers)
-	rr, err := r.client.Do(ctx, method, target.EndpointURL, nil, headers)
-	if err != nil && strings.Contains(err.Error(), "global request budget exhausted") {
-		r.markBudgetExhausted(module, target.EndpointURL)
-	}
-	return rr, err
+	return r.probeTemplateForModule(ctx, module, target, nil, headers)
 }
 
 func (r *Runner) probeWithHeadersForModule(ctx context.Context, module string, target ScanTarget, payload string, headers map[string]string) (httpclient.RequestResponse, error) {
-	method := strings.ToUpper(target.Method)
-	if method == "" {
-		method = "GET"
+	if payload == "" {
+		return r.probeTemplateForModule(ctx, module, target, nil, headers)
 	}
-	rawURL, err := injectParameter(target.EndpointURL, target.Parameter, payload)
-	if err != nil {
-		return httpclient.RequestResponse{}, err
-	}
-	headers = mergeHeaders(headers, r.wafHeadersForModule(module, target.EndpointURL))
-	headers = sanitizeProbeHeaders(method, nil, headers)
-	headers = r.registerRuntimeProbe(target, payload, headers)
-	return r.client.Do(ctx, method, rawURL, nil, headers)
+	return r.probeTemplateForModule(ctx, module, target, &payload, headers)
 }
 
 func (r *Runner) recordFinding(_ context.Context, out *[]ModuleFinding, f *ModuleFinding, module, signal string) bool {

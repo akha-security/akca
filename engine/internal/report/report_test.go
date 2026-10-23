@@ -246,6 +246,30 @@ func TestCoverageDiagnosticsMarkReportPartialAndRemainVisible(t *testing.T) {
 	}
 }
 
+func TestPHP2ShellProbeDiagnosticsAppearInCoverageReport(t *testing.T) {
+	db, scanID := setupReportDB(t, 0)
+	defer db.Close()
+	if err := db.SaveTimelineEvent(scanID, "php2shell_probe", "probe HTTP 500 body=1048575B continue=true size=1MiB parts=4000", `{"module":"php2shell","phase":"probe","endpoint":"https://example.com/index.php","request_body_bytes":1048575,"status":500}`); err != nil {
+		t.Fatal(err)
+	}
+	builder := NewBuilder(evidencestore.New(db), db)
+	meta, err := builder.BuildMeta(Options{ScanID: scanID, Template: TemplateInternal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(meta.Coverage) != 1 || meta.Coverage[0].EventType != "php2shell_probe" ||
+		!strings.Contains(meta.Coverage[0].Summary, "body=1048575B") {
+		t.Fatalf("PHP2Shell probe was not preserved in coverage: %+v", meta.Coverage)
+	}
+	var html bytes.Buffer
+	if err := NewExporter(builder, nil).Export(&html, Options{ScanID: scanID, Template: TemplateInternal, Format: FormatHTML}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(html.String(), "probe HTTP 500 body=1048575B") {
+		t.Fatalf("HTML report omitted PHP2Shell probe diagnostics")
+	}
+}
+
 func TestRoutinePluginSkipDoesNotAloneMarkReportPartial(t *testing.T) {
 	db, scanID := setupReportDB(t, 0)
 	defer db.Close()

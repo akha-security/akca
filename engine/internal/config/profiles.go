@@ -63,8 +63,8 @@ func ApplyScanProfile(cfg ScanConfig) ScanConfig {
 	if !cfg.Explicit.EnableSecondOrderTracking {
 		cfg.EnableSecondOrderTracking = true
 	}
-	if !cfg.Explicit.EnableWAFBypassHeaders {
-		cfg.EnableWAFBypassHeaders = false
+	if cfg.WAFPayloadMode == "" {
+		cfg.WAFPayloadMode = WAFPayloadAuto
 	}
 	if cfg.PayloadBudget == "" {
 		cfg.PayloadBudget = PayloadBudgetUnlimited
@@ -85,6 +85,8 @@ func ApplyScanProfile(cfg ScanConfig) ScanConfig {
 		cfg.EnableSecondOrderTracking = false
 		cfg.EnableHeadlessCrawler = false
 		cfg.EnableWAFBypassHeaders = false
+		cfg.WAFPayloadMode = WAFPayloadOff
 	}
+	restrictPHP2ShellDiscovery(&cfg)
 	return cfg
 }

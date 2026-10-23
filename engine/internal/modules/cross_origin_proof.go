@@ -31,6 +31,12 @@ func (r *Runner) proveCrossOriginRead(ctx context.Context, module string, target
 	}
 	signal := "browser_private_read"
 	p := defaultPayload(module, signal, callback, signal)
+	readObservation := func(role verification.ObservationRole, attempt int, data string) verification.Observation {
+		item := verification.NewBrowserReadObservation(r.scanID, module, target.EndpointURL, role, attempt, data)
+		item.Parameter = target.Parameter
+		item.Location = target.Location
+		return item
+	}
 	return r.verifyAndBuildWithCandidate(ctx, module, target, p, baseline, probe, signal, false, false, "", "", func(c *verification.Candidate) {
 		c.CrossOriginRead = true
 		c.DirectTypedSignal = true
@@ -39,8 +45,8 @@ func (r *Runner) proveCrossOriginRead(ctx context.Context, module string, target
 		c.NegativeControlOK = true
 		c.TypedReplayHits = []bool{true, true}
 		c.Observations = append(c.Observations,
-			verification.NewBrowserReadObservation(r.scanID, module, target.EndpointURL, verification.RoleNegativeControl, 1, anonymous),
-			verification.NewBrowserReadObservation(r.scanID, module, target.EndpointURL, verification.RoleCrossOriginRead, 1, first),
-			verification.NewBrowserReadObservation(r.scanID, module, target.EndpointURL, verification.RoleCrossOriginRead, 2, second))
+			readObservation(verification.RoleNegativeControl, 1, anonymous),
+			readObservation(verification.RoleCrossOriginRead, 1, first),
+			readObservation(verification.RoleCrossOriginRead, 2, second))
 	})
 }

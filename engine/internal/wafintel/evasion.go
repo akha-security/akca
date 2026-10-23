@@ -25,11 +25,11 @@ type Strategy struct {
 
 var vendorStrategies = map[string][]Strategy{
 	"cloudflare": {
-		{ID: "cf_unicode_cascade", Vendor: "Cloudflare", Name: "unicode_cascade", Encodings: []string{"unicode", "url", "double_url"}, Protocol: []string{"chunked"}, Description: "Unicode + double URL with chunked body"},
+		{ID: "cf_unicode_cascade", Vendor: "Cloudflare", Name: "unicode_cascade", Encodings: []string{"unicode", "url", "double_url"}, Description: "Unicode + double URL encoding"},
 		{ID: "cf_ct_confusion", Vendor: "Cloudflare", Name: "content_type_confusion", Encodings: []string{"url"}, Protocol: []string{"content_type_swap"}, Description: "Content-Type confusion bypass"},
 	},
 	"akamai": {
-		{ID: "akamai_fragment", Vendor: "Akamai", Name: "request_fragmentation", Encodings: []string{"html_entity", "url"}, Protocol: []string{"fragmentation", "line_fold"}, Description: "Fragmented payload with HTML entities"},
+		{ID: "akamai_fragment", Vendor: "Akamai", Name: "html_entity_url", Encodings: []string{"html_entity", "url"}, Description: "HTML entities and URL encoding; no transport fragmentation"},
 	},
 	"aws waf": {
 		{ID: "aws_hpp", Vendor: "AWS WAF", Name: "parameter_pollution", Encodings: []string{"url"}, Protocol: []string{"hpp"}, Description: "Duplicate parameter precedence"},
@@ -40,7 +40,7 @@ var vendorStrategies = map[string][]Strategy{
 		{ID: "modsec_octal", Vendor: "ModSecurity", Name: "octal_encoding", Encodings: []string{"octal", "url"}, Protocol: []string{}, Description: "Octal escape cascade"},
 	},
 	"imperva": {
-		{ID: "imperva_timing", Vendor: "Imperva", Name: "timing_evasion", Encodings: []string{"url"}, Protocol: []string{"timing_jitter"}, Description: "Timing jitter between fragments"},
+		{ID: "imperva_timing", Vendor: "Imperva", Name: "url_encoding", Encodings: []string{"url"}, Description: "URL encoding; legacy strategy ID retained for learning compatibility"},
 		{ID: "imperva_unicode", Vendor: "Imperva", Name: "unicode_overlong", Encodings: []string{"unicode", "double_url"}, Protocol: []string{}, Description: "Unicode overlong encoding"},
 	},
 	"fastly": {
@@ -50,7 +50,7 @@ var vendorStrategies = map[string][]Strategy{
 		{ID: "azure_path_pollution", Vendor: "Azure Front Door", Name: "path_pollution", Encodings: []string{"url", "double_url"}, Protocol: []string{"method_override"}, Description: "Method override and double URL encoding"},
 	},
 	"f5 big-ip": {
-		{ID: "f5_tab_whitespace", Vendor: "F5 BIG-IP", Name: "tab_whitespace", Encodings: []string{"tab_whitespace", "url"}, Protocol: []string{"chunked"}, Description: "Tab whitespace with chunked transfer"},
+		{ID: "f5_tab_whitespace", Vendor: "F5 BIG-IP", Name: "tab_whitespace", Encodings: []string{"tab_whitespace", "url"}, Description: "Tab whitespace and URL encoding"},
 	},
 	"sucuri": {
 		{ID: "sucuri_comment_mutate", Vendor: "Sucuri", Name: "mysql_version_comment", Encodings: []string{"mysql_version_comment"}, Protocol: []string{"origin_spoofing"}, Description: "MySQL version comment and IP masquerade"},
@@ -215,18 +215,10 @@ func ApplyStrategy(payload string, strategy Strategy) (string, map[string]string
 	out = EncodingCascade(out, strategy.Encodings...)
 	for _, trick := range strategy.Protocol {
 		switch trick {
-		case "chunked":
-			headers["Transfer-Encoding"] = "chunked"
 		case "content_type_swap":
 			headers["Content-Type"] = "text/plain; charset=utf-7"
-		case "line_fold":
-			headers["X-Akca-Line-Fold"] = "1"
-		case "timing_jitter":
-			headers["X-Akca-Timing-Jitter"] = "true"
 		case "hpp":
 			out = out + "&akca=1"
-		case "fragmentation":
-			out = fragmentPayload(out)
 		case "comment_injection":
 			out = strings.ReplaceAll(out, " ", "/**/")
 		case "origin_spoofing":

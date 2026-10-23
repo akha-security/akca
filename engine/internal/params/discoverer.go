@@ -1,24 +1,22 @@
 package params
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
-	"mime"
-	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/reflection"
 	"github.com/akha-security/akca/engine/internal/scope"
 	"github.com/akha-security/akca/engine/internal/storage"
 	"github.com/akha-security/akca/engine/internal/urlutil"
@@ -72,6 +70,9 @@ type Discoverer struct {
 }
 
 func NewDiscoverer(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *storage.DB, emit EventSink) *Discoverer {
+	if emit == nil {
+		emit = func(string, string, map[string]interface{}) error { return nil }
+	}
 	return &Discoverer{
 		scanID: scanID, client: client, scope: scopeEngine, db: db, emit: emit,
 		maxProbes: 0, wordlistCap: 0, maxHits: 0, parallelism: 8,
@@ -101,11 +102,15 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 		return nil, nil
 	}
 	contentType := headerValue(baselineRR.Response.Headers, "Content-Type")
-	passive := ExtractPassive(endpointURL, method, contentType, baselineRR.Response.Body, baselineRR.Request.Headers)
+	passive := ExtractPassive(requestURL, method, contentType, baselineRR.Response.Body, baselineRR.Request.Headers)
 
 	var templateParams []DiscoveredParameter
 	if template.Body != "" {
-		templateParams = ExtractFromTemplateBody(endpointURL, method, template.ContentType, template.Body)
+		templateCT := template.ContentType
+		if templateCT == "" {
+			templateCT = headerValue(requestHeaders, "Content-Type")
+		}
+		templateParams = ExtractFromTemplateBody(endpointURL, method, templateCT, template.Body)
 	}
 
 	if method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch {
@@ -131,12 +136,16 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 			continue
 		}
 		confirmedPassive = append(confirmedPassive, p)
-		_ = d.persist(endpointID, p)
+		if err := d.persist(endpointID, p); err != nil {
+			return nil, err
+		}
 	}
 	// Captured form/API request bodies are authoritative input surfaces and must
 	// be saved even when known parameters are sufficient to skip active guessing.
 	for _, p := range templateParams {
-		_ = d.persist(endpointID, p)
+		if err := d.persist(endpointID, p); err != nil {
+			return nil, err
+		}
 	}
 	knownParameters := append(append([]DiscoveredParameter(nil), confirmedPassive...), templateParams...)
 	if PassiveEnoughForSkip(knownParameters, method) {
@@ -269,6 +278,9 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 		}
 	}
 	wordlist := DifferentialCandidates(endpointURL, passiveHints, learned, knownNames, d.wordlistCap)
+	// Baseline/calibration requests are separate from the active probe budget.
+	// Reserve active attempts atomically, including failed sends and replays.
+	ctx = context.WithValue(ctx, parameterBudgetKey{}, &parameterProbeBudget{limit: int64(d.maxProbes)})
 	queryCandidates := wordlist
 	postCandidates := wordlist
 	canPrefilter := d.maxProbes == 0 || d.maxProbes >= 4
@@ -373,6 +385,7 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 								cand, randParam, "akca_probe", isDynamic, noiseThreshold)
 							confirmationProbe := false
 							if isHit {
+								isHit = false
 								if confirmURL, confirmBody := buildCustomQueryProbe(requestURL, cand, "akca_probe"); d.scope.IsInScope(confirmURL) {
 									if confirmRR, confirmErr := d.do(ctx, http.MethodGet, confirmURL, confirmBody, requestHeaders); confirmErr == nil {
 										confirmationProbe = true
@@ -403,6 +416,7 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 								cand, randParam, "akca_probe", isDynamic, noiseThreshold)
 							confirmationProbe := false
 							if isPostHit {
+								isPostHit = false
 								confirmJSON := []byte(fmt.Sprintf(`{"%s":"akca_probe"}`, cand))
 								if confirmRR, confirmErr := d.do(ctx, http.MethodPost, requestURL, confirmJSON, jsonHeaders); confirmErr == nil {
 									confirmationProbe = true
@@ -445,6 +459,7 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 								cand, randParam, "akca_probe", isDynamic, noiseThreshold)
 							confirmationProbe := false
 							if isHit {
+								isHit = false
 								if confirmBody, confirmLocation, confirmOK := mutateNativeBody(template, cand, "akca_probe"); confirmOK && confirmLocation == location {
 									if confirmRR, confirmErr := d.do(ctx, method, requestURL, confirmBody, bodyProbeHeaders(requestHeaders, confirmLocation)); confirmErr == nil {
 										confirmationProbe = true
@@ -524,6 +539,12 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 			loc = LocationJSON
 			priority = 84
 			probeMethod = method
+		} else if _, ok := surfaces[string(LocationXML)]; ok {
+			loc, probeMethod = LocationXML, method
+		} else if _, ok := surfaces[string(LocationMultipart)]; ok {
+			loc, probeMethod = LocationMultipart, method
+		} else if _, ok := surfaces[string(LocationGraphQLQuery)]; ok {
+			loc, probeMethod = LocationGraphQLQuery, method
 		} else if strings.HasPrefix(name, "X-") || name == "User-Agent" || name == "Referer" {
 			loc = LocationHeader
 			priority = 80
@@ -540,11 +561,15 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 		differential = append(differential, p)
 		targetEndpointID := endpointID
 		if probeMethod == http.MethodPost && method != http.MethodPost && d.db != nil {
-			if postID, err := d.db.EnsureEndpoint(d.scanID, endpointURL, http.MethodPost); err == nil && postID > 0 {
-				targetEndpointID = postID
+			postID, err := d.db.EnsureEndpoint(d.scanID, endpointURL, http.MethodPost)
+			if err != nil {
+				return nil, fmt.Errorf("%w: POST endpoint: %w", errParameterPersistence, err)
 			}
+			targetEndpointID = postID
 		}
-		_ = d.persist(targetEndpointID, p)
+		if err := d.persist(targetEndpointID, p); err != nil {
+			return nil, err
+		}
 	}
 
 	all := append(confirmedPassive, differential...)
@@ -557,16 +582,42 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 // a shared gate those two pools multiplied (8 endpoint workers x 8-10 candidate
 // workers), flooding the HTTP client's per-host queue with stale work.
 func (d *Discoverer) do(ctx context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
-	if d.probeSlots == nil {
-		return d.client.Do(ctx, method, rawURL, body, headers)
+	if d.probeSlots != nil {
+		select {
+		case d.probeSlots <- struct{}{}:
+			defer func() { <-d.probeSlots }()
+		case <-ctx.Done():
+			return httpclient.RequestResponse{}, ctx.Err()
+		}
 	}
-	select {
-	case d.probeSlots <- struct{}{}:
-		defer func() { <-d.probeSlots }()
-	case <-ctx.Done():
-		return httpclient.RequestResponse{}, ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return httpclient.RequestResponse{}, err
+	}
+	if budget, ok := ctx.Value(parameterBudgetKey{}).(*parameterProbeBudget); ok && !budget.reserve() {
+		return httpclient.RequestResponse{}, errParameterProbeBudget
 	}
 	return d.client.Do(ctx, method, rawURL, body, headers)
+}
+
+var errParameterProbeBudget = errors.New("parameter probe budget exhausted")
+var errParameterPersistence = errors.New("parameter persistence failed")
+
+type parameterBudgetKey struct{}
+type parameterProbeBudget struct {
+	limit int64
+	used  atomic.Int64
+}
+
+func (b *parameterProbeBudget) reserve() bool {
+	if b.limit <= 0 {
+		return true
+	}
+	for used := b.used.Load(); used < b.limit; used = b.used.Load() {
+		if b.used.CompareAndSwap(used, used+1) {
+			return true
+		}
+	}
+	return false
 }
 
 // shouldAttemptJSONPivot avoids doubling the candidate pass on ordinary HTML
@@ -734,8 +785,11 @@ func (d *Discoverer) Run(ctx context.Context, limit int) error {
 	// them for every concrete endpoint variant without sending any request. This
 	// also means an existing ?id=1 is excluded from the active candidate list.
 	for _, endpoint := range allEndpoints {
-		for name := range parseQueryParams(endpoint.URL) {
-			_ = d.db.SaveParameter(endpoint.ID, name, string(LocationQuery), 96)
+		requestURL, _, _ := nativeRequest(endpoint.URL, endpoint.Method, endpoint.RequestTemplate)
+		for name := range parseQueryParams(requestURL) {
+			if err := d.db.SaveParameter(endpoint.ID, name, string(LocationQuery), 96); err != nil {
+				return fmt.Errorf("%w: endpoint %d: %w", errParameterPersistence, endpoint.ID, err)
+			}
 		}
 	}
 	endpoints, selection := selectDiscoveryEndpoints(allEndpoints, limit)
@@ -759,6 +813,7 @@ func (d *Discoverer) Run(ctx context.Context, limit int) error {
 	completed := 0
 	failures := 0
 	panicFailures := 0
+	var persistenceFailure error
 	errorGroups := make(map[string]*parameterDiscoveryErrorGroup)
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -778,6 +833,9 @@ func (d *Discoverer) Run(ctx context.Context, limit int) error {
 						completed++
 						if discoverErr != nil {
 							failures++
+							if errors.Is(discoverErr, errParameterPersistence) {
+								persistenceFailure = discoverErr
+							}
 							class := parameterDiscoveryErrorClass(discoverErr)
 							if class == "panic" {
 								panicFailures++
@@ -848,6 +906,9 @@ feedLoop:
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	if persistenceFailure != nil {
+		return persistenceFailure
+	}
 	// Ordinary endpoint-level transport failures are a coverage gap, not a
 	// phase failure. A phase error is reserved for an implementation panic or
 	// the case where no selected endpoint could be inspected at all.
@@ -867,6 +928,9 @@ type parameterDiscoveryErrorGroup struct {
 func parameterDiscoveryErrorClass(err error) string {
 	if err == nil {
 		return "unknown"
+	}
+	if errors.Is(err, errParameterPersistence) {
+		return "persistence_error"
 	}
 	if strings.Contains(strings.ToLower(err.Error()), "parameter discovery panic") {
 		return "panic"
@@ -904,14 +968,14 @@ func parameterDiscoveryErrorClass(err error) string {
 	}
 }
 
-func (d *Discoverer) crossEndpointTransfer(ctx context.Context, endpoints []storage.DiscoveryEndpoint) {
+func (d *Discoverer) crossEndpointTransfer(ctx context.Context, endpoints []storage.DiscoveryEndpoint) error {
 	rows, err := d.db.Conn().Query(`
 		SELECT DISTINCT p.name 
 		FROM parameters p
 		JOIN endpoints e ON e.id = p.endpoint_id 
 		WHERE e.scan_id = ? AND p.priority >= 80`, d.scanID)
 	if err != nil {
-		return
+		return err
 	}
 	defer rows.Close()
 
@@ -924,7 +988,7 @@ func (d *Discoverer) crossEndpointTransfer(ctx context.Context, endpoints []stor
 	}
 
 	if len(params) == 0 {
-		return
+		return rows.Err()
 	}
 
 	type transferTask struct {
@@ -962,7 +1026,7 @@ collectTasks:
 		}
 	}
 	if len(tasks) == 0 || ctx.Err() != nil {
-		return
+		return ctx.Err()
 	}
 
 	_ = d.emit("parameter_transfer_started", "cross-endpoint parameter transfer started", map[string]interface{}{
@@ -980,6 +1044,7 @@ collectTasks:
 	var wg sync.WaitGroup
 	var progressMu sync.Mutex
 	completed := 0
+	var transferErr error
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -988,8 +1053,11 @@ collectTasks:
 				if ctx.Err() != nil {
 					return
 				}
-				d.probeSingleParam(ctx, task.endpoint, task.name)
+				probeErr := d.probeSingleParam(ctx, task.endpoint, task.name)
 				progressMu.Lock()
+				if probeErr != nil {
+					transferErr = errors.Join(transferErr, probeErr)
+				}
 				completed++
 				current := completed
 				if current%25 == 0 || current == len(tasks) {
@@ -1015,9 +1083,10 @@ feedTasks:
 	_ = d.emit("parameter_transfer_finished", "cross-endpoint parameter transfer finished", map[string]interface{}{
 		"scan_id": d.scanID, "completed": completed, "total": len(tasks),
 	})
+	return errors.Join(transferErr, ctx.Err())
 }
 
-func (d *Discoverer) probeSingleParam(ctx context.Context, ep storage.DiscoveryEndpoint, param string) {
+func (d *Discoverer) probeSingleParam(ctx context.Context, ep storage.DiscoveryEndpoint, param string) error {
 	m := strings.ToUpper(ep.Method)
 	if m == "" {
 		m = http.MethodGet
@@ -1025,7 +1094,7 @@ func (d *Discoverer) probeSingleParam(ctx context.Context, ep storage.DiscoveryE
 	requestURL, requestBody, requestHeaders := nativeRequest(ep.URL, m, ep.RequestTemplate)
 	baselineRR, err := d.do(ctx, m, requestURL, requestBody, requestHeaders)
 	if err != nil {
-		return
+		return err
 	}
 	baseline := Fingerprint(
 		baselineRR.Response.StatusCode,
@@ -1059,7 +1128,7 @@ func (d *Discoverer) probeSingleParam(ctx context.Context, ep storage.DiscoveryE
 					}
 				}
 				if isHit {
-					_ = d.db.SaveParameter(ep.ID, param, string(LocationQuery), 75)
+					return d.persist(ep.ID, DiscoveredParameter{Name: param, Location: LocationQuery, Priority: 75, EndpointURL: ep.URL, EndpointMethod: m})
 				}
 			}
 		}
@@ -1090,16 +1159,17 @@ func (d *Discoverer) probeSingleParam(ctx context.Context, ep storage.DiscoveryE
 					}
 				}
 				if isHit {
-					_ = d.db.SaveParameter(ep.ID, param, string(location), 85)
+					return d.persist(ep.ID, DiscoveredParameter{Name: param, Location: location, Priority: 85, EndpointURL: ep.URL, EndpointMethod: m})
 				}
 			}
 		}
 	}
+	return nil
 }
 
 func (d *Discoverer) persist(endpointID int64, p DiscoveredParameter) error {
 	if err := d.db.SaveParameter(endpointID, p.Name, string(p.Location), p.Priority); err != nil {
-		return err
+		return fmt.Errorf("%w: endpoint %d parameter %s: %w", errParameterPersistence, endpointID, p.Name, err)
 	}
 	d.mu.Lock()
 	d.eventBatch = append(d.eventBatch, map[string]interface{}{
@@ -1109,7 +1179,9 @@ func (d *Discoverer) persist(endpointID int64, p DiscoveredParameter) error {
 	shouldFlush := len(d.eventBatch) >= 25
 	d.mu.Unlock()
 	if shouldFlush {
-		return d.flushEvents()
+		if err := d.flushEvents(); err != nil {
+			return fmt.Errorf("%w: %w", errParameterPersistence, err)
+		}
 	}
 	return nil
 }
@@ -1169,95 +1241,53 @@ func nativeRequest(endpointURL, method string, template storage.DiscoveryRequest
 	return reqURL, []byte(template.Body), headers
 }
 
+func nativeBodyLocation(contentType, body string) Location {
+	ct := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	trimmed := strings.TrimSpace(body)
+	switch {
+	case strings.Contains(ct, "json"):
+		return LocationJSON
+	case strings.HasPrefix(ct, "multipart/"):
+		return LocationMultipart
+	case strings.Contains(ct, "xml"):
+		return LocationXML
+	case ct == "application/graphql":
+		return LocationGraphQLQuery
+	case ct == "application/x-www-form-urlencoded":
+		return LocationForm
+	case ct == "":
+		switch {
+		case json.Valid([]byte(trimmed)), strings.HasPrefix(trimmed, "{"), strings.HasPrefix(trimmed, "["):
+			return LocationJSON
+		case strings.HasPrefix(trimmed, "<"):
+			return LocationXML
+		default:
+			return LocationForm
+		}
+	default:
+		return ""
+	}
+}
+
 func mutateNativeBody(template storage.DiscoveryRequestTemplate, param, value string) ([]byte, Location, bool) {
-	contentType := strings.ToLower(template.ContentType)
+	contentType := template.ContentType
 	if contentType == "" {
-		contentType = strings.ToLower(headerValue(template.Headers, "Content-Type"))
+		contentType = headerValue(template.Headers, "Content-Type")
 	}
-	body := strings.TrimSpace(template.Body)
-	isJSON := strings.Contains(contentType, "json") || (body != "" && json.Valid([]byte(body)))
-	if isJSON {
-		var document map[string]interface{}
-		if body == "" {
-			document = make(map[string]interface{})
-		} else if err := json.Unmarshal([]byte(body), &document); err != nil {
-			return nil, "", false
-		}
-		setNestedPath(document, param, value)
-		mutated, err := json.Marshal(document)
-		return mutated, LocationJSON, err == nil
+	location := nativeBodyLocation(contentType, template.Body)
+	if location == "" {
+		return nil, "", false
 	}
-
-	isMultipart := strings.Contains(contentType, "multipart")
-	if isMultipart {
-		boundary := ""
-		if _, params, err := mime.ParseMediaType(contentType); err == nil {
-			boundary = params["boundary"]
-		}
-		fields := url.Values{}
-		if boundary != "" && body != "" {
-			mr := multipart.NewReader(strings.NewReader(body), boundary)
-			if form, err := mr.ReadForm(10 << 20); err == nil && form != nil {
-				fields = url.Values(form.Value)
-			}
-		}
-		fields.Set(param, value)
-		var buf bytes.Buffer
-		mw := multipart.NewWriter(&buf)
-		if boundary != "" {
-			_ = mw.SetBoundary(boundary)
-		} else {
-			_ = mw.SetBoundary(defaultMultipartBoundary)
-		}
-		for k, vs := range fields {
-			for _, v := range vs {
-				_ = mw.WriteField(k, v)
-			}
-		}
-		_ = mw.Close()
-		return buf.Bytes(), LocationMultipart, true
-	}
-
-	isXML := strings.Contains(contentType, "xml") || (strings.HasPrefix(body, "<") && strings.HasSuffix(body, ">"))
-	if isXML {
-		if body != "" {
-			if idx := strings.LastIndex(body, "</"); idx != -1 {
-				mutated := body[:idx] + fmt.Sprintf("<%s>%s</%s>", param, html.EscapeString(value), param) + body[idx:]
-				return []byte(mutated), LocationXML, true
-			}
-		}
-		return []byte(fmt.Sprintf("<root><%s>%s</%s></root>", param, html.EscapeString(value), param)), LocationXML, true
-	}
-
-	// Form is the compatibility fallback for older endpoint records that do
-	// not have a request template. When a template exists, all sibling fields
-	// are retained and only the candidate parameter is added/replaced.
-	form, err := url.ParseQuery(template.Body)
+	// Reuse the replay mutator: numbers, arrays, files and sibling fields must
+	// obey the same fidelity contract during discovery and later verification.
+	request, err := reflection.MutateRequest(reflection.RequestTemplate{
+		Method: http.MethodPost, URL: "https://request.invalid/", Body: template.Body,
+		Headers: template.Headers, ContentType: contentType, AllowNewFields: true,
+	}, param, string(location), value)
 	if err != nil {
 		return nil, "", false
 	}
-	form.Set(param, value)
-	return []byte(form.Encode()), LocationForm, true
-}
-
-func setNestedPath(doc map[string]interface{}, path string, value interface{}) {
-	if !strings.Contains(path, ".") {
-		doc[path] = value
-		return
-	}
-	parts := strings.Split(path, ".")
-	current := doc
-	for i := 0; i < len(parts)-1; i++ {
-		key := parts[i]
-		if next, ok := current[key].(map[string]interface{}); ok {
-			current = next
-		} else {
-			nested := make(map[string]interface{})
-			current[key] = nested
-			current = nested
-		}
-	}
-	current[parts[len(parts)-1]] = value
+	return request.Body, location, true
 }
 
 func bodyProbeHeaders(base map[string]string, location Location) map[string]string {
@@ -1269,13 +1299,13 @@ func bodyProbeHeaders(base map[string]string, location Location) map[string]stri
 			headers["Content-Type"] = "application/json"
 		case LocationXML:
 			headers["Content-Type"] = "application/xml"
+		case LocationGraphQLQuery:
+			headers["Content-Type"] = "application/graphql"
 		case LocationMultipart:
 			headers["Content-Type"] = "multipart/form-data; boundary=" + defaultMultipartBoundary
 		default:
 			headers["Content-Type"] = "application/x-www-form-urlencoded"
 		}
-	} else if location == LocationMultipart && !strings.Contains(existingCT, "boundary=") {
-		headers["Content-Type"] = "multipart/form-data; boundary=" + defaultMultipartBoundary
 	}
 	return headers
 }

@@ -106,10 +106,6 @@ func ExtractFromHTML(baseURL, htmlContent string) []DiscoveredEndpoint {
 						}
 					case "formaction":
 						add(val, SourceForm, 0.9, "formaction attribute")
-					case "action":
-						if tag == "form" {
-							add(val, SourceForm, 0.95, "form action")
-						}
 					case "data-href", "data-url", "data-target", "data-action", "data-endpoint", "data-api", "data-src":
 						add(val, SourceDataAttr, 0.8, "html "+key+" attribute")
 					case "onclick", "onchange", "onmouseover", "onmousedown":
@@ -133,7 +129,14 @@ func ExtractFromHTML(baseURL, htmlContent string) []DiscoveredEndpoint {
 	// 2. Forms extraction (actions, input controls and request templates)
 	for _, f := range extractForms(currentBaseURL, htmlContent) {
 		key := f.Method + " " + f.URL
-		if _, ok := seen[key]; !ok {
+		if _, ok := seen[key]; ok {
+			for i := range out {
+				if out[i].Method+" "+out[i].URL == key && out[i].RequestTemplate == nil {
+					out[i] = f
+					break
+				}
+			}
+		} else {
 			seen[key] = struct{}{}
 			out = append(out, f)
 		}

@@ -483,10 +483,12 @@ func TestWebSocketDeepTesting(t *testing.T) {
 		if payload == "'" {
 			body = "SQLSTATE[42000]: syntax error near quote"
 		}
-		return httpclient.RequestResponse{
+		exchange := httpclient.RequestResponse{
 			Request:  httpclient.RequestRecord{Method: "GET", URL: rawURL, Body: payload},
 			Response: httpclient.ResponseRecord{StatusCode: 101, Body: body},
-		}, nil
+		}
+		httpclient.StampExchange(&exchange)
+		return exchange, nil
 	})
 	target := ScanTarget{EndpointURL: "http://example.com/ws/socket", Method: "GET", Parameter: "msg"}
 	findings := groupDRunner(t, c, WithWebSocketProber(prober)).runWebSocket(context.Background(), target)
@@ -536,10 +538,15 @@ func TestRequestSmugglingSignal(t *testing.T) {
 			Request:  httpclient.RequestRecord{Method: "POST", URL: rawURL, Body: "raw conflicting framing"},
 			Response: httpclient.ResponseRecord{StatusCode: 200, Body: "response queue differential"},
 		}
+		httpclient.StampExchange(&control)
+		httpclient.StampExchange(&attack)
+		replay := attack
+		replay.ExchangeID = ""
+		httpclient.StampExchange(&replay)
 		return SmugglingProbeResult{
 			Confirmed: variant == "cl_te", Signal: variant,
 			Reason:   "repeated raw HTTP/1.1 response queue differential",
-			Exchange: attack, Control: control, Attempts: []httpclient.RequestResponse{attack, attack},
+			Exchange: attack, Control: control, Attempts: []httpclient.RequestResponse{attack, replay},
 		}, nil
 	})
 	target := ScanTarget{EndpointURL: "http://example.com/", Method: "POST", Parameter: "q"}

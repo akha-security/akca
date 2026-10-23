@@ -68,6 +68,9 @@ func (r *Runner) RunGroupD(ctx context.Context, targets []ScanTarget) ([]ModuleF
 					if r.cfg.AllowsModule("vulnerable_components") {
 						localFindings = append(localFindings, r.runVulnerableComponents(ctx, target)...)
 					}
+					if r.cfg.AllowsModule("php2shell") {
+						localFindings = append(localFindings, r.runPHP2Shell(ctx, target)...)
+					}
 					if r.cfg.AllowsModule("sensitive_data") {
 						localFindings = append(localFindings, r.runSensitiveData(ctx, target)...)
 					}

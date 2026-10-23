@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"strings"
 
 	"github.com/akha-security/akca/engine/internal/config"
@@ -27,6 +26,9 @@ func NewGenerator(scanID string, db *storage.DB, cfg config.ScanConfig, emit Eve
 }
 
 func (g *Generator) Run(ctx context.Context, profiles []reflection.ReflectionProfile) ([]GenerationResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := g.emit("payload_generation_started", "payload generation started", map[string]interface{}{"scan_id": g.scanID}); err != nil {
 		return nil, fmt.Errorf("failed to emit payload generation start event: %w", err)
 	}
@@ -35,6 +37,10 @@ func (g *Generator) Run(ctx context.Context, profiles []reflection.ReflectionPro
 
 	var results []GenerationResult
 	for _, profile := range profiles {
+		profile.ScanID = g.scanID
+		if err := ctx.Err(); err != nil {
+			return results, err
+		}
 		host := hostFromURL(profile.EndpointURL)
 		tech, err := g.db.GetTechFingerprint(g.scanID, host)
 		if err != nil && err != sql.ErrNoRows {
@@ -44,22 +50,11 @@ func (g *Generator) Run(ctx context.Context, profiles []reflection.ReflectionPro
 		if err != nil && err != sql.ErrNoRows {
 			return nil, fmt.Errorf("database query failure for WAF profile on host %s: %w", host, err)
 		}
-		preferredTechniques := g.wafPreferredTechniques(host)
-		decoder := g.wafDecoderProfile(host)
+		wafLearning := g.wafLearningProfile(host)
 		learnData := store.Load(host, profile.EndpointURL)
 		w, b, n, fp := learnData.ToPayloadGen()
 
-		// Start cautiously behind a WAF. A positive signal can trigger deeper
-		// verification later; sending the full library up front increases bans.
 		targetBudget := budget
-		// A WAF presence reduces the budget to avoid bans, but the previous
-		// ceiling of 6 was too restrictive — it left room for only 2-3 offensive
-		// payloads after controls and evasion variants consumed their share.
-		if waf.CautiousModeRecommended || waf.Vendor != "" {
-			targetBudget = lowerPositiveBudget(targetBudget, 10)
-		} else {
-			targetBudget = lowerPositiveBudget(targetBudget, 15)
-		}
 
 		result := Generate(Input{
 			Profile: profile,
@@ -71,18 +66,7 @@ func (g *Generator) Run(ctx context.Context, profiles []reflection.ReflectionPro
 				JSFramework:     tech.JSFramework,
 				Hints:           append([]string(nil), tech.Hints...),
 			},
-			WAF: WAFHints{
-				Vendor:                  waf.Vendor,
-				CautiousModeRecommended: waf.CautiousModeRecommended,
-				AllowEvasion:            g.cfg.EnableWAFBypassHeaders,
-				PreferredTechniques:     preferredTechniques,
-				QueryURLDecodeDepth:     decoder.QueryURLDecodeDepth,
-				QueryURLDecodeObserved:  decoder.QueryURLDecodeObserved,
-				QueryURLDecodeConflict:  decoder.QueryURLDecodeConflict,
-				QueryPlusAsSpace:        decoder.QueryPlusAsSpace,
-				QueryPlusObserved:       decoder.QueryPlusObserved,
-				QueryPlusConflict:       decoder.QueryPlusConflict,
-			},
+			WAF:    WAFHintsForProfile(g.cfg, waf, wafLearning),
 			Budget: targetBudget,
 			Learn: LearningProfile{
 				Worked: w, Blocked: b, Noisy: n, FalsePositive: fp,
@@ -116,58 +100,32 @@ func (g *Generator) Run(ctx context.Context, profiles []reflection.ReflectionPro
 			}
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return results, err
+	}
 	if err := g.emit("payload_generation_finished", "payload generation finished", map[string]interface{}{
 		"scan_id": g.scanID, "endpoints": len(results),
 	}); err != nil {
 		return nil, fmt.Errorf("failed to emit payload generation finished event: %w", err)
 	}
-	return results, nil
+	return results, ctx.Err()
 }
 
-func (g *Generator) wafDecoderProfile(host string) wafintel.DecoderProfile {
+func (g *Generator) wafLearningProfile(host string) wafintel.LearningProfile {
+	learn := wafintel.NewLearningProfile(host)
 	if g.db == nil || strings.TrimSpace(host) == "" {
-		return wafintel.DecoderProfile{}
+		return learn
 	}
 	raw, err := g.db.LoadWAFLearningProfile(host)
 	if err != nil {
-		return wafintel.DecoderProfile{}
+		return learn
 	}
-	learn := wafintel.NewLearningProfile(host)
 	if json.Unmarshal([]byte(raw), &learn) != nil {
-		return wafintel.DecoderProfile{}
+		return wafintel.NewLearningProfile(host)
 	}
-	return learn.Decoder
-}
-
-func (g *Generator) wafPreferredTechniques(host string) []string {
-	if g.db == nil || strings.TrimSpace(host) == "" {
-		return nil
-	}
-	raw, err := g.db.LoadWAFLearningProfile(host)
-	if err != nil {
-		return nil
-	}
-	learn := wafintel.NewLearningProfile(host)
-	if json.Unmarshal([]byte(raw), &learn) != nil {
-		return nil
-	}
-	return wafintel.PreferredTechniques(learn)
-}
-
-func lowerPositiveBudget(configured, ceiling int) int {
-	if configured < 0 {
-		return configured
-	}
-	if configured == 0 || configured > ceiling {
-		return ceiling
-	}
-	return configured
+	return learn
 }
 
 func hostFromURL(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return ""
-	}
-	return strings.ToLower(u.Hostname())
+	return wafintel.HostFromTarget(raw)
 }

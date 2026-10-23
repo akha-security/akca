@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"sort"
+	"strings"
+
+	"github.com/akha-security/akca/engine/internal/models"
 )
 
 type ParameterTarget struct {
@@ -154,11 +157,35 @@ func (db *DB) SaveGeneratedPayloadsContext(ctx context.Context, scanID, endpoint
 	if err != nil {
 		return err
 	}
-	name := endpointURL + "::" + parameter
+	var identity struct {
+		Method   string `json:"method"`
+		Location string `json:"parameter_location"`
+	}
+	if err := json.Unmarshal(b, &identity); err != nil {
+		return err
+	}
+	name := GeneratedPayloadKey(scanID, identity.Method, endpointURL, parameter, identity.Location)
 	_, err = db.execWriteContext(ctx, `
 INSERT INTO payload_library_items (name, payload_json)
 VALUES (?, ?)`, name, string(b))
 	return err
+}
+
+func GeneratedPayloadKey(scanID, method, endpointURL, parameter, location string) string {
+	method = strings.ToUpper(strings.TrimSpace(method))
+	if method == "" {
+		method = "GET"
+	}
+	location = strings.ToLower(strings.TrimSpace(location))
+	if location == "" {
+		location = "query"
+	}
+	parts, _ := json.Marshal([]string{scanID, method, endpointURL, parameter, location})
+	return "generated:v2:" + string(parts)
+}
+
+func (db *DB) LoadGeneratedPayloadsJSON(scanID, method, endpointURL, parameter, location string) (string, error) {
+	return db.LoadPayloadGenerationJSON(GeneratedPayloadKey(scanID, method, endpointURL, parameter, location))
 }
 
 func (db *DB) LoadLearningProfile(domain, endpointURL string) (LearningProfileData, error) {
@@ -234,7 +261,4 @@ type TechFingerprintData struct {
 	Hints           []string `json:"hints"`
 }
 
-type WAFProfileData struct {
-	Vendor                  string `json:"vendor"`
-	CautiousModeRecommended bool   `json:"cautious_mode_recommended"`
-}
+type WAFProfileData = models.WAFProfile

@@ -18,8 +18,8 @@ import (
 )
 
 func TestVersionIsStableReleaseString(t *testing.T) {
-	if version != "0.2.9" {
-		t.Fatalf("version=%q, want 0.2.9", version)
+	if version != "0.3.0" {
+		t.Fatalf("version=%q, want 0.3.0", version)
 	}
 }
 
@@ -48,7 +48,7 @@ func TestUsageHelpAndVersionPrintBrandBanner(t *testing.T) {
 			if !strings.Contains(combined, akcaASCII[0]) {
 				t.Fatalf("ASCII wordmark missing for %s: %q", tc.name, combined)
 			}
-			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.2.9") {
+			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.3.0") {
 				t.Fatalf("brand/version line missing for %s: %q", tc.name, combined)
 			}
 		})
@@ -249,6 +249,7 @@ func TestScanSessionPanelIsCompactAndUsesStringTargets(t *testing.T) {
 		"CRAWL", "1,000 pages", "OAST", "OAST Ready",
 		"RATE", "50 req/s", "REQUESTS", "Uncapped", "RAM", "8.0G Scan / 32.0G Total",
 		"ENGINE", "Browser + JS", "AUTH", "Authenticated", "TRANSPORT", "Direct · TLS on",
+		"PAYLOAD ADAPTATION", "AUTO",
 	} {
 		if !strings.Contains(panel, want) {
 			t.Fatalf("session panel omitted %q: %q", want, panel)
@@ -258,7 +259,7 @@ func TestScanSessionPanelIsCompactAndUsesStringTargets(t *testing.T) {
 		t.Fatalf("legacy duplicate OAST banner leaked into session panel: %q", panel)
 	}
 	lines := strings.Split(strings.TrimSuffix(panel, "\n\n"), "\n")
-	if len(lines) != 11 {
+	if len(lines) != 12 {
 		t.Fatalf("session panel should remain compact, lines=%d: %q", len(lines), panel)
 	}
 	for _, line := range lines {
@@ -284,9 +285,9 @@ func TestScanSessionPanelLongValuesPreserveAlignment(t *testing.T) {
 	})
 
 	lines := strings.Split(strings.TrimSuffix(panel, "\n\n"), "\n")
-	// With resolved info, line count is 12 (hero has subline)
-	if len(lines) != 12 {
-		t.Fatalf("expected 12 lines with resolved info, got %d: %q", len(lines), panel)
+	// Resolved info adds a hero subline; adaptation has its own visible row.
+	if len(lines) != 13 {
+		t.Fatalf("expected 13 lines with resolved info, got %d: %q", len(lines), panel)
 	}
 
 	expectedWidth := uiWidth + 4
@@ -452,6 +453,84 @@ func TestCrawlerFinishedSeparatesPagesEndpointsAndRequests(t *testing.T) {
 	}
 }
 
+func TestPHP2ShellProbeRequestsAreVisibleAndCounted(t *testing.T) {
+	var output bytes.Buffer
+	cw := NewConsoleWriter()
+	cw.out = &output
+	cw.interactive = false
+	for _, event := range []events.Event{
+		{Type: "php2shell_probe", Payload: map[string]interface{}{
+			"module": "php2shell", "phase": "baseline", "status": 200,
+			"request_body_bytes": 0, "request_attempted": true, "continue": true,
+		}},
+		{Type: "php2shell_probe", Payload: map[string]interface{}{
+			"module": "php2shell", "phase": "control", "status": 200,
+			"request_body_bytes": 45, "request_attempted": true, "continue": true,
+		}},
+		{Type: "php2shell_probe", Payload: map[string]interface{}{
+			"module": "php2shell", "phase": "probe", "status": 200,
+			"request_body_bytes": 1048575, "size_mib": 1, "parts": 4000,
+			"request_attempted": true, "continue": true,
+		}},
+		{Type: "vuln_module_finished", Payload: map[string]interface{}{
+			"module": "php2shell", "requests_attempted": 3,
+		}},
+	} {
+		if err := cw.WriteEvent(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if cw.requests != 3 {
+		t.Fatalf("php2shell request counter = %d, want 3", cw.requests)
+	}
+	if !strings.Contains(output.String(), "[PHP2SHELL PROBE]") || !strings.Contains(output.String(), "body=1048575B") {
+		t.Fatalf("php2shell probe diagnostics missing: %q", output.String())
+	}
+}
+
+func TestCrawlerProgressUpdatesAndRendersAllLiveCounters(t *testing.T) {
+	var output bytes.Buffer
+	cw := NewConsoleWriter()
+	cw.out = &output
+	cw.interactive = true
+	cw.scanActive = true
+	cw.lastPhase = "crawling"
+	cw.urlLimit = 1_500
+
+	if err := cw.WriteEvent(events.Event{Type: "scan_progress", Message: "crawling", Payload: map[string]interface{}{
+		"pages": 17, "discovered": 43, "requests": 29,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if cw.urlsCrawled != 17 || cw.maxDiscovered != 43 || cw.requests != 29 {
+		t.Fatalf("live crawler counters mismatch: pages=%d endpoints=%d requests=%d",
+			cw.urlsCrawled, cw.maxDiscovered, cw.requests)
+	}
+	got := output.String()
+	if !strings.Contains(got, "P:17/1,500") || !strings.Contains(got, "E:43") {
+		t.Fatalf("crawler progress did not immediately render page and endpoint counts: %q", got)
+	}
+}
+
+func TestCrawlerProgressCountersNeverMoveBackward(t *testing.T) {
+	cw := NewConsoleWriter()
+	cw.interactive = false
+	cw.urlsCrawled = 20
+	cw.maxDiscovered = 50
+	cw.requests = 40
+
+	if err := cw.WriteEvent(events.Event{Type: "scan_progress", Message: "crawling", Payload: map[string]interface{}{
+		"pages": 19, "discovered": 49, "requests": 39,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if cw.urlsCrawled != 20 || cw.maxDiscovered != 50 || cw.requests != 40 {
+		t.Fatalf("stale crawler progress moved counters backward: pages=%d endpoints=%d requests=%d",
+			cw.urlsCrawled, cw.maxDiscovered, cw.requests)
+	}
+}
+
 func TestLiveStatusIsAtomicallyReplaced(t *testing.T) {
 	var output bytes.Buffer
 	cw := NewConsoleWriter()
@@ -541,8 +620,32 @@ func TestRunningStatusKeepsPageAndEndpointCountsAsTheyGrow(t *testing.T) {
 			t.Fatalf("growing discovery counters disappeared; missing %q in %q", want, got)
 		}
 	}
+	if countAt, phaseAt := strings.Index(got, "P:1,234/1,500"), strings.Index(got, "Craw"); countAt < 0 || phaseAt < 0 || countAt > phaseAt {
+		t.Fatalf("discovery counters must stay left of the expendable phase label: %q", got)
+	}
 	if visibleLen(got) > currentUIWidth()+4 {
 		t.Fatalf("running status overflowed terminal width: width=%d line=%q", visibleLen(got), got)
+	}
+}
+
+func TestReportProgressKeepsDiscoveryCountersVisible(t *testing.T) {
+	var output bytes.Buffer
+	cw := NewConsoleWriter()
+	cw.out = &output
+	cw.interactive = true
+	cw.scanActive = true
+	cw.urlsCrawled = 88
+	cw.urlLimit = 1_500
+	cw.maxDiscovered = 144
+
+	if err := cw.WriteEvent(events.Event{Type: "report_generation_progress", Payload: map[string]interface{}{
+		"percent": float64(35), "section": "findings",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	if !strings.Contains(got, "REPORT") || !strings.Contains(got, "P:88/1,500") || !strings.Contains(got, "E:144") {
+		t.Fatalf("report progress hid discovery counters: %q", got)
 	}
 }
 

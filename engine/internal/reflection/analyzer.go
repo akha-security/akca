@@ -46,6 +46,9 @@ func (a *Analyzer) SetConcurrency(n int) {
 }
 
 func (a *Analyzer) Run(ctx context.Context, limit int) ([]ReflectionProfile, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if limit == 0 && a.maxParams > 0 {
 		limit = a.maxParams
 	}
@@ -65,6 +68,9 @@ func (a *Analyzer) Run(ctx context.Context, limit int) ([]ReflectionProfile, err
 	}
 
 	if len(validTargets) == 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		_ = a.emit("reflection_finished", "reflection analysis finished", map[string]interface{}{
 			"scan_id": a.scanID, "count": 0,
 		})
@@ -117,11 +123,14 @@ func (a *Analyzer) Run(ctx context.Context, limit int) ([]ReflectionProfile, err
 		}()
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return profiles, err
+	}
 
 	_ = a.emit("reflection_finished", "reflection analysis finished", map[string]interface{}{
 		"scan_id": a.scanID, "count": len(profiles),
 	})
-	return profiles, nil
+	return profiles, ctx.Err()
 }
 
 func (a *Analyzer) AnalyzeParameter(ctx context.Context, endpointURL, method, param, location string) (ReflectionProfile, error) {
@@ -184,7 +193,7 @@ func (a *Analyzer) AnalyzeParameterWithTemplate(ctx context.Context, template Re
 	}
 
 	profile := ReflectionProfile{
-		ScanID: a.scanID, EndpointURL: template.URL, Method: probe.Method,
+		ScanID: a.scanID, EndpointURL: template.URL, Method: probe.Method, NativeMethod: EffectiveMethod(template.Method, "query"),
 		Parameter: param, ParameterLocation: location,
 		CanaryID: canaryID, CanaryValue: canary,
 		ReflectionKind: kind, Context: ctxType, QuoteType: quote,

@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/akha-security/akca/engine/internal/config"
 	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/reflection"
 	"github.com/akha-security/akca/engine/internal/verification"
 )
 
@@ -73,7 +75,7 @@ func (r *Runner) runJWT(ctx context.Context, target ScanTarget) []ModuleFinding 
 		r.emitSkip("jwt", target, "JWT proof requires a captured valid token")
 		return nil
 	}
-	valid, err := r.probeWithHeaders(ctx, target, "", map[string]string{"Authorization": "Bearer " + validToken})
+	valid, err := r.probeJWT(ctx, target, validToken)
 	if err != nil || valid.Response.StatusCode < 200 || valid.Response.StatusCode >= 300 {
 		return nil
 	}
@@ -82,14 +84,14 @@ func (r *Runner) runJWT(ctx context.Context, target ScanTarget) []ModuleFinding 
 	// signature-bypass candidate. Without this control, a generic 2xx endpoint
 	// or a response that ignores Authorization could be misread as JWT bypass.
 	invalidToken := invalidateJWTSignature(validToken)
-	invalid, err := r.probeWithHeaders(ctx, target, "", map[string]string{"Authorization": "Bearer " + invalidToken})
+	invalid, err := r.probeJWT(ctx, target, invalidToken)
 	if err != nil || !jwtInvalidControlRejected(valid.Response, invalid.Response, validIdentity) {
 		return nil
 	}
 
 	// 1. Check for Unverified JWT Signature (Server does not verify signatures at all)
 	if unverifiedToken, ok := tamperJWTUnverifiedSignature(validToken, "akca-admin"); ok {
-		unverifiedResp, err := r.probeWithHeaders(ctx, target, "", map[string]string{"Authorization": "Bearer " + unverifiedToken})
+		unverifiedResp, err := r.probeJWT(ctx, target, unverifiedToken)
 		if err == nil && unverifiedResp.Response.StatusCode >= 200 && unverifiedResp.Response.StatusCode < 300 {
 			probeIdentity := jwtIdentityFromResponse(unverifiedResp.Response)
 			if validIdentity == "" && jwtProtectedResponseEquivalent(valid.Response, unverifiedResp.Response) {
@@ -126,7 +128,7 @@ func (r *Runner) runJWT(ctx context.Context, target ScanTarget) []ModuleFinding 
 	expiredToken := capturedExpiredJWT(r.cfg)
 	var expired httpclient.RequestResponse
 	if expiredToken != "" {
-		expired, _ = r.probeWithHeaders(ctx, target, "", map[string]string{"Authorization": "Bearer " + expiredToken})
+		expired, _ = r.probeJWT(ctx, target, expiredToken)
 	}
 
 	oastURL := ""
@@ -218,7 +220,7 @@ func (r *Runner) runJWT(ctx context.Context, target ScanTarget) []ModuleFinding 
 		if tp.token == "" || ctx.Err() != nil {
 			continue
 		}
-		probe, err := r.probeWithHeaders(ctx, target, "", map[string]string{"Authorization": "Bearer " + tp.token})
+		probe, err := r.probeJWT(ctx, target, tp.token)
 		if err != nil || probe.Response.StatusCode < 200 || probe.Response.StatusCode >= 300 {
 			continue
 		}
@@ -282,7 +284,7 @@ func (r *Runner) recordOpaqueJWTBypass(ctx context.Context, target ScanTarget, v
 	valid, invalid, accepted httpclient.RequestResponse, description string) []ModuleFinding {
 	var replays []httpclient.RequestResponse
 	for i := 0; i < 2; i++ {
-		replay, err := r.probeWithHeaders(ctx, target, "", map[string]string{"Authorization": "Bearer " + token})
+		replay, err := r.probeJWT(ctx, target, token)
 		if err != nil || !jwtProtectedResponseEquivalent(valid.Response, replay.Response) {
 			return nil
 		}
@@ -314,27 +316,111 @@ func (r *Runner) recordOpaqueJWTBypass(ctx context.Context, target ScanTarget, v
 }
 
 func (r *Runner) capturedJWTForTarget(target ScanTarget) string {
-	if tok := capturedJWT(r.cfg); tok != "" {
-		return tok
+	return r.capturedJWTCarrier(target).Token
+}
+
+type jwtCarrier struct {
+	Token, Location, Name string
+	Index                 int
+}
+
+func (r *Runner) capturedJWTCarrier(target ScanTarget) jwtCarrier {
+	headers := mergeHeaders(r.cfg.CustomHeaders, target.RequestTemplate.Headers)
+	if token := capturedJWTFromHeaders(headers); token != "" {
+		return jwtCarrier{Token: token, Location: "header", Name: "Authorization"}
 	}
-	if tok := capturedJWTFromHeaders(target.RequestTemplate.Headers); tok != "" {
-		return tok
+	req := &http.Request{Header: make(http.Header)}
+	for key, value := range headers {
+		req.Header.Set(key, value)
 	}
-	if cookieHeader, ok := target.RequestTemplate.Headers["Cookie"]; ok {
-		if tok := extractJWTFromCookieHeader(cookieHeader); tok != "" {
-			return tok
+	seen := map[string]bool{}
+	for _, cookie := range req.Cookies() {
+		seen[cookie.Name] = true
+		if validJWTShape(cookie.Value) {
+			return jwtCarrier{Token: cookie.Value, Location: "cookie", Name: cookie.Name}
 		}
 	}
-	if u, err := url.Parse(target.EndpointURL); err == nil {
-		for _, vals := range u.Query() {
-			for _, v := range vals {
-				if validJWTShape(v) {
-					return v
+	keys := make([]string, 0, len(r.cfg.SessionCookies))
+	for key := range r.cfg.SessionCookies {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if !seen[key] && validJWTShape(r.cfg.SessionCookies[key]) {
+			return jwtCarrier{Token: r.cfg.SessionCookies[key], Location: "cookie", Name: key}
+		}
+	}
+	rawURL := target.RequestTemplate.URL
+	if rawURL == "" {
+		rawURL = target.EndpointURL
+	}
+	if u, err := url.Parse(rawURL); err == nil {
+		values := u.Query()
+		keys = keys[:0]
+		for key := range values {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			for index, value := range values[key] {
+				if validJWTShape(value) {
+					return jwtCarrier{Token: value, Location: "query", Name: key, Index: index}
 				}
 			}
 		}
 	}
-	return ""
+	if token := capturedJWT(r.cfg); token != "" {
+		return jwtCarrier{Token: token, Location: "header", Name: "Authorization"}
+	}
+	return jwtCarrier{}
+}
+
+func (r *Runner) probeJWT(ctx context.Context, target ScanTarget, token string) (httpclient.RequestResponse, error) {
+	carrier := r.capturedJWTCarrier(target)
+	if carrier.Token == "" {
+		return httpclient.RequestResponse{}, fmt.Errorf("JWT carrier not found")
+	}
+	template := target.RequestTemplate
+	if template.URL == "" {
+		template.URL = target.EndpointURL
+	}
+	if template.Method == "" {
+		template.Method = target.Method
+	}
+	if template.Body == "" {
+		template.Body = target.BodyTemplate
+	}
+	if template.ContentType == "" {
+		template.ContentType = target.Profile.ContentType
+	}
+	template.Headers = mergeHeaders(r.cfg.CustomHeaders, template.Headers)
+	value := token
+	if carrier.Location == "header" {
+		value = "Bearer " + token
+	}
+	if carrier.Location == "query" {
+		u, err := url.Parse(template.URL)
+		if err != nil {
+			return httpclient.RequestResponse{}, err
+		}
+		q := u.Query()
+		values := q[carrier.Name]
+		if carrier.Index >= len(values) {
+			return httpclient.RequestResponse{}, fmt.Errorf("JWT query carrier missing")
+		}
+		values[carrier.Index] = token
+		q[carrier.Name] = values
+		u.RawQuery = q.Encode()
+		template.URL = u.String()
+	} else {
+		mutated, err := reflection.MutateRequest(template, carrier.Name, carrier.Location, value)
+		if err != nil {
+			return httpclient.RequestResponse{}, err
+		}
+		template.Headers = mutated.Headers
+	}
+	target.RequestTemplate = template
+	return r.probeTemplateForModule(ctx, "jwt", target, nil, nil)
 }
 
 func extractJWTFromCookieHeader(cookieHeader string) string {
@@ -357,8 +443,10 @@ func capturedExpiredJWT(cfg config.ScanConfig) string {
 		if claims == nil {
 			continue
 		}
-		if exp, ok := claims["exp"].(float64); ok && int64(exp) < now {
-			return token
+		if exp, ok := claims["exp"].(json.Number); ok {
+			if seconds, err := exp.Float64(); err == nil && seconds < float64(now) {
+				return token
+			}
 		}
 	}
 	return ""
@@ -690,6 +778,10 @@ func decodeJWTPart(part string) map[string]interface{} {
 		return nil
 	}
 	var out map[string]interface{}
-	_ = json.Unmarshal(raw, &out)
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.UseNumber()
+	if decoder.Decode(&out) != nil || decoder.Decode(new(interface{})) != io.EOF {
+		return nil
+	}
 	return out
 }

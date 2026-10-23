@@ -303,12 +303,14 @@ func (p *networkWebSocketProber) Probe(ctx context.Context, rawURL, payload stri
 	if err != nil {
 		return httpclient.RequestResponse{}, err
 	}
-	return httpclient.RequestResponse{
+	exchange := httpclient.RequestResponse{
 		Request: httpclient.RequestRecord{Method: http.MethodGet, URL: u.String(), Headers: map[string]string{
 			"Upgrade": "websocket", "Connection": "Upgrade", "Sec-WebSocket-Version": "13",
 		}, Body: payload},
 		Response: httpclient.ResponseRecord{StatusCode: http.StatusSwitchingProtocols, Headers: headerMap(response.Header), Body: string(message)},
-	}, nil
+	}
+	httpclient.StampExchange(&exchange)
+	return exchange, nil
 }
 
 const defaultProbeUserAgent = branding.UserAgent
@@ -478,8 +480,6 @@ func (p *networkSmugglingProber) Probe(ctx context.Context, rawURL, variant stri
 	}
 	var confirmed int
 	var confirmedAttempts []httpclient.RequestResponse
-	var lastRaw string
-	var lastResponses []rawHTTPResponse
 	for attempt := 0; attempt < 2; attempt++ {
 		token := randomToken(10)
 		attackRaw, buildErr := buildSmugglingPipeline(u, strings.ToLower(variant), token)
@@ -490,15 +490,16 @@ func (p *networkSmugglingProber) Probe(ctx context.Context, rawURL, variant stri
 		if exchangeErr != nil {
 			continue
 		}
-		lastRaw, lastResponses = attackRaw, responses
 		if desyncDifferential(control, responses) {
 			confirmed++
-			confirmedAttempts = append(confirmedAttempts, httpclient.RequestResponse{
+			exchange := httpclient.RequestResponse{
 				Request: httpclient.RequestRecord{Method: http.MethodPost, URL: rawURL, Body: attackRaw},
 				Response: httpclient.ResponseRecord{
 					StatusCode: responses[0].StatusCode, Body: summarizeRawResponses(responses),
 				},
-			})
+			}
+			httpclient.StampExchange(&exchange)
+			confirmedAttempts = append(confirmedAttempts, exchange)
 		}
 	}
 	if confirmed < 2 {
@@ -506,12 +507,9 @@ func (p *networkSmugglingProber) Probe(ctx context.Context, rawURL, variant stri
 	}
 	return SmugglingProbeResult{
 		Confirmed: true, Signal: variant,
-		Reason: "repeated raw HTTP/1.1 response queue differential",
-		Exchange: httpclient.RequestResponse{
-			Request:  httpclient.RequestRecord{Method: http.MethodPost, URL: rawURL, Body: lastRaw},
-			Response: httpclient.ResponseRecord{StatusCode: lastResponses[0].StatusCode, Body: summarizeRawResponses(lastResponses)},
-		},
-		Control: controlExchange, Attempts: confirmedAttempts,
+		Reason:   "repeated raw HTTP/1.1 response queue differential",
+		Exchange: confirmedAttempts[len(confirmedAttempts)-1],
+		Control:  controlExchange, Attempts: confirmedAttempts,
 	}, nil
 }
 

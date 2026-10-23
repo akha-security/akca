@@ -143,7 +143,7 @@ func (b *Builder) buildCoverageSection(scanID string, redact bool) ([]CoverageEn
 	incomplete := false
 	for _, row := range rows {
 		switch row.EventType {
-		case "module_readiness", "coverage_gap", "plugin_skipped", "resource_limit_reached", "scan_error", "verification_suppressed":
+		case "module_readiness", "coverage_gap", "plugin_skipped", "resource_limit_reached", "scan_error", "verification_suppressed", "php2shell_assessment", "php2shell_probe":
 		default:
 			continue
 		}

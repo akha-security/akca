@@ -7,8 +7,10 @@ import (
 
 	"github.com/akha-security/akca/engine/internal/fingerprint"
 	"github.com/akha-security/akca/engine/internal/models"
+	"github.com/akha-security/akca/engine/internal/payloadgen"
 	"github.com/akha-security/akca/engine/internal/plugins"
 	"github.com/akha-security/akca/engine/internal/waf"
+	"github.com/akha-security/akca/engine/internal/wafintel"
 )
 
 const fingerprintHTTPTimeout = 20 * time.Second
@@ -48,12 +50,16 @@ func (e *Engine) runFingerprintPhase(ctx context.Context, target string) error {
 				trafficBudget = &budget
 			}
 			_ = e.db.SaveWAFProfile(e.session.ID, wafProfile)
+			hints := payloadgen.WAFHintsForProfile(e.session.Config, wafProfile, wafintel.NewLearningProfile(wafProfile.Host))
 			_ = e.Emit("waf_detected", wafProfile.Vendor, map[string]interface{}{
 				"host":                      wafProfile.Host,
 				"vendor":                    wafProfile.Vendor,
 				"cdn":                       wafProfile.CDN,
 				"cautious_mode_recommended": wafProfile.CautiousModeRecommended,
 				"confidence":                wafProfile.Confidence,
+				"waf_payload_mode":          string(e.session.Config.EffectiveWAFPayloadMode()),
+				"payload_adaptation_active": hints.AllowEvasion,
+				"payload_variant_limit":     hints.MaxVariants,
 			})
 			if trafficBudget != nil {
 				_ = e.Emit("waf_traffic_adjusted", trafficBudget.Reason, map[string]interface{}{

@@ -26,6 +26,8 @@ func estimatedTargetRequests(module string, target ScanTarget) int64 {
 		n = 13 // server family or one baseline plus two browser replays per family
 	case "cookie_security":
 		n = 1 // passive header analysis of one concrete response
+	case "php2shell":
+		return 4 // opt-in lab path: one control and at most three bounded probes
 	}
 	if generated := len(payloadsForClass(target.Payloads.Payloads, module)); generated > 0 && generated+10 > n {
 		n = generated + 10
@@ -53,7 +55,7 @@ func budgetWorkKey(module string, t ScanTarget) string {
 		return module + "::" + parsed.Scheme + "://" + parsed.Host + firstRoutePrefix(parsed.Path)
 	}
 	switch module {
-	case "cookie_security", "sensitive_data", "secret_exposure", "script_source", "vulnerable_components", "known_cve":
+	case "cookie_security", "sensitive_data", "secret_exposure", "script_source", "vulnerable_components", "known_cve", "php2shell":
 		return module + "::" + method + "::" + parsed.String()
 	case "prototype_pollution":
 		if clientPrototypeEligible(t) {
@@ -229,6 +231,9 @@ func splitBudget(total int64, weights []int64) []int64 {
 }
 
 func (r *Runner) allocateModuleBudget(module string, targets []ScanTarget) *moduleAllocation {
+	if module == "php2shell" && !r.cfg.PHP2ShellActive {
+		return nil // metadata-only assessment does not consume request allocation
+	}
 	r.adaptiveBudgetMu.Lock()
 	defer r.adaptiveBudgetMu.Unlock()
 	urls := map[string]bool{}
@@ -265,6 +270,9 @@ func (r *Runner) allocateModuleBudget(module string, targets []ScanTarget) *modu
 			current = i
 		}
 		if !r.cfg.AllowsModule(name) || plan.completed[name] && name != module {
+			continue
+		}
+		if name == "php2shell" && !r.cfg.PHP2ShellActive {
 			continue
 		}
 		seenWork := make(map[string]struct{})

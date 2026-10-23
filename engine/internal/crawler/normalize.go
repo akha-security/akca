@@ -38,7 +38,6 @@ func NormalizeURL(raw string) (string, error) {
 	}
 	u.Fragment = ""
 	u.Host = strings.ToLower(u.Host)
-	u.Path = strings.TrimSuffix(u.Path, "/")
 	if u.Path == "" {
 		u.Path = "/"
 	}
@@ -53,7 +52,6 @@ func NormalizeURL(raw string) (string, error) {
 		clean := url.Values{}
 		for _, k := range keys {
 			vals := q[k]
-			sort.Strings(vals)
 			for _, v := range vals {
 				clean.Add(k, v)
 			}

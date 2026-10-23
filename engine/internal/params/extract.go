@@ -5,11 +5,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/akha-security/akca/engine/internal/reflection"
 )
 
 // volatileHeaders change on every response regardless of request input (dates,
@@ -166,7 +171,7 @@ func validCandidateName(name string) bool {
 	for _, r := range name {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '_', r == '-', r == '.', r == '[', r == ']':
+		case r == '_', r == '-', r == '.', r == '[', r == ']', r == '@':
 		default:
 			return false
 		}
@@ -229,16 +234,38 @@ func collectJSONPaths(value interface{}, prefix string, out map[string]struct{})
 func extractXMLKeys(body string) map[string]struct{} {
 	out := map[string]struct{}{}
 	decoder := xml.NewDecoder(strings.NewReader(body))
+	var stack []string
+	var children []bool
 	for {
 		tok, err := decoder.Token()
-		if err != nil {
-			break
+		if err == io.EOF {
+			return out
 		}
-		if se, ok := tok.(xml.StartElement); ok {
-			out[se.Name.Local] = struct{}{}
+		if err != nil {
+			return map[string]struct{}{}
+		}
+		switch element := tok.(type) {
+		case xml.StartElement:
+			if len(children) > 0 {
+				children[len(children)-1] = true
+			}
+			stack = append(stack, element.Name.Local)
+			children = append(children, false)
+			for _, attr := range element.Attr {
+				if attr.Name.Space != "xmlns" && attr.Name.Local != "xmlns" {
+					out[strings.Join(stack, ".")+"@"+attr.Name.Local] = struct{}{}
+				}
+			}
+		case xml.EndElement:
+			if len(stack) > 0 {
+				if !children[len(children)-1] {
+					out[strings.Join(stack, ".")] = struct{}{}
+				}
+				stack = stack[:len(stack)-1]
+				children = children[:len(children)-1]
+			}
 		}
 	}
-	return out
 }
 
 func extractMultipartNames(body string) map[string]struct{} {
@@ -335,35 +362,67 @@ func abs(x int) int {
 	return x
 }
 
-// ExtractFromTemplateBody extracts parameter names from a request template body (form urlencoded or JSON).
+// ExtractFromTemplateBody recognizes only the captured request's native format.
 func ExtractFromTemplateBody(endpointURL, method, contentType, body string) []DiscoveredParameter {
-	var out []DiscoveredParameter
-	trimmed := strings.TrimSpace(body)
-	if trimmed == "" {
+	if strings.TrimSpace(body) == "" {
 		return nil
 	}
-	ct := strings.ToLower(contentType)
-	if strings.Contains(ct, "json") || strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
-		for k := range extractJSONKeys(body) {
-			out = append(out, DiscoveredParameter{
-				Name: k, Location: LocationJSON, Priority: 95, Confidence: 0.98,
-				Source: "form_template", EndpointURL: endpointURL, EndpointMethod: method,
-			})
+	location := nativeBodyLocation(contentType, body)
+	names := map[string]struct{}{}
+	switch location {
+	case LocationJSON:
+		names = extractJSONKeys(body)
+	case LocationXML:
+		names = extractXMLKeys(body)
+	case LocationGraphQLQuery:
+		for _, name := range reflection.GraphQLParameterNames(body) {
+			names[name] = struct{}{}
 		}
-		if len(out) > 0 {
-			return out
+	case LocationMultipart:
+		_, parameters, err := mime.ParseMediaType(contentType)
+		if err != nil || parameters["boundary"] == "" {
+			return nil
 		}
-	}
-	if parsed, err := url.ParseQuery(trimmed); err == nil && len(parsed) > 0 {
-		for k := range parsed {
-			k = strings.TrimSpace(k)
-			if k != "" {
-				out = append(out, DiscoveredParameter{
-					Name: k, Location: LocationForm, Priority: 95, Confidence: 0.98,
-					Source: "form_template", EndpointURL: endpointURL, EndpointMethod: method,
-				})
+		reader := multipart.NewReader(strings.NewReader(body), parameters["boundary"])
+		for {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil
+			}
+			if name := part.FormName(); name != "" {
+				names[name] = struct{}{}
+			}
+			if err := part.Close(); err != nil {
+				return nil
 			}
 		}
+	case LocationForm:
+		parsed, err := url.ParseQuery(body)
+		if err != nil {
+			return nil
+		}
+		for name := range parsed {
+			names[name] = struct{}{}
+		}
+	default:
+		return nil
+	}
+	ordered := make([]string, 0, len(names))
+	for name := range names {
+		if validCandidateName(name) {
+			ordered = append(ordered, name)
+		}
+	}
+	sort.Strings(ordered)
+	out := make([]DiscoveredParameter, 0, len(ordered))
+	for _, name := range ordered {
+		out = append(out, DiscoveredParameter{
+			Name: name, Location: location, Priority: 95, Confidence: 0.98,
+			Source: "form_template", EndpointURL: endpointURL, EndpointMethod: method,
+		})
 	}
 	return out
 }

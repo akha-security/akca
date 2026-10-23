@@ -284,6 +284,7 @@ type ScanConfig struct {
 	// are disabled again at scan bootstrap even if a caller supplied conflicting
 	// defaults later.
 	PassiveMode                  bool                  `json:"passive_mode,omitempty"`
+	PHP2ShellActive              bool                  `json:"php2shell_active,omitempty"`
 	AuthProfiles                 []AuthProfile         `json:"auth_profiles,omitempty"`
 	RoleProfiles                 []RoleProfile         `json:"role_profiles,omitempty"`
 	CredentialStorageMode        CredentialStorageMode `json:"credential_storage_mode"`
@@ -308,6 +309,7 @@ type ScanConfig struct {
 	EnableRaceConditionTesting   bool                  `json:"enable_race_condition_testing"`
 	EnableBusinessLogicChecks    bool                  `json:"enable_business_logic_checks"`
 	EnableSecondOrderTracking    bool                  `json:"enable_second_order_tracking"`
+	WAFPayloadMode               WAFPayloadMode        `json:"waf_payload_mode,omitempty"`
 	EnableWAFBypassHeaders       bool                  `json:"enable_waf_bypass_headers"`
 	EnableRuntimeSensor          bool                  `json:"enable_runtime_sensor"`
 	EnableInformationalChecks    bool                  `json:"enable_informational_checks"`
@@ -400,6 +402,7 @@ func DefaultScanConfig() ScanConfig {
 		EnableHeadlessCrawler:        true,
 		EnableFuzzing:                true,
 		Enable403BypassChecks:        true,
+		WAFPayloadMode:               WAFPayloadAuto,
 		EnableWAFBypassHeaders:       false,
 		EnableOAST:                   true,
 		OASTServerURL:                DefaultOASTServers,
@@ -429,6 +432,14 @@ func DefaultScanConfig() ScanConfig {
 }
 
 func (c *ScanConfig) Validate() error {
+	if err := c.ValidatePHP2ShellOptions(); err != nil {
+		return err
+	}
+	switch c.WAFPayloadMode {
+	case "", WAFPayloadAuto, WAFPayloadOn, WAFPayloadOff:
+	default:
+		return fmt.Errorf("invalid waf_payload_mode: %q (expected auto, on or off)", c.WAFPayloadMode)
+	}
 	proxyURL, err := NormalizeProxyURL(c.ProxyURL)
 	if err != nil {
 		return err

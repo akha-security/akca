@@ -81,6 +81,13 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 	if !r.cfg.AllowsModule(module) {
 		return nil, nil
 	}
+	if module == "php2shell" && r.cfg.PHP2ShellActive {
+		if err := r.cfg.ValidatePHP2ShellOptions(); err != nil {
+			return nil, err
+		}
+		labURL, _ := r.cfg.PHP2ShellLabURL()
+		targets = []ScanTarget{{EndpointURL: labURL, Method: "GET"}}
+	}
 	allocation := r.allocateModuleBudget(module, targets)
 	defer r.finishModuleBudget(module, allocation)
 	eligibleWork := make(map[string]struct{})
@@ -172,7 +179,7 @@ feed:
 	if module == "sqli" || module == "command_injection" {
 		findings = append(findings, r.flushDelayedTimingVerifications(ctx)...)
 	}
-	tested, attempted, skipped, failed, exhausted, unprocessed := 0, 0, 0, 0, 0, 0
+	tested, attempted, skipped, failed, exhausted, unprocessed, blocked := 0, 0, 0, 0, 0, 0, 0
 	requests, responses, usableResponses := int64(0), int64(0), int64(0)
 	authBlocks, rateBlocks, gatewayBlocks := int64(0), int64(0), int64(0)
 	timeoutFailures, transportErrors := int64(0), int64(0)
@@ -197,6 +204,10 @@ feed:
 		switch status {
 		case "completed":
 			tested++
+			r.markEndpointTested(targets[i])
+		case "blocked":
+			blocked++
+			skipped++ // Preserve the existing aggregate; expose the blocked subset.
 		case "error":
 			failed++
 		case "incomplete":
@@ -225,6 +236,7 @@ feed:
 		"scan_id": r.scanID, "module": module, "findings": len(findings), "targets_total": len(targets), "targets_eligible": eligible,
 		"targets_tested": tested, "targets_attempted": attempted, "targets_skipped": skipped, "targets_failed": failed,
 		"targets_budget_exhausted": exhausted, "targets_unprocessed": unprocessed,
+		"targets_blocked":     blocked,
 		"coverage_percentage": fmt.Sprintf("%.1f%%", coverage), "coverage_pct": coverage,
 		"requests_attempted": requests, "responses_received": responses, "usable_responses": usableResponses,
 		"auth_blocked_responses": authBlocks, "rate_limited_responses": rateBlocks, "gateway_blocked_responses": gatewayBlocks,
@@ -387,6 +399,8 @@ func (r *Runner) runSingleModule(ctx context.Context, module string, target Scan
 		return r.runTLSMisconfig(ctx, target)
 	case "vulnerable_components":
 		return r.runVulnerableComponents(ctx, target)
+	case "php2shell":
+		return r.runPHP2Shell(ctx, target)
 	case "sensitive_data":
 		return r.runSensitiveData(ctx, target)
 	case "secret_exposure":

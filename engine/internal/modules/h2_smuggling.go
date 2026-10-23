@@ -239,12 +239,13 @@ func (p *H2SmugglingProber) executeH2FrameExchange(ctx context.Context, conn net
 			Request:  httpclient.RequestRecord{Method: http.MethodPost, URL: u.String(), Body: fmt.Sprintf("H2 %s with canary %s", variant, token)},
 			Response: httpclient.ResponseRecord{StatusCode: statusCode, Body: exchangeLog.String()},
 		}
+		httpclient.StampExchange(&exchangeRecord)
 		return SmugglingProbeResult{
 			Confirmed: true,
 			Signal:    variant,
 			Reason:    fmt.Sprintf("HTTP/2 binary frame %s desync confirmed across H2->H1 backend proxy", strings.ToUpper(variant)),
 			Exchange:  exchangeRecord,
-			Attempts:  []httpclient.RequestResponse{exchangeRecord, exchangeRecord},
+			Attempts:  []httpclient.RequestResponse{exchangeRecord},
 		}, nil
 	}
 
@@ -299,12 +300,13 @@ func (p *H2SmugglingProber) ProbeH2CUpgrade(ctx context.Context, rawURL string) 
 			Request:  httpclient.RequestRecord{Method: http.MethodGet, URL: rawURL, Headers: map[string]string{"Upgrade": "h2c", "Connection": "Upgrade, HTTP2-Settings"}},
 			Response: httpclient.ResponseRecord{StatusCode: 101, Body: respHeader},
 		}
+		httpclient.StampExchange(&exchangeRecord)
 		return SmugglingProbeResult{
 			Confirmed: true,
 			Signal:    "h2c_upgrade_confusion",
 			Reason:    "Server accepted cleartext h2c upgrade on reverse proxy endpoint (101 Switching Protocols)",
 			Exchange:  exchangeRecord,
-			Attempts:  []httpclient.RequestResponse{exchangeRecord, exchangeRecord},
+			Attempts:  []httpclient.RequestResponse{exchangeRecord},
 		}, nil
 	}
 

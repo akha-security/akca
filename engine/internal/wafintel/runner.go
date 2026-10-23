@@ -26,7 +26,9 @@ type Runner struct {
 }
 
 type CalibrationOptions struct {
-	MaxStrategies int
+	MaxStrategies            int
+	DisablePayloadAdaptation bool
+	AllowProtocolMutations   bool
 }
 
 func NewRunner(scanID string, db *storage.DB, emit EventSink) *Runner {
@@ -43,6 +45,9 @@ func (r *Runner) Calibrate(ctx context.Context, targets []string) error {
 
 func (r *Runner) CalibrateWithOptions(ctx context.Context, targets []string, opts CalibrationOptions) error {
 	_ = r.emit("waf_evasion_started", "waf evasion intelligence started", map[string]interface{}{"scan_id": r.scanID})
+	if opts.DisablePayloadAdaptation {
+		return r.emit("waf_evasion_finished", "WAF payload adaptation disabled", map[string]interface{}{"scan_id": r.scanID, "disabled": true})
+	}
 	for _, target := range targets {
 		if ctx.Err() != nil {
 			break
@@ -87,6 +92,9 @@ func (r *Runner) CalibrateWithOptions(ctx context.Context, targets []string, opt
 				break
 			}
 			strategy := strategies[i]
+			if !opts.AllowProtocolMutations {
+				strategy.Protocol = nil
+			}
 			sample := `<script>alert(1)</script>`
 			mutated, headers := ApplyStrategy(sample, strategy)
 			testURL := probeURL
@@ -117,6 +125,9 @@ func (r *Runner) CalibrateWithOptions(ctx context.Context, targets []string, opt
 		}
 
 		strategy := SelectStrategy(waf.Vendor, learn)
+		if !opts.AllowProtocolMutations {
+			strategy.Protocol = nil
+		}
 		_, headers := ApplyStrategy(`<script>alert(1)</script>`, strategy)
 		result := map[string]interface{}{
 			"vendor": waf.Vendor, "strategy_id": strategy.ID, "headers": headers, "verified": r.client != nil,

@@ -9,6 +9,10 @@ type RequestTemplate struct {
 	Headers     map[string]string `json:"headers,omitempty"`
 	Body        string            `json:"body,omitempty"`
 	ContentType string            `json:"content_type,omitempty"`
+	// WireEncoding affects only the injected JSON string, never the semantic value.
+	WireEncoding string `json:"-"`
+	// AllowNewFields is used only by hidden-parameter discovery for multipart.
+	AllowNewFields bool `json:"-"`
 }
 
 // MutatedRequest is a fully materialized HTTP request ready for the transport.
@@ -46,6 +50,7 @@ type ReflectionProfile struct {
 	ScanID            string         `json:"scan_id"`
 	EndpointURL       string         `json:"endpoint_url"`
 	Method            string         `json:"method"`
+	NativeMethod      string         `json:"native_method,omitempty"`
 	Parameter         string         `json:"parameter"`
 	ParameterLocation string         `json:"parameter_location"`
 	CanaryID          string         `json:"canary_id"`

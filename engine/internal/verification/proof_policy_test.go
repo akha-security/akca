@@ -1,18 +1,24 @@
 package verification
 
 import (
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/akha-security/akca/engine/internal/oast"
 )
 
+var proofExchangeSequence atomic.Uint64
+
 func proofObservation(role ObservationRole, attempt int, body string) Observation {
-	return NewHTTPObservation(
+	item := NewHTTPObservation(
 		"scan-1", "sqli", "https://target.test/search", "q", "query", role, attempt, "",
 		"GET", "https://target.test/search?q=x", "", nil,
 		ResponseSnapshot{StatusCode: 200, Body: body, ContentType: "text/plain", DurationMs: 5},
 	)
+	item.RequestID = fmt.Sprintf("test-exchange-%d", proofExchangeSequence.Add(1))
+	return item
 }
 
 func TestProofPolicyRejectsSyntheticOrCopiedObservation(t *testing.T) {
@@ -67,6 +73,8 @@ func TestObservationFailClosed(t *testing.T) {
 }
 
 func TestRuntimeTraceProofRequiresTypedObservation(t *testing.T) {
+	baseline := proofObservation(RoleNativeBaseline, 1, "same")
+	baseline.Parameter = "X-Forwarded-For"
 	candidate := Candidate{
 		ScanID: "scan-1", Module: "sqli", VulnClass: "sqli", EndpointURL: "https://target.test/search",
 		Parameter: "X-Forwarded-For", Signal: "runtime_sql_sink", DirectTypedSignal: true,
@@ -75,7 +83,7 @@ func TestRuntimeTraceProofRequiresTypedObservation(t *testing.T) {
 		Probe:              ResponseSnapshot{StatusCode: 200, Body: "same"},
 		NegativeControlSet: true, NegativeControlOK: true,
 		Observations: []Observation{
-			proofObservation(RoleNativeBaseline, 1, "same"),
+			baseline,
 			NewRuntimeObservation("scan-1", "sqli", "https://target.test/search", "X-Forwarded-For",
 				"header", "req-1", "trace-1", "sql.query", 1, false),
 		},
@@ -137,11 +145,13 @@ func moduleProofObservation(module string, role ObservationRole, attempt int, bo
 	case RoleAnonymousControl:
 		identity = "anonymous"
 	}
-	return NewHTTPObservation(
+	item := NewHTTPObservation(
 		"scan-matrix", module, "https://target.test/test", "q", "query", role, attempt, identity,
 		"GET", "https://target.test/test?q=x", "", nil,
 		ResponseSnapshot{StatusCode: 200, Body: body, ContentType: "application/json", DurationMs: 5},
 	)
+	item.RequestID = fmt.Sprintf("test-exchange-%d", proofExchangeSequence.Add(1))
+	return item
 }
 
 func TestIdentityBoundaryRejectsReusedIdentity(t *testing.T) {
@@ -202,7 +212,7 @@ func TestPositiveProofFamilyMatrix(t *testing.T) {
 		{module: "mass_assignment", proofType: ProofStateMutation,
 			roles: []ObservationRole{RoleNativeBaseline, RoleStateBefore, RoleStateAfter, RoleNegativeControl}},
 		{module: "file_upload", proofType: ProofFileRetrieval,
-			roles: []ObservationRole{RoleNativeBaseline, RolePositiveProbe, RoleStateAfter, RoleNegativeControl}},
+			roles: []ObservationRole{RoleNativeBaseline, RolePositiveProbe, RoleStateBefore, RoleStateAfter, RoleNegativeControl}},
 		{module: "blind_xss", proofType: ProofOAST,
 			roles: []ObservationRole{RoleOASTCallback},
 			mutate: func(c *Candidate) {

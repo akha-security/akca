@@ -101,6 +101,9 @@ func TestAnalyzerUsesPOSTForFormReflection(t *testing.T) {
 	if profile.Method != http.MethodPost || profile.ReflectionKind != ReflectionRaw || !profile.Stable {
 		t.Fatalf("unexpected form reflection profile: %+v", profile)
 	}
+	if profile.NativeMethod != http.MethodGet {
+		t.Fatalf("native request identity lost: %+v", profile)
+	}
 	if !strings.EqualFold(profile.ParameterLocation, "form") {
 		t.Fatalf("profile location = %q, want form", profile.ParameterLocation)
 	}

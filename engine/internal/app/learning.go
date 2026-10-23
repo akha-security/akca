@@ -25,6 +25,8 @@ func (e *Engine) runLearningWAFPhase(ctx context.Context, targets []string, opts
 
 	runner := wafintel.NewRunner(e.session.ID, e.db, e.Emit)
 	runner.SetClient(wafHTTPAdapter{client: e.client})
+	opts.DisablePayloadAdaptation = !e.session.Config.WAFPayloadsEnabled()
+	opts.AllowProtocolMutations = e.session.Config.EnableWAFBypassHeaders && !e.session.Config.PassiveMode
 	if err := runner.CalibrateWithOptions(ctx, targets, opts); err != nil {
 		return err
 	}

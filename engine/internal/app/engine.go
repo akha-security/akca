@@ -200,6 +200,14 @@ func (e *Engine) startScan(cfg config.ScanConfig, completed map[string]bool) err
 	if err != nil {
 		return err
 	}
+	if cfg.OnlyPHP2Shell() {
+		for i, target := range normalized {
+			normalized[i], err = config.PHP2ShellEndpointURL(target)
+			if err != nil {
+				return err
+			}
+		}
+	}
 	cfg.Targets = normalized
 	if len(cfg.IncludeDomains) == 0 {
 		cfg.IncludeDomains = deriveIncludeDomains(cfg.Targets)
@@ -494,6 +502,8 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 		"scan_intensity":               cfg.ScanIntensity,
 		"scan_profile":                 cfg.SmartScanProfile,
 		"passive_mode":                 cfg.PassiveMode,
+		"waf_payload_mode":             string(cfg.EffectiveWAFPayloadMode()),
+		"waf_bypass_headers":           cfg.EnableWAFBypassHeaders,
 		"memory_limit_mb":              cfg.MaxMemoryMB,
 		"memory_limit_source":          cfg.MemoryLimitSource,
 		"detected_available_memory_mb": cfg.DetectedAvailableMemoryMB,
@@ -510,237 +520,252 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 	_ = e.Emit("phase_started", "phase bootstrap", map[string]interface{}{"phase": "bootstrap"})
 	_ = e.Emit("phase_finished", "phase bootstrap", map[string]interface{}{"phase": "bootstrap"})
 
-	targets := cfg.Targets
-	if !done("preflight") {
-		if err := e.runPreflightValidation(ctx, cfg); err != nil {
-			if ctx.Err() != nil {
+	if cfg.OnlyPHP2Shell() {
+		// A dedicated check runs on explicit URLs, without discovery or its
+		// preflight/fingerprint requests. Keep reporting and scan finalization.
+		for _, phase := range []string{
+			"preflight", "fingerprint", "learning_waf", "api_import", "crawling",
+			"sensor_discovery", "js_analysis", "shadow_api", "parameter_discovery",
+			"fuzzing", "bypass403", "reflection",
+		} {
+			if !done(phase) {
+				markSkipped(phase)
+			}
+		}
+	} else {
+		targets := cfg.Targets
+		if !done("preflight") {
+			if err := e.runPreflightValidation(ctx, cfg); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				fatalPipelineErr = err
+				markFailed("preflight")
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "preflight"})
+				e.session.Stop()
 				return
 			}
-			fatalPipelineErr = err
-			markFailed("preflight")
-			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "preflight"})
-			e.session.Stop()
-			return
+			markSuccess("preflight")
 		}
-		markSuccess("preflight")
-	}
 
-	// ── Phase 1: Technology + WAF fingerprinting ──────────────────────────
-	if !done("fingerprint") {
-		hasError := false
-		for _, target := range targets {
-			if stopped() {
-				return
+		// ── Phase 1: Technology + WAF fingerprinting ──────────────────────────
+		if !done("fingerprint") {
+			hasError := false
+			for _, target := range targets {
+				if stopped() {
+					return
+				}
+				if err := e.runFingerprintPhase(ctx, target); err != nil {
+					_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"target": target, "phase": "fingerprinting"})
+					hasError = true
+				}
 			}
-			if err := e.runFingerprintPhase(ctx, target); err != nil {
-				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"target": target, "phase": "fingerprinting"})
-				hasError = true
-			}
-		}
-		if hasError {
-			markFailed("fingerprint")
-		} else {
-			markSuccess("fingerprint")
-		}
-	}
-	if stopped() {
-		return
-	}
-
-	// ── Phase 2: WAF learning / calibration ────────────────────────────────
-	if !done("learning_waf") {
-		if cfg.EnableWAFDetection {
-			timeout := 90 * time.Second
-			opts := wafintel.CalibrationOptions{MaxStrategies: 3}
-			if cfg.ScanIntensity == "fast" {
-				timeout = 12 * time.Second
-				opts.MaxStrategies = 1
-			}
-			learnCtx, cancel := context.WithTimeout(ctx, timeout)
-			if err := e.runLearningWAFPhase(learnCtx, targets, opts); err != nil {
-				_ = e.Emit("log", "waf learning skipped: "+err.Error(), map[string]interface{}{"scan_id": cfg.ScanID})
-				markFailed("learning_waf")
+			if hasError {
+				markFailed("fingerprint")
 			} else {
-				markSuccess("learning_waf")
+				markSuccess("fingerprint")
 			}
-			cancel()
-		} else {
-			_ = e.Emit("phase_started", "learning_waf", map[string]interface{}{"phase": "learning_waf", "skipped": true})
-			_ = e.Emit("log", "WAF learning skipped; fingerprint profile used", map[string]interface{}{"scan_id": cfg.ScanID})
-			_ = e.Emit("phase_finished", "learning_waf", map[string]interface{}{"phase": "learning_waf", "skipped": true})
-			markSkipped("learning_waf")
 		}
-	}
-	if stopped() {
-		return
-	}
-
-	crawlerTargets := uniqueURLSeeds(targets)
-
-	// API definitions are imported before crawling so their typed request
-	// templates participate in parameter discovery and module scheduling.
-	if !done("api_import") && len(cfg.APIImportFiles) > 0 {
-		if err := e.runAPIImportPhase(ctx, cfg.APIImportFiles, targets[0]); err != nil {
-			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "api_import"})
-			markFailed("api_import")
-		} else {
-			markSuccess("api_import")
-		}
-	} else if !done("api_import") {
-		markSkipped("api_import")
-	}
-	if stopped() {
-		return
-	}
-
-	// ── Phase 3: Deep crawl (authenticated) ─────────────────────────────────
-	if loginSessionGuardEnabled(cfg) {
-		if err := e.ensureAuthenticatedSession(ctx); err != nil {
-			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "session_guard_crawl"})
-			markFailed("session_guard_crawl")
-			e.session.Stop()
+		if stopped() {
 			return
 		}
-		markSuccess("session_guard_crawl")
-	}
-	if !done("crawling") {
-		_ = e.Emit("scan_progress", "crawling in-scope targets", map[string]interface{}{
-			"scan_id": cfg.ScanID, "phase": "crawling", "targets": len(crawlerTargets),
-		})
-		if err := e.runCrawlerPhase(ctx, crawlerTargets); err != nil {
-			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "crawling"})
-			markFailed("crawling")
-		} else {
-			markSuccess("crawling")
-		}
-	}
-	if stopped() {
-		return
-	}
 
-	// Runtime sensor agent discovery.
-	// The collector starts automatically, but correlation headers are enabled
-	// only when the target identifies an installed Akca application agent.
-	if !done("sensor_discovery") && cfg.EnableRuntimeSensor && e.platform != nil && e.platform.sensor != nil {
-		if err := e.runRuntimeSensorDiscovery(ctx, crawlerTargets); err != nil {
-			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "sensor_discovery"})
-			markFailed("sensor_discovery")
-		} else {
-			markSuccess("sensor_discovery")
+		// ── Phase 2: WAF learning / calibration ────────────────────────────────
+		if !done("learning_waf") {
+			if cfg.EnableWAFDetection {
+				timeout := 90 * time.Second
+				opts := wafintel.CalibrationOptions{MaxStrategies: 3}
+				if cfg.ScanIntensity == "fast" {
+					timeout = 12 * time.Second
+					opts.MaxStrategies = 1
+				}
+				learnCtx, cancel := context.WithTimeout(ctx, timeout)
+				if err := e.runLearningWAFPhase(learnCtx, targets, opts); err != nil {
+					_ = e.Emit("log", "waf learning skipped: "+err.Error(), map[string]interface{}{"scan_id": cfg.ScanID})
+					markFailed("learning_waf")
+				} else {
+					markSuccess("learning_waf")
+				}
+				cancel()
+			} else {
+				_ = e.Emit("phase_started", "learning_waf", map[string]interface{}{"phase": "learning_waf", "skipped": true})
+				_ = e.Emit("log", "WAF learning skipped; fingerprint profile used", map[string]interface{}{"scan_id": cfg.ScanID})
+				_ = e.Emit("phase_finished", "learning_waf", map[string]interface{}{"phase": "learning_waf", "skipped": true})
+				markSkipped("learning_waf")
+			}
 		}
-	} else if !done("sensor_discovery") {
-		markSkipped("sensor_discovery")
-	}
-	if stopped() {
-		return
-	}
+		if stopped() {
+			return
+		}
 
-	// ── Phase 5: JavaScript analysis (hidden APIs / endpoints in JS) ────────
-	if !done("js_analysis") && cfg.EnableJSAnalysis {
-		var err1, err2 error
-		if err1 = e.runJSAnalysisPhase(ctx); err1 != nil {
-			_ = e.Emit("scan_error", err1.Error(), map[string]interface{}{"phase": "js_analysis"})
-		}
-		if err2 = e.runJSDiscoveredCrawlPhase(ctx); err2 != nil {
-			_ = e.Emit("scan_error", err2.Error(), map[string]interface{}{"phase": "js_api_crawl"})
-		}
-		if err1 != nil || err2 != nil {
-			markFailed("js_analysis")
-		} else {
-			markSuccess("js_analysis")
-		}
-	} else if !done("js_analysis") {
-		markSkipped("js_analysis")
-	}
-	if stopped() {
-		return
-	}
+		crawlerTargets := uniqueURLSeeds(targets)
 
-	// Contract/runtime comparison is an API inventory signal; it deliberately
-	// does not create a vulnerability finding without an exploit proof.
-	if !done("shadow_api") && len(cfg.APIImportFiles) > 0 {
-		if err := e.runShadowAPIPhase(ctx, cfg.ScanID); err != nil {
-			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "shadow_api"})
-			markFailed("shadow_api")
-		} else {
-			markSuccess("shadow_api")
+		// API definitions are imported before crawling so their typed request
+		// templates participate in parameter discovery and module scheduling.
+		if !done("api_import") && len(cfg.APIImportFiles) > 0 {
+			if err := e.runAPIImportPhase(ctx, cfg.APIImportFiles, targets[0]); err != nil {
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "api_import"})
+				markFailed("api_import")
+			} else {
+				markSuccess("api_import")
+			}
+		} else if !done("api_import") {
+			markSkipped("api_import")
 		}
-	} else if !done("shadow_api") {
-		markSkipped("shadow_api")
-	}
-	if stopped() {
-		return
-	}
+		if stopped() {
+			return
+		}
 
-	// ── Phase 6: Parameter + hidden parameter discovery ─────────────────────
-	if !done("parameter_discovery") && !cfg.PassiveMode {
-		if err := e.runParameterDiscoveryPhase(ctx); err != nil {
-			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "parameter_discovery"})
-			markFailed("parameter_discovery")
-		} else {
-			markSuccess("parameter_discovery")
+		// ── Phase 3: Deep crawl (authenticated) ─────────────────────────────────
+		if loginSessionGuardEnabled(cfg) {
+			if err := e.ensureAuthenticatedSession(ctx); err != nil {
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "session_guard_crawl"})
+				markFailed("session_guard_crawl")
+				e.session.Stop()
+				return
+			}
+			markSuccess("session_guard_crawl")
 		}
-	} else if !done("parameter_discovery") {
-		_ = e.Emit("phase_started", "parameter discovery", map[string]interface{}{"phase": "parameter_discovery", "skipped": true, "reason": "passive_mode"})
-		_ = e.Emit("phase_finished", "parameter discovery", map[string]interface{}{"phase": "parameter_discovery", "skipped": true})
-		markSkipped("parameter_discovery")
-	}
-	if stopped() {
-		return
-	}
+		if !done("crawling") {
+			_ = e.Emit("scan_progress", "crawling in-scope targets", map[string]interface{}{
+				"scan_id": cfg.ScanID, "phase": "crawling", "targets": len(crawlerTargets),
+			})
+			if err := e.runCrawlerPhase(ctx, crawlerTargets); err != nil {
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "crawling"})
+				markFailed("crawling")
+			} else {
+				markSuccess("crawling")
+			}
+		}
+		if stopped() {
+			return
+		}
 
-	// ── Phase 7: Fuzzing (exposed paths, actuator, archives) ────────────────
-	if !done("fuzzing") && cfg.EnableFuzzing {
-		if err := e.runFuzzingPhase(ctx, crawlerTargets); err != nil {
-			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "fuzzing"})
-			markFailed("fuzzing")
-		} else {
-			markSuccess("fuzzing")
+		// Runtime sensor agent discovery.
+		// The collector starts automatically, but correlation headers are enabled
+		// only when the target identifies an installed Akca application agent.
+		if !done("sensor_discovery") && cfg.EnableRuntimeSensor && e.platform != nil && e.platform.sensor != nil {
+			if err := e.runRuntimeSensorDiscovery(ctx, crawlerTargets); err != nil {
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "sensor_discovery"})
+				markFailed("sensor_discovery")
+			} else {
+				markSuccess("sensor_discovery")
+			}
+		} else if !done("sensor_discovery") {
+			markSkipped("sensor_discovery")
 		}
-	} else if !done("fuzzing") {
-		_ = e.Emit("phase_started", "fuzzing", map[string]interface{}{"phase": "fuzzing", "skipped": true})
-		_ = e.Emit("log", "fuzzing phase disabled by config", map[string]interface{}{"scan_id": cfg.ScanID})
-		_ = e.Emit("phase_finished", "fuzzing", map[string]interface{}{"phase": "fuzzing", "skipped": true})
-		markSkipped("fuzzing")
-	}
-	if stopped() {
-		return
-	}
+		if stopped() {
+			return
+		}
 
-	// ── Phase 8: 403 bypass attempts ────────────────────────────────────────
-	if !done("bypass403") && cfg.Enable403BypassChecks {
-		e.ingestAuthBlockedFromCrawl(cfg.ScanID)
-		if e.queue403 == nil {
-			e.hydrateQueue403FromDB(cfg.ScanID)
+		// ── Phase 5: JavaScript analysis (hidden APIs / endpoints in JS) ────────
+		if !done("js_analysis") && cfg.EnableJSAnalysis {
+			var err1, err2 error
+			if err1 = e.runJSAnalysisPhase(ctx); err1 != nil {
+				_ = e.Emit("scan_error", err1.Error(), map[string]interface{}{"phase": "js_analysis"})
+			}
+			if err2 = e.runJSDiscoveredCrawlPhase(ctx); err2 != nil {
+				_ = e.Emit("scan_error", err2.Error(), map[string]interface{}{"phase": "js_api_crawl"})
+			}
+			if err1 != nil || err2 != nil {
+				markFailed("js_analysis")
+			} else {
+				markSuccess("js_analysis")
+			}
+		} else if !done("js_analysis") {
+			markSkipped("js_analysis")
 		}
-		if err := e.runBypass403Phase(ctx); err != nil {
-			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "bypass403"})
-			markFailed("bypass403")
-		} else {
-			markSuccess("bypass403")
+		if stopped() {
+			return
 		}
-	} else if !done("bypass403") {
-		markSkipped("bypass403")
-	}
-	if stopped() {
-		return
-	}
 
-	// ── Phase 9: Reflection analysis + context-aware payload generation ─────
-	if !done("reflection") && !cfg.PassiveMode {
-		if err := e.runReflectionPayloadPhase(ctx); err != nil {
-			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "reflection"})
-			markFailed("reflection")
-		} else {
-			markSuccess("reflection")
+		// Contract/runtime comparison is an API inventory signal; it deliberately
+		// does not create a vulnerability finding without an exploit proof.
+		if !done("shadow_api") && len(cfg.APIImportFiles) > 0 {
+			if err := e.runShadowAPIPhase(ctx, cfg.ScanID); err != nil {
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "shadow_api"})
+				markFailed("shadow_api")
+			} else {
+				markSuccess("shadow_api")
+			}
+		} else if !done("shadow_api") {
+			markSkipped("shadow_api")
 		}
-	} else if !done("reflection") {
-		_ = e.Emit("phase_started", "reflection and payload generation", map[string]interface{}{"phase": "reflection", "skipped": true, "reason": "passive_mode"})
-		_ = e.Emit("phase_finished", "reflection and payload generation", map[string]interface{}{"phase": "reflection", "skipped": true})
-		markSkipped("reflection")
-	}
-	if stopped() {
-		return
+		if stopped() {
+			return
+		}
+
+		// ── Phase 6: Parameter + hidden parameter discovery ─────────────────────
+		if !done("parameter_discovery") && !cfg.DiscoveryMetadataOnly() {
+			if err := e.runParameterDiscoveryPhase(ctx); err != nil {
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "parameter_discovery"})
+				markFailed("parameter_discovery")
+			} else {
+				markSuccess("parameter_discovery")
+			}
+		} else if !done("parameter_discovery") {
+			_ = e.Emit("phase_started", "parameter discovery", map[string]interface{}{"phase": "parameter_discovery", "skipped": true, "reason": "passive_mode"})
+			_ = e.Emit("phase_finished", "parameter discovery", map[string]interface{}{"phase": "parameter_discovery", "skipped": true})
+			markSkipped("parameter_discovery")
+		}
+		if stopped() {
+			return
+		}
+
+		// ── Phase 7: Fuzzing (exposed paths, actuator, archives) ────────────────
+		if !done("fuzzing") && cfg.EnableFuzzing {
+			if err := e.runFuzzingPhase(ctx, crawlerTargets); err != nil {
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "fuzzing"})
+				markFailed("fuzzing")
+			} else {
+				markSuccess("fuzzing")
+			}
+		} else if !done("fuzzing") {
+			_ = e.Emit("phase_started", "fuzzing", map[string]interface{}{"phase": "fuzzing", "skipped": true})
+			_ = e.Emit("log", "fuzzing phase disabled by config", map[string]interface{}{"scan_id": cfg.ScanID})
+			_ = e.Emit("phase_finished", "fuzzing", map[string]interface{}{"phase": "fuzzing", "skipped": true})
+			markSkipped("fuzzing")
+		}
+		if stopped() {
+			return
+		}
+
+		// ── Phase 8: 403 bypass attempts ────────────────────────────────────────
+		if !done("bypass403") && cfg.Enable403BypassChecks {
+			e.ingestAuthBlockedFromCrawl(cfg.ScanID)
+			if e.queue403 == nil {
+				e.hydrateQueue403FromDB(cfg.ScanID)
+			}
+			if err := e.runBypass403Phase(ctx); err != nil {
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "bypass403"})
+				markFailed("bypass403")
+			} else {
+				markSuccess("bypass403")
+			}
+		} else if !done("bypass403") {
+			markSkipped("bypass403")
+		}
+		if stopped() {
+			return
+		}
+
+		// ── Phase 9: Reflection analysis + context-aware payload generation ─────
+		if !done("reflection") && !cfg.DiscoveryMetadataOnly() {
+			if err := e.runReflectionPayloadPhase(ctx); err != nil {
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "reflection"})
+				markFailed("reflection")
+			} else if ctx.Err() == nil {
+				markSuccess("reflection")
+			}
+		} else if !done("reflection") {
+			_ = e.Emit("phase_started", "reflection and payload generation", map[string]interface{}{"phase": "reflection", "skipped": true, "reason": "passive_mode"})
+			_ = e.Emit("phase_finished", "reflection and payload generation", map[string]interface{}{"phase": "reflection", "skipped": true})
+			markSkipped("reflection")
+		}
+		if stopped() {
+			return
+		}
+
 	}
 
 	// ── Phase 10: Vulnerability modules (SQLi, XSS, SSRF, etc.) ───────────────
@@ -768,9 +793,11 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 	}
 
 	// ── Phase 11: OAST callback drain (blind SSRF/XSS/SQLi confirmation) ────
-	if !done("oast_drain") {
+	if !done("oast_drain") && !cfg.OnlyPHP2Shell() {
 		e.runOASTDrainPhase(ctx, cfg.ScanID)
 		markSuccess("oast_drain")
+	} else if !done("oast_drain") {
+		markSkipped("oast_drain")
 	}
 	if stopped() {
 		return
@@ -1211,48 +1238,13 @@ func (e *Engine) runMetricsLoop(ctx context.Context, scanID string) {
 			_ = e.db.Conn().QueryRow("SELECT COUNT(*) FROM endpoints WHERE scan_id = ?", scanID).Scan(&discovered)
 
 			var tested int
-			if sess != nil {
-				snap := sess.Snapshot()
-				tested = snap.Metrics["endpoints_tested"]
-			}
-
-			// Estimate tested based on active phase if we don't have exact metrics
-			if sess != nil {
-				snap := sess.Snapshot()
-				phase := snap.Phase
-
-				var progressBase int
-				switch phase {
-				case "bootstrap", "fingerprint":
-					progressBase = 5
-				case "crawling", "sensor_discovery", "js_api_crawl", "js_analysis", "shadow_api":
-					progressBase = 20
-				case "fuzzing", "parameter_discovery", "bypass403", "learning_waf":
-					progressBase = 50
-				case "vuln_modules", "vuln_modules_a", "vuln_modules_b", "vuln_modules_c", "vuln_modules_d", "reflection":
-					progressBase = 75
-				case "report_generation", "oast_drain":
-					progressBase = 95
-				default:
-					if strings.HasPrefix(phase, "vuln_module_") {
-						progressBase = 75
-					} else {
-						progressBase = 0
-					}
-				}
-
-				if progressBase > 0 {
-					estimatedTested := (discovered * progressBase) / 100
-					if estimatedTested > tested {
-						tested = estimatedTested
-					}
-				}
-			}
-
-			if tested > discovered {
-				tested = discovered
+			if moduleRunner != nil {
+				tested = moduleRunner.TestedEndpointCount()
 			}
 			remaining := discovered - tested
+			if remaining < 0 {
+				remaining = 0
+			}
 			if qSize > remaining {
 				remaining = qSize
 			}

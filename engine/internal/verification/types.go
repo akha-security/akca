@@ -118,6 +118,7 @@ type Candidate struct {
 	EndpointURL          string                        `json:"endpoint_url"`
 	Method               string                        `json:"method"`
 	Parameter            string                        `json:"parameter"`
+	Location             string                        `json:"location,omitempty"`
 	Payload              string                        `json:"payload"`
 	Module               string                        `json:"module"`
 	Signal               string                        `json:"signal,omitempty"`

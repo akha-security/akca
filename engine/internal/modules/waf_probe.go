@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/models"
+
 	"github.com/akha-security/akca/engine/internal/payloadgen"
 	"github.com/akha-security/akca/engine/internal/wafintel"
 )
@@ -12,7 +15,7 @@ func (r *Runner) wafHeadersForModule(module, endpointURL string) map[string]stri
 	if !moduleAllowsHeaderPayloads(module) {
 		return nil
 	}
-	if r.db == nil || !r.cfg.EnableWAFBypassHeaders {
+	if r.db == nil || r.cfg.PassiveMode || !r.cfg.EnableWAFBypassHeaders {
 		return nil
 	}
 	host := wafintel.HostFromTarget(endpointURL)
@@ -46,17 +49,7 @@ func moduleAllowsHeaderPayloads(module string) bool {
 }
 
 func mergeHeaders(base, extra map[string]string) map[string]string {
-	if len(extra) == 0 {
-		return base
-	}
-	out := make(map[string]string, len(base)+len(extra))
-	for k, v := range base {
-		out[k] = v
-	}
-	for k, v := range extra {
-		out[k] = v
-	}
-	return out
+	return httpclient.MergeHeaders(base, extra)
 }
 
 func (r *Runner) modulePayloads(target ScanTarget, vulnClass, oastURL string) []payloadgen.Payload {
@@ -80,33 +73,28 @@ func (r *Runner) modulePayloads(target ScanTarget, vulnClass, oastURL string) []
 func (r *Runner) generatedModulePayloads(target ScanTarget, vulnClass, oastURL string) []payloadgen.Payload {
 	hints := r.wafHintsForTarget(target)
 	hints.AllowEvasion = hints.AllowEvasion && moduleAllowsHeaderPayloads(vulnClass)
-	return dedupePayloads(payloadgen.GenerateGroupB(vulnClass, oastURL, hints))
+	profile := target.Profile
+	if target.Location != "" {
+		profile.ParameterLocation = target.Location
+	}
+	return dedupePayloads(payloadgen.GenerateGroupBForProfile(vulnClass, oastURL, hints, profile))
 }
 
 func (r *Runner) wafHintsForTarget(target ScanTarget) payloadgen.WAFHints {
-	hints := payloadgen.WAFHints{AllowEvasion: r.cfg.EnableWAFBypassHeaders}
+	var profile models.WAFProfile
+	learn := wafintel.NewLearningProfile(wafintel.HostFromTarget(target.EndpointURL))
 	if r.db != nil {
 		host := wafintel.HostFromTarget(target.EndpointURL)
 		if waf, err := r.db.GetWAFProfile(r.scanID, host); err == nil {
-			hints.Vendor = waf.Vendor
-			hints.CautiousModeRecommended = waf.CautiousModeRecommended
+			profile = waf
 		}
 		if raw, err := r.db.LoadWAFLearningProfile(host); err == nil {
-			learn := wafintel.NewLearningProfile(host)
-			if json.Unmarshal([]byte(raw), &learn) == nil {
-				hints.PreferredTechniques = wafintel.PreferredTechniques(learn)
-				hints.BlockedChars = learn.BlockedChars
-				hints.AllowedChars = learn.AllowedChars
-				hints.QueryURLDecodeDepth = learn.Decoder.QueryURLDecodeDepth
-				hints.QueryURLDecodeObserved = learn.Decoder.QueryURLDecodeObserved
-				hints.QueryURLDecodeConflict = learn.Decoder.QueryURLDecodeConflict
-				hints.QueryPlusAsSpace = learn.Decoder.QueryPlusAsSpace
-				hints.QueryPlusObserved = learn.Decoder.QueryPlusObserved
-				hints.QueryPlusConflict = learn.Decoder.QueryPlusConflict
+			if json.Unmarshal([]byte(raw), &learn) != nil {
+				learn = wafintel.NewLearningProfile(host)
 			}
 		}
 	}
-	return hints
+	return payloadgen.WAFHintsForProfile(r.cfg, profile, learn)
 }
 
 func (r *Runner) runtimeSQLiWAFVariantSets(target ScanTarget, values []string) []payloadgen.WAFVariantSet {

@@ -163,6 +163,8 @@ type Runner struct {
 	tlsReported       map[string]struct{}
 	moduleSeenMu      sync.Mutex
 	moduleSeen        map[string]struct{}
+	testedEndpointMu  sync.Mutex
+	testedEndpoints   map[string]struct{}
 	backupOriginMu    sync.Mutex
 	backupOriginLocks map[string]*sync.Mutex
 	findingMu         sync.Mutex
@@ -192,6 +194,30 @@ func (r *Runner) ProbeCount() int64 {
 		return 0
 	}
 	return r.probeCount.Load()
+}
+
+// TestedEndpointCount counts distinct method/URL pairs with at least one
+// completed module target, not phase progress estimates or blocked attempts.
+func (r *Runner) TestedEndpointCount() int {
+	if r == nil {
+		return 0
+	}
+	r.testedEndpointMu.Lock()
+	defer r.testedEndpointMu.Unlock()
+	return len(r.testedEndpoints)
+}
+
+func (r *Runner) markEndpointTested(target ScanTarget) {
+	r.testedEndpointMu.Lock()
+	defer r.testedEndpointMu.Unlock()
+	if r.testedEndpoints == nil {
+		r.testedEndpoints = make(map[string]struct{})
+	}
+	method := strings.ToUpper(target.Method)
+	if method == "" {
+		method = "GET"
+	}
+	r.testedEndpoints[method+" "+target.EndpointURL] = struct{}{}
 }
 
 // Close releases optional long-lived module resources.

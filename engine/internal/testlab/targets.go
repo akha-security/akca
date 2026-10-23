@@ -38,8 +38,7 @@ func (p *pipeline) labModuleTargets(runner *modules.Runner) []modules.ScanTarget
 			return
 		}
 		seen[key] = struct{}{}
-		paramKey := t.EndpointURL + "::" + t.Parameter
-		if raw, _ := p.db.LoadPayloadGenerationJSON(paramKey); raw != "" {
+		if raw, _ := p.db.LoadGeneratedPayloadsJSON(p.scanID, t.Method, t.EndpointURL, t.Parameter, t.Location); raw != "" {
 			var gen payloadgen.GenerationResult
 			if json.Unmarshal([]byte(raw), &gen) == nil {
 				t.Payloads = gen

@@ -61,6 +61,12 @@ var AvailableModes = []ScanModeInfo{
 		},
 	},
 	{
+		Name:        "php2shell",
+		Description: "PHP2Shell passive assessment plus authorized active crash-signal probes",
+		Modules:     []string{"php2shell"},
+		IsPassive:   true,
+	},
+	{
 		Name:        "ssrf",
 		Aliases:     []string{"oast", "callback"},
 		Description: "Server-Side Request Forgery (SSRF), XXE, Blind Out-Of-Band callback testing",
@@ -173,6 +179,9 @@ func ApplyScanModes(cfg *ScanConfig, modeStr string) error {
 	}
 	cfg.AllowedVulnerabilityClasses = allowed
 	cfg.PassiveMode = isPassive
+	if cfg.OnlyPHP2Shell() && cfg.PHP2ShellActive {
+		cfg.PassiveMode = false
+	}
 	if len(names) > 0 {
 		cfg.SmartScanProfile = strings.Join(names, "+")
 	} else {
@@ -201,6 +210,8 @@ func ApplyScanModes(cfg *ScanConfig, modeStr string) error {
 		cfg.Explicit.Enable403BypassChecks = true
 	}
 	if isPassive {
+		cfg.WAFPayloadMode = WAFPayloadOff
+		cfg.EnableWAFBypassHeaders = false
 		cfg.EnableFuzzing = false
 		cfg.EnableOAST = false
 		cfg.EnableWAFDetection = false
@@ -217,5 +228,6 @@ func ApplyScanModes(cfg *ScanConfig, modeStr string) error {
 		cfg.Explicit.EnableRaceConditionTesting = true
 		cfg.Explicit.EnableSecondOrderTracking = true
 	}
+	restrictPHP2ShellDiscovery(cfg)
 	return nil
 }

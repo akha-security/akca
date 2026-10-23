@@ -87,6 +87,7 @@ func (r *Runner) LoadTargetsWithEndpointsFromDB(limit int) ([]ScanTarget, error)
 		rr       *httpclient.RequestResponse
 		complete bool
 	})
+	nativeTemplates := make(map[string]reflection.RequestTemplate, len(endpoints))
 	for _, endpoint := range endpoints {
 		if !r.scope.IsInScope(endpoint.URL) {
 			continue
@@ -94,6 +95,10 @@ func (r *Runner) LoadTargetsWithEndpointsFromDB(limit int) ([]ScanTarget, error)
 		method := strings.ToUpper(strings.TrimSpace(endpoint.Method))
 		if method == "" {
 			method = http.MethodGet
+		}
+		nativeTemplates[targetSurfaceKey(endpoint.URL, method)] = reflection.RequestTemplate{
+			Method: method, URL: endpoint.URL, Headers: endpoint.RequestTemplate.Headers,
+			Body: endpoint.RequestTemplate.Body, ContentType: endpoint.RequestTemplate.ContentType,
 		}
 		if endpoint.RequestTemplate.ResponseStatus > 0 {
 			rr := &httpclient.RequestResponse{
@@ -208,6 +213,25 @@ func (r *Runner) LoadTargetsWithEndpointsFromDB(limit int) ([]ScanTarget, error)
 		}
 	}
 	for i := range targets {
+		if native, ok := nativeTemplates[targetSurfaceKey(targets[i].EndpointURL, targets[i].Method)]; ok {
+			current := &targets[i].RequestTemplate
+			if current.Method == "" {
+				current.Method = native.Method
+			}
+			if current.URL == "" {
+				current.URL = native.URL
+			}
+			if current.Body == "" {
+				current.Body = native.Body
+			}
+			if current.ContentType == "" {
+				current.ContentType = native.ContentType
+			}
+			current.Headers = mergeHeaders(native.Headers, current.Headers)
+			if targets[i].BodyTemplate == "" {
+				targets[i].BodyTemplate = current.Body
+			}
+		}
 		if observed, ok := observedResponses[targetSurfaceKey(targets[i].EndpointURL, targets[i].Method)]; ok {
 			targets[i].ObservedResponse = observed.rr
 			targets[i].ObservedComplete = observed.complete
@@ -457,12 +481,16 @@ func (r *Runner) loadParameterTargets(limit int) ([]ScanTarget, error) {
 	for _, raw := range profiles {
 		var p reflection.ReflectionProfile
 		if json.Unmarshal([]byte(raw), &p) == nil {
-			key := makeProfileKey(p.Method, p.EndpointURL, p.Parameter, p.ParameterLocation)
+			method := p.NativeMethod
+			if method == "" {
+				method = p.Method
+			}
+			key := makeProfileKey(method, p.EndpointURL, p.Parameter, p.ParameterLocation)
 			if _, exists := profileByKey[key]; !exists {
 				profileByKey[key] = p
 			}
 			fallbackKey := p.EndpointURL + "::" + p.Parameter
-			if _, exists := profileByKey[fallbackKey]; !exists {
+			if _, exists := profileByKey[fallbackKey]; !exists && method == "" && p.ParameterLocation == "" {
 				profileByKey[fallbackKey] = p
 			}
 		}
@@ -484,9 +512,12 @@ func (r *Runner) loadParameterTargets(limit int) ([]ScanTarget, error) {
 		if profile.ContentType == "" && param.ContentType != "" {
 			profile.ContentType = param.ContentType
 		}
-		genRaw, _ := r.db.LoadPayloadGenerationJSON(param.EndpointURL + "::" + param.Parameter)
+		genRaw, _ := r.db.LoadGeneratedPayloadsJSON(r.scanID, param.Method, param.EndpointURL, param.Parameter, param.Location)
 		var gen payloadgen.GenerationResult
 		_ = json.Unmarshal([]byte(genRaw), &gen)
+		if !r.cfg.WAFPayloadsEnabled() {
+			gen = payloadgen.WithoutWAFAdaptation(gen)
+		}
 		targets = append(targets, ScanTarget{
 			EndpointURL: param.EndpointURL, Method: param.Method,
 			Parameter: param.Parameter, Location: param.Location,
@@ -666,8 +697,9 @@ func pathParamsFromURL(rawURL string) []string {
 			return []string{"path_segment"}
 		}
 	}
-	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+	segs := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")
 	for index, seg := range segs {
+		seg, _ = url.PathUnescape(seg)
 		seg = strings.TrimSpace(seg)
 		if len(seg) == 0 {
 			continue

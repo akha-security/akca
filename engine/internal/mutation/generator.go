@@ -506,7 +506,9 @@ func generateJWT(value string, opts *GenerateOptions) []Mutation {
 			payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
 			if err == nil {
 				var pMap map[string]interface{}
-				if json.Unmarshal(payloadBytes, &pMap) == nil {
+				decoder := json.NewDecoder(strings.NewReader(string(payloadBytes)))
+				decoder.UseNumber()
+				if decoder.Decode(&pMap) == nil && pMap != nil && json.Valid(payloadBytes) {
 					pMap["role"] = "admin"
 					pMap["admin"] = true
 					pMap["is_admin"] = true

@@ -29,6 +29,7 @@ var humanTitles = map[string]string{
 	"prototype_pollution": "Prototype Pollution",
 	"second_order":        "Second-Order Injection",
 	"nosql_injection":     "NoSQL Injection",
+	"php2shell":           "PHP2Shell Exposure",
 }
 
 // HumanTitle returns a user-facing vulnerability name (e.g. "SQL Injection").

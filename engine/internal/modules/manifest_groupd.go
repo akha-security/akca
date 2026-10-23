@@ -3,6 +3,7 @@ package modules
 import "github.com/akha-security/akca/engine/internal/models"
 
 var GroupDRegistry = []ModuleDescriptor{
+	{Manifest: models.PluginManifest{Name: "php2shell", Description: "Non-invasive PHP2Shell version/exposure assessment; no RCE verification", Version: "0.1.0"}, Precondition: alwaysReady},
 	{Manifest: models.PluginManifest{Name: "security_headers", Description: "Missing or weak security headers", Version: "0.1.0"}, Precondition: alwaysReady},
 	{Manifest: models.PluginManifest{Name: "cookie_security", Description: "Session and cookie security misconfigurations (Secure, HttpOnly, SameSite, __Host-)", Version: "0.1.0"}, Precondition: alwaysReady},
 	{Manifest: models.PluginManifest{Name: "tls_misconfig", Description: "TLS protocol and cipher misconfiguration", Version: "0.1.0"}, Precondition: alwaysReady},

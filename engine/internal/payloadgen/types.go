@@ -61,6 +61,7 @@ type Payload struct {
 	EstimatedRequests    int            `json:"estimated_requests,omitempty"`
 	Mutations            []MutationSpec `json:"mutations,omitempty"`
 	TransportEncoding    string         `json:"transport_encoding,omitempty"`
+	WireEncoding         string         `json:"wire_encoding,omitempty"`
 }
 
 type SkipFamily struct {
@@ -97,6 +98,9 @@ type ShadowComparison struct {
 }
 
 type GenerationResult struct {
+	ScanID            string           `json:"scan_id"`
+	Method            string           `json:"method"`
+	ParameterLocation string           `json:"parameter_location"`
 	EndpointURL       string           `json:"endpoint_url"`
 	Parameter         string           `json:"parameter"`
 	Tech              TechHints        `json:"tech,omitempty"`
@@ -137,6 +141,8 @@ type WAFHints struct {
 	Vendor                  string
 	CautiousModeRecommended bool
 	AllowEvasion            bool
+	MaxVariants             int // maximum adapted variants per raw payload; zero preserves explicit/unbounded behavior
+	AvoidTechniques         []string
 	PreferredTechniques     []string
 	BlockedChars            []string
 	AllowedChars            []string

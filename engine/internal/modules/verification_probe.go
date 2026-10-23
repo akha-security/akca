@@ -15,6 +15,7 @@ import (
 )
 
 func (r *Runner) probePayload(ctx context.Context, target ScanTarget, p payloadgen.Payload) (httpclient.RequestResponse, error) {
+	target = payloadWireTarget(target, p)
 	switch p.VulnClass {
 	case "xxe":
 		if carrier, ok := xxeCarrierFromEncoding(p.Encoding); ok {
@@ -32,6 +33,11 @@ func (r *Runner) probePayload(ctx context.Context, target ScanTarget, p payloadg
 	default:
 		return r.probe(ctx, target, p.Value)
 	}
+}
+
+func payloadWireTarget(target ScanTarget, p payloadgen.Payload) ScanTarget {
+	target.RequestTemplate.WireEncoding = p.WireEncoding
+	return target
 }
 
 func (r *Runner) enrichVerification(ctx context.Context, module string, target ScanTarget, p payloadgen.Payload,
@@ -160,7 +166,7 @@ func (r *Runner) replayControl(ctx context.Context, module string, target ScanTa
 		return httpclient.RequestResponse{}, false, nil
 	}
 	if module == "jwt" {
-		rr, err := r.probeWithHeaders(ctx, target, "", map[string]string{"Authorization": "Bearer " + control.Value})
+		rr, err := r.probeJWT(ctx, target, control.Value)
 		return rr, true, err
 	}
 	return r.replayRecordedRequest(ctx, probe.Request, original.Value, control.Value, true)
@@ -183,7 +189,7 @@ func (r *Runner) replayCandidate(ctx context.Context, module string, target Scan
 		return rr, true, err
 	}
 	if module == "jwt" {
-		rr, err := r.probeWithHeaders(ctx, target, "", map[string]string{"Authorization": "Bearer " + p.Value})
+		rr, err := r.probeJWT(ctx, target, p.Value)
 		return rr, true, err
 	}
 	return r.replayRecordedRequest(ctx, probe.Request, "", "", false)
@@ -318,7 +324,7 @@ func (r *Runner) buildCandidate(ctx context.Context, module string, target ScanT
 	baseline, probe httpclient.RequestResponse, signal string) verification.Candidate {
 	candidate := verification.Candidate{
 		ScanID: r.scanID, Title: module + " on " + target.Parameter, VulnClass: module,
-		EndpointURL: target.EndpointURL, Method: target.Method, Parameter: target.Parameter,
+		EndpointURL: target.EndpointURL, Method: target.Method, Parameter: target.Parameter, Location: target.Location,
 		Payload: p.Value, Module: module, Signal: signal,
 		Baseline: snapshot(baseline.Response), Probe: snapshot(probe.Response),
 		Reflection:         &target.Profile,

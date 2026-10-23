@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type ObservationRole string
@@ -229,5 +231,6 @@ func intString(v int) string {
 // NewBrowserReadObservation records actual script-visible data, without
 // presenting it as an HTTP response. Raw data is retained as proof.
 func NewBrowserReadObservation(scanID, module, endpoint string, role ObservationRole, attempt int, data string) Observation {
-	return Observation{ID: hashParts(scanID, module, endpoint, string(role), intString(attempt), data), ScanID: scanID, Module: module, Endpoint: endpoint, Role: role, Attempt: attempt, BrowserRead: true, BrowserData: data, ResponseHash: hashParts(data), CreatedAt: time.Now().UTC()}
+	readID := uuid.NewString()
+	return Observation{ID: hashParts(scanID, module, endpoint, string(role), readID, data), RequestID: readID, ScanID: scanID, Module: module, Endpoint: endpoint, Role: role, Attempt: attempt, BrowserRead: true, BrowserData: data, ResponseHash: hashParts(data), CreatedAt: time.Now().UTC()}
 }

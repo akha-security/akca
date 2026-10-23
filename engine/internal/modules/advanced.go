@@ -178,7 +178,7 @@ func (r *Runner) runSmuggling(ctx context.Context, target ScanTarget) []ModuleFi
 		}
 		candidate := verification.Candidate{
 			ScanID: r.scanID, Title: "smuggling on raw HTTP route", VulnClass: "smuggling",
-			EndpointURL: probeTarget.EndpointURL, Method: probeTarget.Method, Parameter: probeTarget.Parameter,
+			EndpointURL: probeTarget.EndpointURL, Method: probeTarget.Method, Parameter: probeTarget.Parameter, Location: probeTarget.Location,
 			Payload: p.Value, Module: "smuggling", Signal: signal,
 			Baseline: snapshot(result.Control.Response), Probe: snapshot(result.Attempts[0].Response),
 			DirectTypedSignal: true, NegativeControlSet: true, NegativeControlOK: true,

@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 )
 
 var (
@@ -27,7 +28,7 @@ var (
 func EffectiveMethod(method, location string) string {
 	method = strings.ToUpper(strings.TrimSpace(method))
 	switch strings.ToLower(strings.TrimSpace(location)) {
-	case "form", "multipart", "json", "graphql", "graphql_query", "websocket", "xml":
+	case "form", "body", "post", "multipart", "json", "graphql", "graphql_query", "websocket", "xml":
 		if method == "" || method == http.MethodGet {
 			return http.MethodPost
 		}
@@ -48,9 +49,24 @@ func BuildProbeRequestWithTemplate(endpointURL, method, param, location, value, 
 	return req.URL, req.Body, req.Headers, nil
 }
 
-// MutateRequest changes exactly one discovered injection surface while
-// retaining the rest of the original request.  Older call sites use
-// BuildProbeRequestWithTemplate, which is kept as a compatibility adapter.
+// NativeRequest materializes a template without injecting a parameter.
+func NativeRequest(template RequestTemplate) (MutatedRequest, error) {
+	if strings.TrimSpace(template.URL) == "" {
+		return MutatedRequest{}, fmt.Errorf("request template URL is empty")
+	}
+	method := strings.ToUpper(strings.TrimSpace(template.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+	headers := cloneStringMap(template.Headers)
+	if template.ContentType != "" && headerValueCI(headers, "Content-Type") == "" {
+		setHeaderCI(headers, "Content-Type", template.ContentType)
+	}
+	return materialized(method, template.URL, []byte(template.Body), headers)
+}
+
+// MutateRequest changes one discovered injection surface while retaining the
+// original request. Failed mutations return an error, never a minimal fallback.
 func MutateRequest(template RequestTemplate, param, location, value string) (MutatedRequest, error) {
 	method := strings.ToUpper(strings.TrimSpace(template.Method))
 	endpointURL := strings.TrimSpace(template.URL)
@@ -64,14 +80,16 @@ func MutateRequest(template RequestTemplate, param, location, value string) (Mut
 		headers["Content-Type"] = template.ContentType
 	}
 
-	body := strings.TrimSpace(template.Body)
+	body := template.Body
 	switch loc {
 	case "form", "body", "post":
 		form := url.Values{}
 		if body != "" {
-			if parsed, err := url.ParseQuery(body); err == nil {
-				form = parsed
+			parsed, err := url.ParseQuery(body)
+			if err != nil {
+				return MutatedRequest{}, fmt.Errorf("decode form template: %w", err)
 			}
+			form = parsed
 		}
 		setFirstURLValue(form, param, value)
 		setHeaderCI(headers, "Content-Type", "application/x-www-form-urlencoded")
@@ -79,15 +97,24 @@ func MutateRequest(template RequestTemplate, param, location, value string) (Mut
 	case "json", "graphql", "websocket":
 		var doc interface{}
 		if body != "" {
-			_ = json.Unmarshal([]byte(body), &doc)
-		}
-		if doc == nil {
+			decoder := json.NewDecoder(strings.NewReader(body))
+			decoder.UseNumber()
+			if err := decoder.Decode(&doc); err != nil {
+				return MutatedRequest{}, fmt.Errorf("decode JSON template: %w", err)
+			}
+			if err := decoder.Decode(new(interface{})); err != io.EOF {
+				return MutatedRequest{}, fmt.Errorf("JSON template contains trailing data")
+			}
+		} else {
 			doc = make(map[string]interface{})
 		}
 		normParam := strings.ReplaceAll(param, "[", ".")
 		normParam = strings.ReplaceAll(normParam, "]", "")
 		normParam = strings.Trim(normParam, ".")
-		if setJSONPath(doc, strings.Split(normParam, "."), value) {
+		if template.WireEncoding != "" && template.WireEncoding != "json_unicode" {
+			return MutatedRequest{}, fmt.Errorf("unsupported JSON wire encoding: %s", template.WireEncoding)
+		}
+		if setJSONPath(doc, strings.Split(normParam, "."), value, template.WireEncoding) {
 			mutated, err := json.Marshal(doc)
 			if err == nil {
 				if headerValueCI(headers, "Content-Type") == "" {
@@ -111,7 +138,7 @@ func MutateRequest(template RequestTemplate, param, location, value string) (Mut
 			return materialized(method, endpointURL, mutated, headers)
 		}
 	case "multipart":
-		mutated, mediaType, ok := mutateMultipartBody([]byte(template.Body), template.ContentType, param, value)
+		mutated, mediaType, ok := mutateMultipartBody([]byte(template.Body), headerValueCI(headers, "Content-Type"), param, value, template.AllowNewFields)
 		if ok {
 			setHeaderCI(headers, "Content-Type", mediaType)
 			return materialized(method, endpointURL, mutated, headers)
@@ -136,14 +163,9 @@ func MutateRequest(template RequestTemplate, param, location, value string) (Mut
 		return MutatedRequest{Method: method, URL: probeURL, Body: []byte(template.Body), Headers: headers}, nil
 	}
 
-	probeURL, probeBody, probeHeaders, err := BuildProbeRequest(endpointURL, method, param, loc, value)
-	if err != nil {
-		return MutatedRequest{}, err
-	}
-	for key, headerValue := range probeHeaders {
-		setHeaderCI(headers, key, headerValue)
-	}
-	return MutatedRequest{Method: method, URL: probeURL, Body: probeBody, Headers: headers}, nil
+	// A failed mutation must never be retried on a different surface or with a
+	// reconstructed body: that would drop CSRF tokens, siblings and envelopes.
+	return MutatedRequest{}, fmt.Errorf("cannot mutate %q on %s request template", param, loc)
 }
 
 func mutateXMLBody(body, param, value string) ([]byte, bool) {
@@ -166,6 +188,9 @@ func mutateXMLBody(body, param, value string) ([]byte, bool) {
 		}
 		switch typed := token.(type) {
 		case xml.StartElement:
+			if !mutated && wantedAttr == "" && strings.EqualFold(strings.Join(stack, "."), wantedPath) {
+				return nil, false
+			}
 			stack = append(stack, typed.Name.Local)
 			if !mutated && wantedAttr != "" && strings.EqualFold(strings.Join(stack, "."), wantedPath) {
 				for index := range typed.Attr {
@@ -182,11 +207,16 @@ func mutateXMLBody(body, param, value string) ([]byte, bool) {
 				mutated = true
 			}
 		case xml.EndElement:
-			deferPop := true
+			if !mutated && wantedAttr == "" && strings.EqualFold(strings.Join(stack, "."), wantedPath) {
+				if err := encoder.EncodeToken(xml.CharData([]byte(value))); err != nil {
+					return nil, false
+				}
+				mutated = true
+			}
 			if err := encoder.EncodeToken(token); err != nil {
 				return nil, false
 			}
-			if deferPop && len(stack) > 0 {
+			if len(stack) > 0 {
 				stack = stack[:len(stack)-1]
 			}
 			continue
@@ -201,7 +231,7 @@ func mutateXMLBody(body, param, value string) ([]byte, bool) {
 	return output.Bytes(), true
 }
 
-func mutateMultipartBody(body []byte, contentType, param, value string) ([]byte, string, bool) {
+func mutateMultipartBody(body []byte, contentType, param, value string, allowNewFields ...bool) ([]byte, string, bool) {
 	mediaType, parameters, err := mime.ParseMediaType(contentType)
 	if err != nil || !strings.HasPrefix(strings.ToLower(mediaType), "multipart/") || parameters["boundary"] == "" {
 		return nil, "", false
@@ -221,9 +251,9 @@ func mutateMultipartBody(body []byte, contentType, param, value string) ([]byte,
 		if err != nil {
 			return nil, "", false
 		}
-		partBody, readErr := io.ReadAll(io.LimitReader(part, 16<<20))
+		partBody, readErr := io.ReadAll(io.LimitReader(part, (16<<20)+1))
 		_ = part.Close()
-		if readErr != nil {
+		if readErr != nil || len(partBody) > 16<<20 {
 			return nil, "", false
 		}
 		outPart, createErr := writer.CreatePart(part.Header)
@@ -237,6 +267,12 @@ func mutateMultipartBody(body []byte, contentType, param, value string) ([]byte,
 		if _, err := outPart.Write(partBody); err != nil {
 			return nil, "", false
 		}
+	}
+	if !mutated && len(allowNewFields) > 0 && allowNewFields[0] {
+		if err := writer.WriteField(param, value); err != nil {
+			return nil, "", false
+		}
+		mutated = true
 	}
 	if err := writer.Close(); err != nil || !mutated {
 		return nil, "", false
@@ -252,22 +288,115 @@ func mutateGraphQLQuery(query, variable, value string) (string, bool) {
 	// mutate an explicit default value or a literal argument; never rewrite the
 	// query shape or splice into field names.
 	escaped := regexp.QuoteMeta(variable)
+	scalar := `("(?:\\.|[^"\\])*"|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null)`
 	patterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?m)(\$` + escaped + `\s*:\s*[^=,)]+\s*=\s*)("[^"]*"|-?[0-9.]+|true|false|null)`),
-		regexp.MustCompile(`(?m)(\b` + escaped + `\s*:\s*)("[^"]*"|-?[0-9.]+|true|false|null)`),
-	}
-	replacement := strconv.Quote(value)
-	if value == "true" || value == "false" || value == "null" {
-		replacement = value
-	} else if _, err := strconv.ParseFloat(value, 64); err == nil {
-		replacement = value
+		regexp.MustCompile(`(?m)(\$` + escaped + `\s*:\s*[\w\[\]!]+\s*=\s*)` + scalar),
+		regexp.MustCompile(`(?m)(\b` + escaped + `\s*:\s*)` + scalar),
 	}
 	for _, pattern := range patterns {
-		if pattern.MatchString(query) {
-			return pattern.ReplaceAllString(query, `${1}`+replacement), true
+		for _, match := range pattern.FindAllStringSubmatchIndex(query, -1) {
+			if !graphQLCodePosition(query, match[0]) {
+				continue
+			}
+			start, end := match[4], match[5]
+			// Block strings require their own serializer. Do not rewrite a prefix
+			// of one as an ordinary quoted scalar.
+			if strings.HasPrefix(query[start:], `"""`) {
+				continue
+			}
+			if end < len(query) && (isGraphQLName(query[end]) || query[end] == '.') {
+				continue
+			}
+			replacement := strconv.Quote(value)
+			if query[start] != '"' {
+				var scalarValue interface{}
+				d := json.NewDecoder(strings.NewReader(value))
+				d.UseNumber()
+				if d.Decode(&scalarValue) == nil && d.Decode(new(interface{})) == io.EOF {
+					switch scalarValue.(type) {
+					case json.Number, bool, nil:
+						replacement = value
+					}
+				}
+			}
+			return query[:start] + replacement + query[end:], true
 		}
 	}
 	return "", false
+}
+
+func isGraphQLName(c byte) bool {
+	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+}
+
+// GraphQLParameterNames returns scalar argument/default names which can be
+// mutated without rebuilding a raw application/graphql request.
+func GraphQLParameterNames(query string) []string {
+	pattern := regexp.MustCompile(`(?:\$)?([A-Za-z_][A-Za-z0-9_]*)\s*:`)
+	seen := map[string]bool{}
+	var names []string
+	for _, match := range pattern.FindAllStringSubmatchIndex(query, -1) {
+		name := query[match[2]:match[3]]
+		if seen[name] || !graphQLCodePosition(query, match[0]) {
+			continue
+		}
+		if _, ok := mutateGraphQLQuery(query, name, "akca_probe"); ok {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// Ignore apparent arguments inside comments, quoted strings and block strings.
+func graphQLCodePosition(query string, position int) bool {
+	for i := 0; i < position; i++ {
+		if query[i] == '#' {
+			for i < len(query) && query[i] != '\n' {
+				i++
+			}
+			if i >= position {
+				return false
+			}
+		}
+		if i >= len(query) {
+			break
+		}
+		if strings.HasPrefix(query[i:], `"""`) {
+			i += 3
+			for i < len(query) {
+				if strings.HasPrefix(query[i:], `\"""`) {
+					i += 4
+					continue
+				}
+				if strings.HasPrefix(query[i:], `"""`) {
+					break
+				}
+				i++
+			}
+			if i >= len(query) {
+				return false
+			}
+			i += 2
+			if i >= position {
+				return false
+			}
+		} else if query[i] == '"' {
+			for i++; i < len(query); i++ {
+				if query[i] == '\\' {
+					i++
+					continue
+				}
+				if query[i] == '"' {
+					break
+				}
+			}
+			if i >= position {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func mutateCookieHeader(raw, name, value string) string {
@@ -321,14 +450,13 @@ func headerValueCI(headers map[string]string, name string) string {
 func setHeaderCI(headers map[string]string, name, value string) {
 	for key := range headers {
 		if strings.EqualFold(key, name) {
-			headers[key] = value
-			return
+			delete(headers, key)
 		}
 	}
 	headers[name] = value
 }
 
-func setJSONPath(current interface{}, path []string, value string) bool {
+func setJSONPath(current interface{}, path []string, value string, wireEncoding ...string) bool {
 	if len(path) == 0 {
 		return false
 	}
@@ -341,19 +469,19 @@ func setJSONPath(current interface{}, path []string, value string) bool {
 				if !ok {
 					return false
 				}
-				node[path[0]] = coerced
+				node[path[0]] = encodeJSONStringValue(coerced, wireEncoding)
 				return true
 			}
-			node[path[0]] = value
+			node[path[0]] = encodeJSONStringValue(value, wireEncoding)
 			return true
 		}
 		next, ok := node[path[0]]
 		if !ok {
 			nextMap := make(map[string]interface{})
 			node[path[0]] = nextMap
-			return setJSONPath(nextMap, path[1:], value)
+			return setJSONPath(nextMap, path[1:], value, wireEncoding...)
 		}
-		return setJSONPath(next, path[1:], value)
+		return setJSONPath(next, path[1:], value, wireEncoding...)
 	case []interface{}:
 		idx, err := strconv.Atoi(path[0])
 		if err == nil && idx >= 0 && idx < len(node) {
@@ -362,15 +490,15 @@ func setJSONPath(current interface{}, path []string, value string) bool {
 				if !ok {
 					return false
 				}
-				node[idx] = coerced
+				node[idx] = encodeJSONStringValue(coerced, wireEncoding)
 				return true
 			}
-			return setJSONPath(node[idx], path[1:], value)
+			return setJSONPath(node[idx], path[1:], value, wireEncoding...)
 		}
 		// Fallback for unindexed path like "id" targeting an array of objects:
 		mutatedAny := false
 		for i := range node {
-			if setJSONPath(node[i], path, value) {
+			if setJSONPath(node[i], path, value, wireEncoding...) {
 				mutatedAny = true
 			}
 		}
@@ -378,6 +506,27 @@ func setJSONPath(current interface{}, path []string, value string) bool {
 	default:
 		return false
 	}
+}
+
+func encodeJSONStringValue(value interface{}, encoding []string) interface{} {
+	if len(encoding) > 0 && encoding[0] == "json_unicode" {
+		if text, ok := value.(string); ok {
+			return unicodeJSONString(text)
+		}
+	}
+	return value
+}
+
+type unicodeJSONString string
+
+func (s unicodeJSONString) MarshalJSON() ([]byte, error) {
+	var out strings.Builder
+	out.WriteByte('"')
+	for _, unit := range utf16.Encode([]rune(s)) {
+		fmt.Fprintf(&out, `\u%04x`, unit)
+	}
+	out.WriteByte('"')
+	return []byte(out.String()), nil
 }
 
 func schemaCompatibleJSONValue(current interface{}, value string) (interface{}, bool) {
@@ -396,12 +545,7 @@ func schemaCompatibleJSONValue(current interface{}, value string) (interface{}, 
 		}
 		return value, true
 	case json.Number:
-		if strings.Contains(value, ".") {
-			if _, err := strconv.ParseFloat(value, 64); err == nil {
-				return json.Number(value), true
-			}
-		}
-		if _, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if json.Valid([]byte(value)) && len(value) > 0 && (value[0] == '-' || value[0] >= '0' && value[0] <= '9') {
 			return json.Number(value), true
 		}
 		return value, true
@@ -460,65 +604,58 @@ func BuildProbeRequest(endpointURL, method, param, location, value string) (stri
 		headers["Cookie"] = param + "=" + value
 		return u.String(), nil, headers, nil
 	case "path":
-		replaced := false
+		// Work on escaped segments so an encoded slash in a sibling stays one
+		// segment, and keep the leading/trailing separators byte-for-byte.
+		segments := strings.Split(u.EscapedPath(), "/")
+		first := 0
+		if len(segments) > 0 && segments[0] == "" {
+			first = 1
+		}
+		targetIdx := -1
 		if match := pathIndexParamRe.FindStringSubmatch(param); len(match) == 2 {
 			if index, parseErr := strconv.Atoi(match[1]); parseErr == nil {
-				segments := strings.Split(strings.Trim(u.Path, "/"), "/")
-				if index >= 0 && index < len(segments) {
-					segments[index] = value
-					prefix := ""
-					if strings.HasPrefix(u.Path, "/") {
-						prefix = "/"
-					}
-					u.Path = prefix + strings.Join(segments, "/")
-					u.RawPath = ""
-					replaced = true
+				if index >= 0 && first+index < len(segments) && segments[first+index] != "" {
+					targetIdx = first + index
+				}
+			}
+			if targetIdx < 0 {
+				return "", nil, nil, fmt.Errorf("path parameter index out of range: %s", param)
+			}
+		}
+		if targetIdx < 0 {
+			for i, segment := range segments {
+				decoded, _ := url.PathUnescape(segment)
+				if decoded == "{"+param+"}" || decoded == ":"+param || decoded == "["+param+"]" {
+					targetIdx = i
+					break
 				}
 			}
 		}
-		for _, placeholder := range []string{"{" + param + "}", ":" + param, "[" + param + "]"} {
-			if replaced {
-				break
-			}
-			if strings.Contains(u.Path, placeholder) {
-				u.Path = strings.ReplaceAll(u.Path, placeholder, value)
-				u.RawPath = ""
-				replaced = true
-				break
-			}
-		}
-		if !replaced {
-			segs := strings.Split(strings.Trim(u.Path, "/"), "/")
-			targetIdx := -1
-			for i := len(segs) - 1; i >= 0; i-- {
-				s := segs[i]
+		if targetIdx < 0 {
+			for i := len(segments) - 1; i >= first; i-- {
+				s, _ := url.PathUnescape(segments[i])
 				if len(s) > 0 && ((s[0] >= '0' && s[0] <= '9') || pathUUIDRe.MatchString(s)) {
 					targetIdx = i
 					break
 				}
 			}
-			if targetIdx >= 0 {
-				segs[targetIdx] = value
-				prefix := ""
-				if strings.HasPrefix(u.Path, "/") {
-					prefix = "/"
+		}
+		if targetIdx < 0 {
+			for i := len(segments) - 1; i >= first; i-- {
+				if segments[i] != "" {
+					targetIdx = i
+					break
 				}
-				u.Path = prefix + strings.Join(segs, "/")
-				u.RawPath = ""
-				replaced = true
 			}
 		}
-		if !replaced {
-			// Concrete API replays commonly bind a discovered ID into the last
-			// segment. Mutate that segment rather than creating a different
-			// child route such as /orders/123/payload.
-			trimmed := strings.TrimRight(u.Path, "/")
-			if slash := strings.LastIndex(trimmed, "/"); slash >= 0 {
-				u.Path = trimmed[:slash+1] + value
-			} else {
-				u.Path = value
-			}
-			u.RawPath = ""
+		if targetIdx < 0 {
+			return "", nil, nil, fmt.Errorf("no path segment to mutate")
+		}
+		segments[targetIdx] = url.PathEscape(value)
+		u.RawPath = strings.Join(segments, "/")
+		u.Path, err = url.PathUnescape(u.RawPath)
+		if err != nil {
+			return "", nil, nil, err
 		}
 		return u.String(), nil, headers, nil
 	default:

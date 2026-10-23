@@ -22,6 +22,10 @@ func (r *Runner) probe(ctx context.Context, target ScanTarget, payload string) (
 }
 
 func (r *Runner) probeForModule(ctx context.Context, module string, target ScanTarget, payload string) (httpclient.RequestResponse, error) {
+	return r.probeTemplateForModule(ctx, module, target, &payload, nil)
+}
+
+func (r *Runner) probeTemplateForModule(ctx context.Context, module string, target ScanTarget, payload *string, extraHeaders map[string]string) (httpclient.RequestResponse, error) {
 	if target.coverage != nil {
 		ctx = withTargetRun(ctx, target.coverage)
 	}
@@ -33,10 +37,6 @@ func (r *Runner) probeForModule(ctx context.Context, module string, target ScanT
 		noteExchange(ctx, err)
 		return httpclient.RequestResponse{}, err
 	}
-	r.probeCount.Add(1)
-	if module != "" && !managedTarget(ctx) {
-		r.recordModuleProbeUsage(module)
-	}
 	method := strings.ToUpper(target.Method)
 	if method == "" {
 		method = http.MethodGet
@@ -46,16 +46,10 @@ func (r *Runner) probeForModule(ctx context.Context, module string, target ScanT
 		loc = target.Profile.ParameterLocation
 	}
 	if module != "" && isHeaderLocation(loc) && !moduleAllowsHeaderPayloads(module) {
-		return r.probeWithoutInjectedPayload(ctx, module, target)
+		payload = nil
 	}
 	if strings.TrimSpace(target.Parameter) == "" {
-		headers := r.wafHeadersForModule(module, target.EndpointURL)
-		headers = sanitizeProbeHeaders(method, nil, headers)
-		rr, err := r.client.Do(ctx, method, target.EndpointURL, nil, headers)
-		if err != nil && strings.Contains(err.Error(), "global request budget exhausted") {
-			r.markBudgetExhausted(module, target.EndpointURL)
-		}
-		return rr, err
+		payload = nil
 	}
 	template := target.RequestTemplate
 	if template.URL == "" {
@@ -70,15 +64,29 @@ func (r *Runner) probeForModule(ctx context.Context, module string, target ScanT
 	if template.ContentType == "" {
 		template.ContentType = target.Profile.ContentType
 	}
-	mutated, err := reflection.MutateRequest(template, target.Parameter, loc, payload)
+	var mutated reflection.MutatedRequest
+	var err error
+	if payload == nil {
+		mutated, err = reflection.NativeRequest(template)
+	} else {
+		mutated, err = reflection.MutateRequest(template, target.Parameter, loc, *payload)
+	}
 	if err != nil {
+		noteExchange(ctx, err)
 		return httpclient.RequestResponse{}, err
 	}
+	r.probeCount.Add(1)
+	if module != "" && !managedTarget(ctx) {
+		r.recordModuleProbeUsage(module)
+	}
 	probeURL, body, headers := mutated.URL, mutated.Body, mutated.Headers
-	headers = mergeHeaders(headers, r.wafHeadersForModule(module, target.EndpointURL))
+	headers = mergeHeaders(r.wafHeadersForModule(module, target.EndpointURL), headers)
+	headers = mergeHeaders(headers, extraHeaders)
 	effMethod := mutated.Method
 	headers = sanitizeProbeHeaders(effMethod, body, headers)
-	headers = r.registerRuntimeProbe(target, payload, headers)
+	if payload != nil {
+		headers = r.registerRuntimeProbe(target, *payload, headers)
+	}
 	rr, err := r.client.Do(ctx, effMethod, probeURL, body, headers)
 	if err != nil && strings.Contains(err.Error(), "global request budget exhausted") {
 		r.markBudgetExhausted(module, target.EndpointURL)
@@ -129,13 +137,7 @@ func isHeaderLocation(location string) bool {
 }
 
 func (r *Runner) probeWithoutInjectedPayload(ctx context.Context, module string, target ScanTarget) (httpclient.RequestResponse, error) {
-	method := strings.ToUpper(target.Method)
-	if method == "" {
-		method = http.MethodGet
-	}
-	headers := r.wafHeadersForModule(module, target.EndpointURL)
-	headers = sanitizeProbeHeaders(method, nil, headers)
-	return r.client.Do(ctx, method, target.EndpointURL, nil, headers)
+	return r.probeTemplateForModule(ctx, module, target, nil, nil)
 }
 
 func injectParameter(endpointURL, param, value string) (string, error) {
@@ -397,7 +399,7 @@ func buildCandidate(scanID, module string, target ScanTarget, p payloadgen.Paylo
 	baseline, probe httpclient.RequestResponse) verification.Candidate {
 	return verification.Candidate{
 		ScanID: scanID, Title: module + " on " + target.Parameter, VulnClass: module,
-		EndpointURL: target.EndpointURL, Method: target.Method, Parameter: target.Parameter,
+		EndpointURL: target.EndpointURL, Method: target.Method, Parameter: target.Parameter, Location: target.Location,
 		Payload: p.Value, Module: module,
 		Baseline: snapshot(baseline.Response), Probe: snapshot(probe.Response),
 		Reflection: &target.Profile,

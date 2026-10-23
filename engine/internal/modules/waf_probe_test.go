@@ -45,7 +45,7 @@ func TestWAFHeadersAreLimitedToHighAndCriticalModules(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.SaveWAFProfile("scan-waf", models.WAFProfile{
-		Host: "example.com", Vendor: "Akamai", Confidence: 0.95,
+		Host: "example.com", Vendor: "Fastly", Confidence: 0.95,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -59,14 +59,14 @@ func TestWAFHeadersAreLimitedToHighAndCriticalModules(t *testing.T) {
 	if _, err := r.probeForModule(context.Background(), "sqli", target, "' OR 1=1--"); err != nil {
 		t.Fatal(err)
 	}
-	if got := client.headers[len(client.headers)-1]["X-Akca-Line-Fold"]; got != "1" {
+	if got := client.headers[len(client.headers)-1]["X-Forwarded-For"]; got != "127.0.0.1" {
 		t.Fatalf("SQLi should receive WAF evasion header, got %q in %+v", got, client.headers[len(client.headers)-1])
 	}
 
 	if _, err := r.probeForModule(context.Background(), "open_redirect", target, "https://evil.example"); err != nil {
 		t.Fatal(err)
 	}
-	if got := client.headers[len(client.headers)-1]["X-Akca-Line-Fold"]; got != "" {
+	if got := client.headers[len(client.headers)-1]["X-Forwarded-For"]; got != "" {
 		t.Fatalf("open_redirect is medium and must not receive WAF evasion header, got %q", got)
 	}
 	if got := r.ProbeCount(); got != 2 {

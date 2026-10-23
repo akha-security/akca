@@ -149,6 +149,7 @@ func (r *Runner) runFileUpload(ctx context.Context, target ScanTarget) []ModuleF
 				candidate.NegativeControlSet = true
 				candidate.NegativeControlOK = true
 				candidate.Observations = append(candidate.Observations,
+					r.observation("file_upload", target, verification.RoleStateBefore, 1, before),
 					r.observation("file_upload", target, verification.RoleStateAfter, 1, retrieval),
 					r.observation("file_upload", target, verification.RoleNegativeControl, 1, cleanupControl),
 				)

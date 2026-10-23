@@ -56,7 +56,8 @@ func likelyParameterEndpoint(endpoint storage.DiscoveryEndpoint) bool {
 	if strings.TrimSpace(endpoint.RequestTemplate.Body) != "" {
 		return true
 	}
-	u, err := url.Parse(endpoint.URL)
+	requestURL, _, _ := nativeRequest(endpoint.URL, method, endpoint.RequestTemplate)
+	u, err := url.Parse(requestURL)
 	if err != nil {
 		return false
 	}
@@ -98,20 +99,25 @@ func parameterEndpointFamily(endpoint storage.DiscoveryEndpoint) string {
 	if method == "" {
 		method = http.MethodGet
 	}
-	u, err := url.Parse(endpoint.URL)
+	requestURL, _, _ := nativeRequest(endpoint.URL, method, endpoint.RequestTemplate)
+	u, err := url.Parse(requestURL)
 	if err != nil {
-		return method + "|" + strings.ToLower(endpoint.URL)
+		return method + "|" + endpoint.URL
 	}
 	queryNames := make([]string, 0, len(u.Query()))
 	for name := range u.Query() {
-		queryNames = append(queryNames, strings.ToLower(name))
+		queryNames = append(queryNames, name)
 	}
 	sort.Strings(queryNames)
 
-	bodyNames := ExtractFromTemplateBody(endpoint.URL, method, endpoint.RequestTemplate.ContentType, endpoint.RequestTemplate.Body)
+	contentType := endpoint.RequestTemplate.ContentType
+	if contentType == "" {
+		contentType = headerValue(endpoint.RequestTemplate.Headers, "Content-Type")
+	}
+	bodyNames := ExtractFromTemplateBody(requestURL, method, contentType, endpoint.RequestTemplate.Body)
 	bodyShape := make([]string, 0, len(bodyNames))
 	for _, parameter := range bodyNames {
-		bodyShape = append(bodyShape, strings.ToLower(parameter.Name)+":"+string(parameter.Location))
+		bodyShape = append(bodyShape, parameter.Name+":"+string(parameter.Location))
 	}
 	sort.Strings(bodyShape)
 
@@ -119,14 +125,14 @@ func parameterEndpointFamily(endpoint storage.DiscoveryEndpoint) string {
 		method,
 		strings.ToLower(u.Scheme),
 		strings.ToLower(u.Host),
-		canonicalParameterPath(u.Path),
+		canonicalParameterPath(u.EscapedPath()),
 		strings.Join(queryNames, ","),
 		strings.Join(bodyShape, ","),
 	}, "|")
 }
 
 func canonicalParameterPath(path string) string {
-	parts := strings.Split(strings.ToLower(path), "/")
+	parts := strings.Split(path, "/")
 	for i, part := range parts {
 		if looksLikePathIdentifier(part) {
 			parts[i] = ":id"
@@ -147,7 +153,7 @@ func looksLikePathIdentifier(value string) bool {
 		return false
 	}
 	for _, r := range compact {
-		if !unicode.IsDigit(r) && (r < 'a' || r > 'f') {
+		if !unicode.IsDigit(r) && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
 			return false
 		}
 	}

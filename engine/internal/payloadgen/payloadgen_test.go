@@ -248,14 +248,14 @@ func TestWAFEvasionVariantsGenerated(t *testing.T) {
 	}
 }
 
-func TestWAFEvasionRequiresExplicitOptIn(t *testing.T) {
+func TestWAFEvasionRequiresEnabledHints(t *testing.T) {
 	result := Generate(Input{
 		Profile: reflection.ReflectionProfile{CanaryValue: "akca11119z", ReflectionKind: reflection.ReflectionRaw, Context: reflection.ContextHTML},
 		WAF:     WAFHints{Vendor: "Cloudflare"}, Budget: 200,
 	})
 	for _, p := range result.Payloads {
 		if p.WAFAdapted {
-			t.Fatal("WAF evasion payload must require explicit opt-in")
+			t.Fatal("WAF variants must not be generated from disabled adaptation hints")
 		}
 	}
 }
@@ -563,7 +563,7 @@ func TestWAFAdaptedPayloadsKeepOriginalPartnerUnderBudget(t *testing.T) {
 		originalByBase[baseVariantKey(payload)] = true
 	}
 	for _, payload := range result.Payloads {
-		if payload.WAFAdapted && !originalByBase[baseVariantKey(payload)] {
+		if payload.WAFAdapted && !payload.IsNegativeControl && !originalByBase[baseVariantKey(payload)] {
 			t.Fatalf("WAF-adapted payload selected without original partner: %+v", payload)
 		}
 	}
@@ -658,9 +658,9 @@ func TestCompoundWAFTechniquesAlsoApplyToNegativeControls(t *testing.T) {
 		technique string
 		want      string
 	}{
-		{family: "sqli", technique: "comment_case", want: "/**/"},
+		{family: "sqli", technique: "comment_case", want: "' AND '"},
 		{family: "command_injection", technique: "ifs_substitution", want: "${IFS}"},
-		{family: "xss", technique: "unicode_url", want: "%5C"},
+		{family: "xss", technique: "unicode_url", want: `\u`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.technique, func(t *testing.T) {

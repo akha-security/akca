@@ -157,12 +157,12 @@ func TestMutateNativeBodyXMLAndMultipart(t *testing.T) {
 		ContentType: "application/xml",
 		Body:        "<user><name>alice</name></user>",
 	}
-	xmlBody, xmlLoc, ok := mutateNativeBody(xmlTemplate, "role", "admin")
+	xmlBody, xmlLoc, ok := mutateNativeBody(xmlTemplate, "user.name", "bob")
 	if !ok || xmlLoc != LocationXML {
 		t.Fatalf("expected XML location, got %s, ok=%v", xmlLoc, ok)
 	}
-	if !strings.Contains(string(xmlBody), "<role>admin</role>") {
-		t.Fatalf("expected XML to contain injected role tag, got: %s", string(xmlBody))
+	if !strings.Contains(string(xmlBody), "<name>bob</name>") || strings.Contains(string(xmlBody), "alice") {
+		t.Fatalf("expected existing XML leaf to be replaced, got: %s", string(xmlBody))
 	}
 
 	// Multipart test

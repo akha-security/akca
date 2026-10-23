@@ -46,7 +46,7 @@ func (r *Runner) runXSS(ctx context.Context, target ScanTarget) []ModuleFinding 
 		if p.IsControl || p.IsNegativeControl {
 			continue
 		}
-		attempts := r.injectionProbeAttemptsForModule(ctx, "xss", target, p.Value)
+		attempts := r.injectionProbeAttemptsForModule(ctx, "xss", payloadWireTarget(target, p), p.Value)
 		attempt := pickBodyDiffAttempt(attempts, baseline.Response.Body)
 		if len(attempts) == 0 {
 			continue

@@ -28,8 +28,13 @@ func Generate(in Input) GenerationResult {
 	selected, used := selectPayloads(filtered, in.Budget)
 	testCases := buildTestCases(selected)
 	estimated := estimateRequests(selected)
+	method := in.Profile.NativeMethod
+	if method == "" {
+		method = in.Profile.Method
+	}
 
 	return GenerationResult{
+		ScanID: in.Profile.ScanID, Method: method, ParameterLocation: in.Profile.ParameterLocation,
 		EndpointURL:       in.Profile.EndpointURL,
 		Parameter:         in.Profile.Parameter,
 		Tech:              in.Tech,
@@ -112,9 +117,11 @@ func buildCandidates(in Input) []Payload {
 
 	// WAF evasion: transform offensive payloads to the detected WAF and try the
 	// adapted variants alongside the originals.
-	out = append(out, wafEvasionVariants(in, out)...)
 	for i := range out {
 		out[i] = normalizePayload(out[i], p)
+	}
+	out = append(out, wafEvasionVariants(in, out)...)
+	for i := range out {
 		out[i] = rankForTech(out[i], in.Tech)
 		out[i] = rankForWAFLearning(out[i], in.WAF)
 	}
@@ -740,27 +747,40 @@ func wafEvasionVariants(in Input, base []Payload) []Payload {
 		if technique := tomographyURLTechnique(in.WAF, in.Profile.ParameterLocation); technique != "" && !containsWAFVariantTechnique(variants, technique) {
 			variants = append([]wafVariant{{value: applyWAFTechnique(p.Value, technique), enc: technique}}, variants...)
 		}
+		variants = prioritizeWAFVariants(variants, in.WAF, in.Profile.ParameterLocation)
+		adaptedCount := 0
 		for _, variant := range variants {
+			if avoidWAFTechnique(in.WAF, variant.enc) {
+				continue
+			}
 			variant.value, variant.enc = adjustWAFForTransport(p.Value, variant.value, variant.enc, in.Profile.ParameterLocation)
-			if variant.value == p.Value || variant.value == "" {
+			jsonWire := variant.enc == "json_unicode" && (in.Profile.ParameterLocation == "json" || in.Profile.ParameterLocation == "graphql" || in.Profile.ParameterLocation == "websocket")
+			if !jsonWire && (variant.value == p.Value || variant.value == "") {
 				continue
 			}
 			v := p
 			v.Value = variant.value
+			if jsonWire {
+				v.Value = p.Value
+				v.WireEncoding = "json_unicode"
+			}
 			v.Encoding = variant.enc
 			v.WAFAdapted = true
+			v.Priority = clampPriority(v.Priority + 5)
 			v.WAFVendor = vendor
 			v.Technique = TechniqueWAFMutation
 			v.Mutations = append(append([]MutationSpec{}, p.Mutations...), MutationSpec{Layer: "waf", Technique: variant.enc})
 			v.Variant = p.Variant + "_waf_" + sanitizeVendor(vendor) + "_" + variant.enc
 			v.SelectionReason = p.SelectionReason + "; WAF bypass for " + vendor + " (" + variant.enc + ")"
-			v.SemanticKey = semanticKey(p) + "|waf:" + sanitizeVendor(vendor) + ":" + variant.enc
-			out = append(out, v)
-
+			v.SemanticKey = semanticKey(v)
 			// Generate paired mutated negative control to ensure WAF bypass is verified
 			// against backend acceptance rather than unparsed garbage input.
 			if negControl, ok := wafNegativeControlFor(v, in.Profile); ok {
-				out = append(out, negControl)
+				out = append(out, v, normalizePayload(negControl, in.Profile))
+				adaptedCount++
+				if in.WAF.MaxVariants > 0 && adaptedCount >= in.WAF.MaxVariants {
+					break
+				}
 			}
 		}
 	}
@@ -786,6 +806,9 @@ func wafNegativeControlFor(adapted Payload, profile reflection.ReflectionProfile
 		return Payload{}, false
 	}
 	encVal, _ = adjustWAFForTransport(benignValue, encVal, adapted.Encoding, profile.ParameterLocation)
+	if adapted.WireEncoding == "json_unicode" {
+		encVal = benignValue
+	}
 	if encVal == "" {
 		return Payload{}, false
 	}
@@ -796,6 +819,7 @@ func wafNegativeControlFor(adapted Payload, profile reflection.ReflectionProfile
 		Family:               adapted.Family,
 		ExpectedSignal:       "no_reflection",
 		Encoding:             adapted.Encoding,
+		WireEncoding:         adapted.WireEncoding,
 		Priority:             adapted.Priority - 5,
 		NoiseLevel:           "low",
 		BudgetCost:           1,
@@ -887,7 +911,7 @@ func applyWAFTechnique(value, technique string) string {
 	technique = strings.ToLower(strings.TrimSpace(technique))
 	switch technique {
 	case "comment_case":
-		return deterministicCaseMix(commentSplit(value))
+		return commentCaseSQL(value)
 	case "ifs_substitution":
 		return strings.ReplaceAll(value, " ", "${IFS}")
 	case "unicode_url":
@@ -960,6 +984,9 @@ func RuntimeWAFVariantSets(values []string, family string, ctx reflection.Contex
 	out := make([]WAFVariantSet, 0, len(techniques))
 	seenSet := map[string]struct{}{}
 	for _, technique := range techniques {
+		if avoidWAFTechnique(waf, technique) {
+			continue
+		}
 		transformed := make([]string, 0, len(values))
 		valid := true
 		for _, value := range values {
@@ -983,6 +1010,9 @@ func RuntimeWAFVariantSets(values []string, family string, ctx reflection.Contex
 		if limit > 0 && len(out) >= limit {
 			break
 		}
+		if waf.MaxVariants > 0 && len(out) >= waf.MaxVariants {
+			break
+		}
 	}
 	return out
 }
@@ -990,7 +1020,7 @@ func RuntimeWAFVariantSets(values []string, family string, ctx reflection.Contex
 func adjustWAFForTransport(original, transformed, encoding, location string) (string, string) {
 	location = strings.ToLower(strings.TrimSpace(location))
 	transportEncodes := location == "" || location == "query" || location == "form" ||
-		location == "multipart" || location == "path"
+		location == "body" || location == "post" || location == "path"
 	if !transportEncodes {
 		return transformed, encoding
 	}
@@ -1373,9 +1403,11 @@ func requestDedupeKey(p Payload) string {
 	return strings.Join([]string{
 		strings.ToLower(strings.TrimSpace(p.Family)),
 		strings.ToLower(strings.TrimSpace(p.VulnClass)),
-		strings.ToLower(strings.TrimSpace(p.Value)),
+		p.Value,
 		strings.ToLower(strings.TrimSpace(p.Encoding)),
 		strings.ToLower(strings.TrimSpace(p.WAFVendor)),
+		string(p.ProbeRole), p.ControlFor, p.PairID,
+		p.WireEncoding,
 	}, "|")
 }
 
@@ -1386,10 +1418,11 @@ func semanticKey(p Payload) string {
 		strings.ToLower(p.ExpectedSignal),
 		strings.ToLower(p.VerificationStrategy),
 		strings.ToLower(p.Encoding),
+		p.WireEncoding,
 		shortPayloadHash(p.Value),
 	}, ":")
 	if p.IsControl || p.IsNegativeControl {
-		effect = "control:" + strings.ToLower(p.Variant) + ":" + shortPayloadHash(p.Value)
+		effect = "control:" + strings.ToLower(p.Variant) + ":" + shortPayloadHash(p.Value) + ":" + p.ControlFor
 	}
 	return effect
 }
@@ -1402,7 +1435,7 @@ func legacySemanticKey(p Payload) string {
 }
 
 func shortPayloadHash(value string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(value)))
+	sum := sha256.Sum256([]byte(value))
 	return fmt.Sprintf("%x", sum[:8])
 }
 
@@ -1450,10 +1483,22 @@ func selectPayloads(payloads []Payload, limit int) ([]Payload, int) {
 		}
 		offensive = append(offensive, p)
 	}
+	viable := offensive[:0]
+	for _, p := range offensive {
+		if p.WAFAdapted {
+			if _, ok := adaptedNegControls[p.SemanticKey]; !ok {
+				continue
+			}
+		}
+		viable = append(viable, p)
+	}
+	offensive = viable
 	if limit <= 0 {
 		selected = append(selected, offensive...)
-		for _, neg := range adaptedNegControls {
-			selected = append(selected, neg)
+		for _, p := range offensive {
+			if neg, ok := adaptedNegControls[p.SemanticKey]; ok {
+				selected = append(selected, neg)
+			}
 		}
 		used := payloadCost(offensive)
 		sortPayloads(selected)
@@ -1707,19 +1752,17 @@ func compareShadow(payloads []Payload, testCases []TestCase, budgetUsed int) Sha
 		LegacyPayloads: len(payloads), TestCases: len(testCases),
 		LegacyBudget: budgetUsed, EstimatedRequests: estimateRequests(payloads),
 	}
-	controls := map[string]bool{}
+	payloadKeys := map[string]bool{}
 	for _, p := range payloads {
 		if p.Family == "sqli" {
 			shadow.SQLiLegacyPayloads++
 		}
-		if p.IsControl || p.IsNegativeControl {
-			controls[p.SemanticKey] = true
-		}
+		payloadKeys[p.SemanticKey] = true
 	}
 	shadow.SQLiTestCases = len(testCases)
 	for _, tc := range testCases {
 		for _, p := range tc.Payloads {
-			if p.ControlFor != "" && !controls[p.ControlFor] {
+			if p.ControlFor != "" && !payloadKeys[p.ControlFor] {
 				shadow.OrphanControls++
 			}
 		}
@@ -1752,6 +1795,12 @@ func appendUnique(items []string, v string) []string {
 
 // GenerateGroupB builds SSRF/LFI/XXE payloads with optional WAF-adapted variants.
 func GenerateGroupB(vulnClass, oastURL string, waf WAFHints) []Payload {
+	return GenerateGroupBForProfile(vulnClass, oastURL, waf, reflection.ReflectionProfile{Context: reflection.ContextUnknown, ParameterLocation: "raw"})
+}
+
+// GenerateGroupBForProfile accounts for the actual request builder's transport
+// encoding so query/form variants do not gain an unintended extra URL layer.
+func GenerateGroupBForProfile(vulnClass, oastURL string, waf WAFHints, profile reflection.ReflectionProfile) []Payload {
 	var base []Payload
 	switch vulnClass {
 	case "ssrf":
@@ -1763,11 +1812,11 @@ func GenerateGroupB(vulnClass, oastURL string, waf WAFHints) []Payload {
 	default:
 		return nil
 	}
-	in := Input{Profile: reflection.ReflectionProfile{Context: reflection.ContextUnknown, ParameterLocation: "raw"}, WAF: waf}
-	all := append(base, wafEvasionVariants(in, base)...)
-	for i := range all {
-		all[i] = normalizePayload(all[i], in.Profile)
+	in := Input{Profile: profile, WAF: waf}
+	for i := range base {
+		base[i] = normalizePayload(base[i], in.Profile)
 	}
+	all := append(base, wafEvasionVariants(in, base)...)
 	all = semanticDedupe(all)
 	sortPayloads(all)
 	return all

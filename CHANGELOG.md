@@ -7,6 +7,28 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-10-23
+
+### Added
+
+- Add a standalone PHP2Shell assessment for CVE-2026-109618/CVE-2026-109619. `--mode php2shell` runs passive version inspection and bounded active crash-signal probes against the explicit target only; it does not crawl or run unrelated modules.
+- Preserve baseline, control, probe, and stop diagnostics in the report's coverage timeline so operators can see what was sent and why testing continued or stopped.
+- Add regression tests for PHP2Shell mode, WAF adaptation, request fidelity, cancellation, and verification evidence boundaries.
+
+### Changed
+
+- Derive `/index.php` from a host-only PHP2Shell target while preserving an explicit non-root PHP path; do not follow redirects in dedicated mode.
+- Treat PHP2Shell version evidence and memory-exhaustion signatures as critical triage leads, not confirmed remote code execution. A missing banner is unknown, not a clean result.
+- Keep `--php2shell-active` as a compatibility alias; it is unnecessary with `--mode php2shell`.
+- Adapt payloads automatically to the current scan's per-host WAF profile by default, with bounded variants, learned technique ordering, raw originals and matched controls.
+- Separate payload adaptation (`auto`/`on`/`off`) from opt-in WAF header/protocol mutations; expose the mode in CLI status and persisted configuration.
+- Honor payload opt-out and passive mode during calibration and when loading generated payloads on resume; account for query/form transport encoding in runtime SSRF/LFI/XXE variants.
+
+### Fixed
+
+- Preserve request shape and payload identity across crawling, parameter discovery, mutation, and HTTP client paths.
+- Tighten cancellation and proof-policy behavior so incomplete or mismatched observations are not promoted to verified results.
+
 ## [v0.2.9] - 2026-10-19
 
 ### Added
@@ -435,7 +457,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - HTML, JSON, Markdown, CSV and SARIF reporting.
 - CWE and OWASP Top 10:2025 report classification.
 
-[Unreleased]: https://github.com/akha-security/akca/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/akha-security/akca/compare/v0.3.0...HEAD
+[v0.3.0]: https://github.com/akha-security/akca/compare/v0.2.9...v0.3.0
 [v0.2.9]: https://github.com/akha-security/akca/compare/v0.2.8...v0.2.9
 [v0.2.8]: https://github.com/akha-security/akca/compare/v0.2.7...v0.2.8
 [v0.2.7]: https://github.com/akha-security/akca/compare/v0.2.6...v0.2.7

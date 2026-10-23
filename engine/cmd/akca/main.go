@@ -524,7 +524,7 @@ func printShortUsage() {
 
 	printHelpSection("Core options", []helpEntry{
 		{"-u, --url <url>", "Target base URL (e.g. https://target.com)"},
-		{"-m, --mode <mode>", "Scan mode: sql, xss, api, graphql, rce, ssrf, auth, passive, full"},
+		{"-m, --mode <mode>", "Scan mode: sql, xss, api, graphql, rce, php2shell, ssrf, auth, passive, full"},
 		{"-o, --output <file>", "Report output file path"},
 		{"-f, --format <type>", "html, json, markdown, csv or sarif (default: html)"},
 		{"-c, --cookie <str>", "Authentication cookie string"},
@@ -572,6 +572,7 @@ func printDetailedUsage() {
 		{"api", "REST/JSON, schema, BOLA/IDOR and mass assignment"},
 		{"graphql, gql", "GraphQL schema and operation security"},
 		{"rce, injection", "Command injection, SSTI and deserialization"},
+		{"php2shell", "PHP2Shell passive assessment plus authorized active crash-signal checks"},
 		{"ssrf, oast", "SSRF, XXE and out-of-band verification"},
 		{"auth, privesc", "Authentication, authorization, CSRF and session checks"},
 		{"passive, recon", "Non-mutating reconnaissance and exposure analysis"},
@@ -597,8 +598,10 @@ func printDetailedUsage() {
 	})
 
 	printHelpSection("Engine", []helpEntry{
-		{"--waf-evasion", "Force WAF-adaptive request mutations"},
-		{"--no-waf-evasion", "Disable WAF-adaptive request mutations"},
+		{"--waf-evasion", "Enable payload adaptation even without a detected WAF (default: auto)"},
+		{"--no-waf-evasion", "Disable automatic WAF payload adaptation"},
+		{"--waf-bypass-headers", "Opt into additional WAF header/protocol mutations"},
+		{"--php2shell-active", "Compatibility flag; --mode php2shell now enables the authorized active checks automatically"},
 		{"--no-oast", "Disable DNS/HTTP out-of-band probes"},
 		{"--oast-server <urls>", "Custom OAST server APIs in priority order"},
 		{"--oast-wait <seconds>", "Final callback collection window (default: 60)"},
@@ -860,6 +863,7 @@ func scanSessionPanel(payload map[string]interface{}) string {
 		auth = "Authenticated"
 	}
 	transport := sessionTransportSummary(payload)
+	wafMode := sessionWAFPayloadMode(payload)
 
 	borderStyle := lipgloss.NewStyle().Foreground(sessionColorBorder)
 	labelStyle := lipgloss.NewStyle().Foreground(sessionColorLabel).Bold(true)
@@ -993,6 +997,7 @@ func scanSessionPanel(payload map[string]interface{}) string {
 		row2ValueLine,
 		row3LabelLine,
 		row3ValueLine,
+		sessionFramedRow(labelStyle.Render("PAYLOAD ADAPTATION")+"  "+configStyle.Render(wafMode), innerWidth),
 		bottomLine,
 	)
 
@@ -1087,6 +1092,17 @@ func shortSessionCount(value int) string {
 	}
 }
 
+func sessionWAFPayloadMode(payload map[string]interface{}) string {
+	if payloadBool(payload, "passive_mode") {
+		return "OFF"
+	}
+	mode, _ := payload["waf_payload_mode"].(string)
+	if mode == "" {
+		mode = string(config.WAFPayloadAuto)
+	}
+	return strings.ToUpper(safeTerminalText(mode))
+}
+
 func scanSessionLine(payload map[string]interface{}) string {
 	total := "unlimited"
 	if budget := payloadInt(payload, "request_budget"); budget > 0 {
@@ -1103,9 +1119,9 @@ func scanSessionLine(payload map[string]interface{}) string {
 	urls := limitValue(payloadInt(payload, "max_pages"))
 	endpoints := limitValue(payloadInt(payload, "max_endpoints"))
 	crawlerRequests := limitValue(payloadInt(payload, "crawler_request_budget"))
-	return fmt.Sprintf("SCAN START target=%s profile=%s urls=%s endpoints=%s crawler_requests=%s payloads=%s total_requests=%s memory=%s",
+	return fmt.Sprintf("SCAN START target=%s profile=%s urls=%s endpoints=%s crawler_requests=%s payloads=%s total_requests=%s memory=%s waf_payload_mode=%s",
 		payloadTargets(payload), safeTerminalText(fmt.Sprint(payload["scan_profile"])),
-		urls, endpoints, crawlerRequests, payloadBudget, total, memory)
+		urls, endpoints, crawlerRequests, payloadBudget, total, memory, strings.ToLower(sessionWAFPayloadMode(payload)))
 }
 
 func limitValue(value int) string {
@@ -1188,6 +1204,7 @@ func moduleFriendlyName(name string) string {
 		"secret_exposure":          "Secret Exposure",
 		"vulnerable_components":    "Component Inventory (Passive)",
 		"known_cve":                "Known CVEs (Offline Catalog)",
+		"php2shell":                "PHP2Shell Exposure Assessment",
 		"script_source":            "Script Source Analysis",
 		"debug_admin":              "Debug & Admin Exposure",
 		"actuator":                 "Spring Actuator Exposure",
@@ -1377,6 +1394,7 @@ type ConsoleWriter struct {
 	phaseStarted       map[string]time.Time
 	phaseInterrupted   bool
 	oastSeen           map[string]struct{}
+	moduleRequests     map[string]int
 }
 
 func NewConsoleWriter() *ConsoleWriter {
@@ -1386,14 +1404,15 @@ func NewConsoleWriter() *ConsoleWriter {
 func NewConsoleWriterMode(mode string) *ConsoleWriter {
 	now := time.Now()
 	return &ConsoleWriter{
-		out:          os.Stderr,
-		severityMap:  make(map[string]int),
-		phaseStarted: make(map[string]time.Time),
-		oastSeen:     make(map[string]struct{}),
-		startTime:    now,
-		lastSnapshot: now.Add(-10 * time.Second),
-		mode:         mode,
-		interactive:  interactiveOutput(),
+		out:            os.Stderr,
+		severityMap:    make(map[string]int),
+		phaseStarted:   make(map[string]time.Time),
+		oastSeen:       make(map[string]struct{}),
+		moduleRequests: make(map[string]int),
+		startTime:      now,
+		lastSnapshot:   now.Add(-10 * time.Second),
+		mode:           mode,
+		interactive:    interactiveOutput(),
 	}
 }
 
@@ -1770,33 +1789,25 @@ func (cw *ConsoleWriter) runningStatusLine() string {
 	if w < 68 {
 		barWidth = 8
 	}
-	prefix := fmt.Sprintf("%sSCAN%s  [%s] %s%3d%%%s",
-		bLavender, rst, progressBar(percent, barWidth), bCloud, percent, rst)
-	if w >= 68 {
-		prefix += fmt.Sprintf("  %sElapsed %s%s", cCloud, elapsed, rst)
-	}
+	// Discovery totals stay at the left edge. Some Windows terminals report a
+	// wider viewport than is actually visible (especially while resizing), so
+	// right-aligned counters can still be clipped even when our width math is
+	// correct. Phase and elapsed text are expendable; counters are not.
+	counts := discoveryProgressVariants(urls, urlLimit, endpoints)[1]
+	prefix := fmt.Sprintf("%sSCAN%s  %s  [%s] %s%3d%%%s",
+		bLavender, rst, counts, progressBar(percent, barWidth), bCloud, percent, rst)
 	separator := fmt.Sprintf("  %s│%s  ", cGhost, rst)
-	suffix := ""
+	elapsedSuffix := ""
 	const minimumPhaseWidth = 5
-	availableSuffixWidth := w - visibleLen(prefix) - 2*visibleLen(separator) - minimumPhaseWidth
-	for _, candidate := range discoveryProgressVariants(urls, urlLimit, endpoints) {
-		if visibleLen(candidate) <= availableSuffixWidth {
-			suffix = separator + candidate
-			break
-		}
+	elapsedCandidate := separator + cCloud + "Elapsed " + elapsed + rst
+	if w-visibleLen(prefix)-visibleLen(separator)-visibleLen(elapsedCandidate) >= minimumPhaseWidth {
+		elapsedSuffix = elapsedCandidate
 	}
-	// Counts are more useful than an unabridged phase label. The final compact
-	// form is intentionally forced into the row on unusually narrow terminals.
-	if suffix == "" {
-		candidate := discoveryProgressVariants(urls, urlLimit, endpoints)[2]
-		maxWidth := max(1, w-visibleLen(prefix)-2*visibleLen(separator)-1)
-		suffix = separator + truncateText(candidate, maxWidth)
-	}
-	phaseWidth := w - visibleLen(prefix) - visibleLen(separator) - visibleLen(suffix)
+	phaseWidth := w - visibleLen(prefix) - visibleLen(separator) - visibleLen(elapsedSuffix)
 	if phaseWidth < 1 {
 		phaseWidth = 1
 	}
-	line := prefix + separator + cSilver + truncateText(phase, phaseWidth) + rst + suffix
+	line := prefix + separator + cSilver + truncateText(phase, phaseWidth) + rst + elapsedSuffix
 	return truncateANSI(line, w)
 }
 
@@ -2085,8 +2096,19 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 			if pages := payloadInt(e.Payload, "pages"); pages > cw.urlsCrawled {
 				cw.urlsCrawled = pages
 			}
+			if discovered := payloadInt(e.Payload, "discovered"); discovered > cw.maxDiscovered {
+				cw.maxDiscovered = discovered
+			}
+			if requests := payloadInt(e.Payload, "requests"); requests > cw.requests {
+				cw.requests = requests
+			}
 			cw.updateProgressLocked()
 			cw.mu.Unlock()
+			// Crawler progress events are the authoritative live source for all
+			// discovery counters. Health snapshots can arrive later (or not at
+			// all on short scans), so redraw immediately instead of waiting for an
+			// unrelated event to make the new page/endpoint totals visible.
+			cw.writeRunningStatus()
 			return nil
 		}
 		if !cw.interactive {
@@ -2254,6 +2276,58 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 				cGhost, rst, cSlate, pages, discovered, rst)
 		}
 
+	case "vuln_module_finished":
+		// Crawler progress reports only crawler traffic. Vulnerability modules
+		// emit their own aggregate once they finish, so fold those network
+		// attempts into the final counter without double-counting retries or
+		// duplicate event delivery.
+		module := strings.TrimSpace(safeTerminalText(fmt.Sprint(e.Payload["module"])))
+		attempted := payloadInt(e.Payload, "requests_attempted")
+		if module != "" && attempted > 0 {
+			cw.mu.Lock()
+			if cw.moduleRequests == nil {
+				cw.moduleRequests = make(map[string]int)
+			}
+			previous := cw.moduleRequests[module]
+			if attempted > previous {
+				cw.requests += attempted - previous
+				cw.moduleRequests[module] = attempted
+			}
+			cw.mu.Unlock()
+		}
+
+	case "php2shell_probe":
+		phase := safeTerminalText(fmt.Sprint(e.Payload["phase"]))
+		status := payloadInt(e.Payload, "status")
+		bodyBytes := payloadInt(e.Payload, "request_body_bytes")
+		sizeMiB := payloadInt(e.Payload, "size_mib")
+		parts := payloadInt(e.Payload, "parts")
+		cont := payloadBool(e.Payload, "continue")
+		statusText := "HTTP 0"
+		if status > 0 {
+			statusText = fmt.Sprintf("HTTP %d", status)
+		}
+		details := fmt.Sprintf("phase=%s %s body=%dB continue=%t", phase, statusText, bodyBytes, cont)
+		if sizeMiB > 0 {
+			details += fmt.Sprintf(" size=%dMiB parts=%d", sizeMiB, parts)
+		}
+		if stopReason := strings.TrimSpace(safeTerminalText(fmt.Sprint(e.Payload["stop_reason"]))); stopReason != "" && stopReason != "<nil>" {
+			details += " stop=" + stopReason
+		}
+		if errText := strings.TrimSpace(safeTerminalText(fmt.Sprint(e.Payload["error"]))); errText != "" && errText != "<nil>" {
+			details += " error=" + errText
+		}
+		if payloadBool(e.Payload, "request_attempted") {
+			cw.mu.Lock()
+			if cw.moduleRequests == nil {
+				cw.moduleRequests = make(map[string]int)
+			}
+			cw.moduleRequests["php2shell"]++
+			cw.requests++
+			cw.mu.Unlock()
+		}
+		fmt.Fprintf(cw.outputWriter(), "%s[PHP2SHELL PROBE]%s  %s\n", bAmber, rst, details)
+
 	// ── Health snapshots ────────────────────────────────────────────────
 	case "oast_started":
 		// OAST readiness is shown once in the scan session card. The provider
@@ -2321,8 +2395,20 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		cw.mu.Lock()
 		cw.phaseInterrupted = true
 		cw.mu.Unlock()
-		fmt.Fprintf(cw.outputWriter(), "%s[WAF]%s  %s%s%s\n",
-			bAmber, rst, cSilver, safeTerminalText(e.Message), rst)
+		vendor := safeTerminalText(e.Message)
+		if vendor == "" {
+			vendor = "No vendor detected"
+		}
+		adaptation := sessionWAFPayloadMode(e.Payload)
+		if adaptation == "AUTO" {
+			if payloadBool(e.Payload, "payload_adaptation_active") {
+				adaptation += " (profile)"
+			} else {
+				adaptation += " (waiting for WAF evidence)"
+			}
+		}
+		fmt.Fprintf(cw.outputWriter(), "%s[WAF]%s  %s%s | Payload adaptation: %s%s\n",
+			bAmber, rst, cSilver, vendor, adaptation, rst)
 
 	case "waf_traffic_adjusted":
 		trafficText := trafficAdjustmentText(e.Payload)
@@ -2334,6 +2420,9 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		cw.mu.Unlock()
 		fmt.Fprintf(cw.outputWriter(), "%s[TRAFFIC]%s  %s%s%s\n",
 			bAmber, rst, cAmber, trafficText, rst)
+
+	case "php2shell_assessment":
+		fmt.Fprintf(cw.outputWriter(), "%s[PHP2SHELL]%s  %s\n", bAmber, rst, safeTerminalText(e.Message))
 
 	case "coverage_gap":
 		cw.mu.Lock()
@@ -2442,9 +2531,16 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		if !cw.interactive {
 			return nil
 		}
-		bar := progressBar(int(percent), 20)
-		line := fmt.Sprintf("%s⟳%s  Report: %s %s%.0f%%%s %s%s%s",
-			cLavender, rst, bar, bCloud, percent, rst, cSlate, safeTerminalText(section), rst)
+		cw.mu.Lock()
+		pages := cw.urlsCrawled
+		urlLimit := cw.urlLimit
+		endpoints := cw.maxDiscovered
+		cw.mu.Unlock()
+		counts := discoveryProgressVariants(pages, urlLimit, endpoints)[1]
+		bar := progressBar(int(percent), 12)
+		line := fmt.Sprintf("%sREPORT%s  %s  [%s] %s%3.0f%%%s  %s│%s  %s%s%s",
+			bLavender, rst, counts, bar, bCloud, percent, rst,
+			cGhost, rst, cSlate, safeTerminalText(section), rst)
 		cw.writeProgressLine(line)
 	}
 
@@ -2730,6 +2826,8 @@ func runScanCommand(args []string) int {
 	var noJS bool
 	var wafEvasion bool
 	var noWAFEvasion bool
+	var wafBypassHeaders bool
+	var php2shellActive bool
 	var rateLimit float64
 	var perHostRate float64
 	var concurrency int
@@ -2784,6 +2882,8 @@ func runScanCommand(args []string) int {
 	fs.BoolVar(&noJS, "no-js", false, "")
 	fs.BoolVar(&wafEvasion, "waf-evasion", false, "")
 	fs.BoolVar(&noWAFEvasion, "no-waf-evasion", false, "")
+	fs.BoolVar(&wafBypassHeaders, "waf-bypass-headers", false, "")
+	fs.BoolVar(&php2shellActive, "php2shell-active", false, "")
 	fs.IntVar(&maxPages, "max-pages", 0, "")
 	fs.IntVar(&maxEndpoints, "max-endpoints", 0, "")
 	fs.IntVar(&maxDepth, "max-depth", 0, "")
@@ -2993,6 +3093,10 @@ func runScanCommand(args []string) int {
 		cfg.ScanID = config.GenerateScanID(cfg.Targets)
 	}
 	cfg.APIImportFiles = append([]string(nil), apiSpecs...)
+	// Standalone PHP2Shell mode is intentionally a combined passive+active
+	// workflow. Keep the flag as a backwards-compatible alias for scripts that
+	// still pass it explicitly.
+	cfg.PHP2ShellActive = php2shellActive || strings.EqualFold(strings.TrimSpace(scanMode), "php2shell")
 	if err := config.ApplyScanModes(&cfg, scanMode); err != nil {
 		printCLIError(err)
 		return 2
@@ -3015,12 +3119,9 @@ func runScanCommand(args []string) int {
 	}
 	cfg.OASTDrainTimeout = time.Duration(oastWait) * time.Second
 	cfg.EnableJSAnalysis = !noJS
-	if wafEvasionSet {
-		cfg.EnableWAFBypassHeaders = wafEvasion
-		cfg.Explicit.EnableWAFBypassHeaders = true
-	}
-	if noWAFEvasionSet {
-		cfg.EnableWAFBypassHeaders = !noWAFEvasion
+	cfg.WAFPayloadMode = wafPayloadModeForFlags(wafEvasion, noWAFEvasion, wafEvasionSet, noWAFEvasionSet)
+	if flagWasSet(fs, "waf-bypass-headers") {
+		cfg.EnableWAFBypassHeaders = wafBypassHeaders
 		cfg.Explicit.EnableWAFBypassHeaders = true
 	}
 	if noOAST {
@@ -3092,6 +3193,14 @@ func runScanCommand(args []string) int {
 	// Browser setup can download a runtime, so do it only after mode/profile
 	// resolution proves that headless coverage is actually enabled. Passive
 	// scans and non-scan commands now start immediately without Chromium.
+	cfg = config.ApplyScanProfile(cfg)
+	if err := cfg.ValidatePHP2ShellOptions(); err != nil {
+		printCLIError(err)
+		return 2
+	}
+	if cfg.PHP2ShellActive {
+		printCLIStatus("warn", "PHP2Shell intrusive lab check enabled: crafted requests may exhaust memory or terminate a PHP worker; RCE is not verified")
+	}
 	if cfg.EnableHeadlessCrawler {
 		if browserPath, downloaded, browserErr := browserpool.EnsureBrowser(); browserErr != nil {
 			printCLIStatus("warn", fmt.Sprintf("Browser automation unavailable: %v", browserErr))

@@ -8,6 +8,9 @@ import (
 )
 
 func (e *Engine) runReflectionPayloadPhase(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	e.session.SetPhase("reflection")
 	_ = e.Emit("phase_started", "reflection and payload generation", map[string]interface{}{"phase": "reflection"})
 
@@ -25,14 +28,20 @@ func (e *Engine) runReflectionPayloadPhase(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	pg := payloadgen.NewGenerator(e.session.ID, e.db, e.session.Config, e.Emit)
 	if _, err := pg.Run(ctx, profiles); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 
 	_ = e.Emit("phase_finished", "reflection and payload generation", map[string]interface{}{
 		"phase": "reflection", "profiles": len(profiles),
 	})
-	return nil
+	return ctx.Err()
 }

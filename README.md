@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/akha-security/akca/actions/workflows/ci.yml"><img src="https://github.com/akha-security/akca/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/akha-security/akca/releases/tag/v0.2.9"><img src="https://img.shields.io/badge/version-v0.2.9-8b5cf6" alt="Version v0.2.9"></a>
+  <a href="https://github.com/akha-security/akca/releases/tag/v0.3.0"><img src="https://img.shields.io/badge/version-v0.3.0-8b5cf6" alt="Version v0.3.0"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25 or newer"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache License 2.0"></a>
 </p>
@@ -47,7 +47,7 @@ AKCA does not claim feature or detection parity with mature commercial platforms
 <p align="center">
   <img src="docs/assets/scanner.png" alt="AKCA scanner running against a local security testing lab" width="760">
   <br>
-  <sub>AKCA v0.2.9 scan session with live engine status, resource telemetry, and confirmed findings.</sub>
+  <sub>AKCA scan session with live engine status, resource telemetry, and confirmed findings.</sub>
 </p>
 
 ## Installation
@@ -183,6 +183,7 @@ Select a profile with `-m`, or combine several with commas.
 | `sql` | SQL and NoSQL injection |
 | `xss` | Reflected, stored, DOM, and blind XSS; related client-side checks |
 | `rce` | Command injection, SSTI, deserialization, and related checks |
+| `php2shell` | Dedicated PHP2Shell exposure assessment and bounded active crash-signal checks; no crawling |
 | `api` | API exposure, BOLA/IDOR, BFLA, mass assignment, and token checks |
 | `graphql` | GraphQL schema and operation checks |
 | `ssrf` | SSRF, XXE, and related out-of-band checks |
@@ -204,6 +205,27 @@ AKCA uses a staged pipeline so later checks can benefit from facts learned earli
 6. **Produce evidence** — export findings with Burp-style HTTP transactions, payloads, classifications, confidence, proof status, and reproduction guidance.
 
 Coverage is explicit. A skipped, failed, budget-limited, or unfinished target is recorded as incomplete coverage; it is not silently treated as a clean security result.
+
+WAF payload adaptation defaults to **AUTO**, so `akca -u domain.com` needs no extra switch. AKCA uses the current scan's WAF profile for each host (including its port), parameter context and learned techniques to select at most two adapted variants per original payload. Originals and matched controls are retained. A vendor fingerprint chooses candidate techniques; a CDN header alone is not evidence that a bypass succeeded. Hosts without WAF signals keep their normal payloads.
+
+Use `--no-waf-evasion` to disable adaptation, including calibration mutations and previously generated WAF variants on resume. `--waf-evasion` explicitly enables variants even without a detected vendor, using generic techniques where necessary. Passive mode always disables adaptation. JSON/API configurations use `"waf_payload_mode": "auto"`, `"on"` or `"off"`; omitted values mean auto.
+
+Payload adaptation does not enable IP-spoofing headers or protocol mutations. Those remain separately opt-in via `--waf-bypass-headers` (`enable_waf_bypass_headers` in configuration). The session card and WAF event display the payload adaptation mode.
+
+
+### PHP2Shell (CVE-2026-109618 / CVE-2026-109619)
+
+Use this dedicated mode **only on an isolated system you own or are explicitly authorized to test**. Its active requests can exhaust memory or terminate a PHP worker.
+
+```bash
+akca -u https://lab.example/index.php --mode php2shell -f html -o php2shell-report.html
+```
+
+`--mode php2shell` performs both the passive version assessment and active crash-signal checks. It tests only the supplied target: a host-only URL maps to `/index.php`, while an explicit non-root PHP path is preserved. It does not crawl, fingerprint, import API definitions, discover parameters, run other modules, or follow redirects. The legacy `--php2shell-active` flag is retained as a compatibility alias; it is not needed with this mode. A configured proxy can be used to inspect the requests.
+
+The request sequence is a baseline `GET`, a small multipart control `POST`, then bounded multipart probe `POST`s of approximately 1, 8, and 20 MiB if the preceding stop conditions permit them. A rejected control, certain rejection/rate-limit responses, transport errors, cancellation, or a detected memory-exhaustion signature stop further probes. A generic HTTP 500 on a probe does **not** by itself prove a vulnerability or necessarily stop the sequence.
+
+The HTML report's **Coverage** diagnostics retain each phase, HTTP status, request size, continuation decision, and stop reason. The assessment records PHP versions advertised by `X-Powered-By` or `Server` headers when available. `unknown` means there was insufficient evidence, `manual_review` needs vendor build/backport verification, `potential` is an older advertised upstream version, `fixed_version_observed` is only a banner observation, and `active_signal` means a PHP memory-exhaustion error signature was seen. A critical triage finding may be produced for version evidence or an active signal; it is **not confirmed code execution**. Check the installed PHP build, SAPI, patch/backport status, worker logs, and the [PHP security advisory](https://www.php.net/archive/2026.php#2026-10-21-5) before drawing a conclusion.
 
 ## Security testing coverage
 
@@ -417,15 +439,12 @@ Discovered URLs are retained even when they cannot be visited. A crawl that exha
 
 Unconfigured rate-limit checks produce observations, not vulnerability findings. A configured threshold proof also requires `window_seconds`; if the requests do not fit inside that window, the check is inconclusive. SQLi does not treat a 400 response or arithmetic evaluation alone as proof. New vendor-specific SQL errors in 400/422 responses must pass the replay and control verification path.
 
-## What's new in v0.2.9
+## What's new in v0.3.0
 
-- Restrict hidden-parameter discovery to request-shaped endpoint families, retain observed parameter names without redundant probes, and report grouped endpoint failures without failing otherwise useful coverage.
-- Run Server-Side JavaScript Injection only on Node.js or likely code-evaluation surfaces, reuse captured baselines, deduplicate route variants, and cap work per origin.
-- Propagate persisted technology fingerprints into module planning so framework-, server-, protocol-, and platform-specific checks avoid irrelevant targets.
-- Add hard per-origin request limits and early-stop behavior to expensive IIS, Nginx alias and Next.js checks.
-- Require two independent, per-attempt queued canary responses before confirming HTTP request smuggling; parser errors and status-only anomalies are diagnostic evidence, not vulnerabilities.
-- Preserve exact raw request-smuggling wire evidence and avoid presenting a misleading cURL reconstruction for protocol-level findings.
-- Show crawled pages, discovered endpoints, and sent requests as separate live counters.
+- Add a standalone PHP2Shell mode with passive banner assessment and bounded active checks, without crawling or running unrelated modules.
+- Preserve PHP2Shell baseline, control, and probe diagnostics in report coverage; distinguish version hints and crash signals from verified code execution.
+- Enable target-aware WAF payload adaptation automatically, with bounded variants and a separate opt-in for header/protocol mutations.
+- Improve request fidelity, cancellation handling, and evidence boundaries across crawling, parameter discovery, mutation, and verification.
 
 See [CHANGELOG.md](CHANGELOG.md) for release details.
 
