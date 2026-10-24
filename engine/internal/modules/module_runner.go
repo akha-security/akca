@@ -87,6 +87,11 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 		}
 		labURL, _ := r.cfg.PHP2ShellLabURL()
 		targets = []ScanTarget{{EndpointURL: labURL, Method: "GET"}}
+	} else if module == "php2shell" && !r.cfg.OnlyPHP2Shell() {
+		// Discovery can contain thousands of routes and adopted subdomains.
+		// This origin-level assessment needs only one root/index response per
+		// explicitly configured target, never one assessment per discovered URL.
+		targets = r.php2ShellFullScanTargets(targets)
 	}
 	allocation := r.allocateModuleBudget(module, targets)
 	defer r.finishModuleBudget(module, allocation)

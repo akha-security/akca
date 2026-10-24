@@ -181,7 +181,7 @@ func New(cfg config.ScanConfig, scopeEngine *scope.Engine, limiter *ratelimit.Li
 		Timeout:   30 * time.Second,
 		Transport: wireTransport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if !cfg.FollowRedirects {
+			if !cfg.FollowRedirects || redirectsDisabled(req.Context()) {
 				return http.ErrUseLastResponse
 			}
 			if len(via) >= 10 {
@@ -219,6 +219,19 @@ func (c *Client) SetSession(cookies map[string]string, headers map[string]string
 
 func (c *Client) Do(ctx context.Context, method, rawURL string, body []byte, headers map[string]string) (RequestResponse, error) {
 	return c.do(ctx, method, rawURL, body, headers, true, false)
+}
+
+type noRedirectsKey struct{}
+
+// WithoutRedirects keeps one probe on its exact URL without changing the
+// shared client's redirect policy for concurrently running scan modules.
+func WithoutRedirects(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noRedirectsKey{}, true)
+}
+
+func redirectsDisabled(ctx context.Context) bool {
+	disabled, _ := ctx.Value(noRedirectsKey{}).(bool)
+	return disabled
 }
 
 // DoWithoutSession executes a request without configured authentication headers

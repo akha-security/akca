@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
+	"github.com/akha-security/akca/engine/internal/config"
 	"github.com/akha-security/akca/engine/internal/findingtext"
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/php2shell"
@@ -21,11 +23,17 @@ func (r *Runner) runPHP2Shell(ctx context.Context, target ScanTarget) []ModuleFi
 	if ctx.Err() != nil || (r.scope != nil && !r.scope.IsInScope(target.EndpointURL)) {
 		return nil
 	}
+	if !r.cfg.OnlyPHP2Shell() {
+		origin, ok := php2ShellExplicitRootOrigin(r.cfg.Targets, target)
+		if !ok || !r.moduleWorkOnce("php2shell", origin) {
+			return nil
+		}
+	}
 	if ok, reason := r.shouldRunModule("php2shell", target); !ok {
 		r.emitSkip("php2shell", target, reason)
 		return nil
 	}
-	if !r.contentModuleOnce("php2shell", target) {
+	if r.cfg.OnlyPHP2Shell() && !r.contentModuleOnce("php2shell", target) {
 		return nil
 	}
 	rr, observed := observedResponse(ctx, target, false)
@@ -34,14 +42,14 @@ func (r *Runner) runPHP2Shell(ctx context.Context, target ScanTarget) []ModuleFi
 	// the request/response, which makes an otherwise completed active check
 	// appear as a failed/empty module result in the CLI summary.
 	httpDoer := observedHTTP{r.client}
-	if r.cfg.OnlyPHP2Shell() && !observed {
-		// Dedicated mode has no crawler response to reuse. Fetch only the
-		// explicit URL; full scans continue using previously observed metadata.
-		// Active mode must do this harmless GET too: using the multipart control
-		// response as the assessment can turn a vulnerable endpoint's 5xx into
-		// a generic "blocked" result and hide the normal version finding.
+	if !observed {
+		// A full scan uses a previously observed root/index response when
+		// available. Otherwise make one direct GET to the selected root/index
+		// URL. Never let this assessment follow a redirect to another route.
+		// Active mode also needs this harmless GET: using the multipart control
+		// response as the assessment can hide normal version evidence.
 		var err error
-		rr, err = httpDoer.Do(ctx, http.MethodGet, target.EndpointURL, nil, nil)
+		rr, err = httpDoer.Do(httpclient.WithoutRedirects(ctx), http.MethodGet, target.EndpointURL, nil, nil)
 		observed = err == nil && rr.Response.StatusCode > 0
 		r.emitPHP2ShellExchange("baseline", target, rr, err, map[string]interface{}{
 			"request_body_bytes": 0,
@@ -139,6 +147,77 @@ func (r *Runner) runPHP2Shell(ctx context.Context, target ScanTarget) []ModuleFi
 		r.recordFinding(ctx, &out, f, "php2shell", signal)
 	}
 	return out
+}
+
+// php2ShellFullScanTargets selects one passive assessment per explicit scan
+// origin. A crawled root/index GET can supply metadata without another
+// request; otherwise the module will issue one direct GET to /index.php.
+func (r *Runner) php2ShellFullScanTargets(discovered []ScanTarget) []ScanTarget {
+	selected := make([]ScanTarget, 0, len(r.cfg.Targets))
+	positions := make(map[string]int, len(r.cfg.Targets))
+	scores := make(map[string]int, len(r.cfg.Targets))
+	for _, raw := range r.cfg.Targets {
+		normalized, err := config.NormalizeTargetURL(raw)
+		if err != nil {
+			continue
+		}
+		u, err := url.Parse(normalized)
+		if err != nil {
+			continue
+		}
+		origin := strings.ToLower(u.Scheme + "://" + u.Host)
+		if _, exists := positions[origin]; exists {
+			continue
+		}
+		positions[origin] = len(selected)
+		selected = append(selected, ScanTarget{EndpointURL: origin + "/index.php", Method: http.MethodGet})
+	}
+	for _, candidate := range discovered {
+		origin, ok := php2ShellExplicitRootOrigin(r.cfg.Targets, candidate)
+		if !ok || candidate.ObservedResponse == nil || candidate.ObservedResponse.Response.StatusCode <= 0 {
+			continue
+		}
+		position, exists := positions[origin]
+		if !exists {
+			continue
+		}
+		score := 1
+		if parsed, err := url.Parse(candidate.EndpointURL); err == nil && parsed.Path == "/index.php" {
+			score = 2
+		}
+		if score <= scores[origin] {
+			continue
+		}
+		scores[origin] = score
+		selected[position] = ScanTarget{
+			EndpointURL: candidate.EndpointURL, Method: http.MethodGet,
+			ObservedResponse: candidate.ObservedResponse, ObservedComplete: candidate.ObservedComplete,
+		}
+	}
+	return selected
+}
+
+func php2ShellExplicitRootOrigin(configured []string, target ScanTarget) (string, bool) {
+	if !strings.EqualFold(strings.TrimSpace(target.Method), http.MethodGet) {
+		return "", false
+	}
+	u, err := url.Parse(target.EndpointURL)
+	if err != nil || u.User != nil || u.Opaque != "" || u.RawPath != "" || u.RawQuery != "" || u.Fragment != "" ||
+		(u.Path != "" && u.Path != "/" && u.Path != "/index.php") {
+		return "", false
+	}
+	origin := strings.ToLower(u.Scheme + "://" + u.Host)
+	for _, raw := range configured {
+		normalized, err := config.NormalizeTargetURL(raw)
+		if err != nil {
+			continue
+		}
+		base, err := url.Parse(normalized)
+		if err == nil && origin == strings.ToLower(base.Scheme+"://"+base.Host) {
+			return origin, true
+		}
+	}
+	return "", false
 }
 
 // runPHP2ShellActive mirrors the supplied Nuclei flow's bounded 1/8/20 MiB

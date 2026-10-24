@@ -7,6 +7,10 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Restrict PHP2Shell in full scans to one passive root or `/index.php` assessment per explicitly configured origin, without probing crawled routes, adopted subdomains or redirect destinations.
+
 ## [v0.3.0] - 2026-10-23
 
 ### Added
