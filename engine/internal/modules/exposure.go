@@ -169,6 +169,7 @@ func (r *Runner) cachedPassiveContentProbe(ctx context.Context, module string, t
 	r.baselineMu.Lock()
 	if rr, ok := r.baselineCache[key]; ok {
 		r.baselineMu.Unlock()
+		noteCachedEvidence(ctx, rr)
 		return rr, nil
 	}
 	r.baselineMu.Unlock()

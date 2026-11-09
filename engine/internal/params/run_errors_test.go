@@ -99,6 +99,30 @@ func TestRunFailsWhenEverySelectedEndpointFails(t *testing.T) {
 	}
 }
 
+func TestRejectedDiscoveryBaselineIsRemovedFromScannerTargets(t *testing.T) {
+	const scanID = "rejected-baseline"
+	const endpointURL = "https://example.test/api/missing?kind=1"
+	d := newRunErrorDiscoverer(t, scanID, []string{endpointURL}, nil)
+	id, err := d.db.GetEndpointID(scanID, endpointURL, http.MethodGet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.DiscoverEndpoint(context.Background(), id, endpointURL, http.MethodGet); err != nil {
+		t.Fatal(err)
+	}
+	var status int
+	if err := d.db.Conn().QueryRow(`SELECT json_extract(discovery_trail_json, '$.request_template.response_status') FROM endpoints WHERE id = ?`, id).Scan(&status); err != nil || status != http.StatusNotFound {
+		t.Fatalf("rejected baseline status was not persisted: status=%d err=%v", status, err)
+	}
+	endpoints, err := d.db.ListDiscoveryEndpoints(scanID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(endpoints) != 0 {
+		t.Fatalf("rejected URL remained in scanner target list: %+v", endpoints)
+	}
+}
+
 func TestParameterDiscoveryErrorClass(t *testing.T) {
 	tests := []struct {
 		err  error

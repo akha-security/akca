@@ -21,7 +21,6 @@ func PrioritizedWordlist(endpointURL string) []string {
 			front = append(front, n)
 		}
 	}
-	addFront("id", "q", "debug", "test", "file", "url", "redirect", "token", "search", "page")
 	switch {
 	case strings.Contains(lower, "checkout"), strings.Contains(lower, "cart"), strings.Contains(lower, "payment"):
 		addFront("amount", "price", "total", "quantity", "coupon", "discount", "currency", "order_id")
@@ -42,6 +41,7 @@ func PrioritizedWordlist(endpointURL string) []string {
 	case strings.Contains(lower, "api"), strings.Contains(lower, "rest"):
 		addFront("id", "user_id", "token", "limit", "offset", "page")
 	}
+	addFront("id", "q", "debug", "admin", "file", "url", "redirect", "token", "search", "page")
 	for _, n := range base {
 		if _, ok := seen[n]; ok {
 			continue
@@ -95,7 +95,7 @@ func DifferentialCandidates(endpointURL string, hints []DiscoveredParameter, lea
 		return maxItems <= 0 || len(out) < maxItems
 	}
 	base := PrioritizedWordlist(endpointURL)
-	coreCount := 32
+	coreCount := 8
 	if maxItems > 0 && coreCount > maxItems {
 		coreCount = maxItems
 	}

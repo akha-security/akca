@@ -31,6 +31,8 @@ type targetRun struct {
 	reserve         func() error
 	budgetExhausted atomic.Bool
 	interrupted     atomic.Bool
+	deferred        atomic.Bool
+	inconclusive    atomic.Bool
 	pendingTiming   atomic.Int64
 }
 type targetRunKey struct{}
@@ -77,6 +79,11 @@ func (s *targetRun) skipped(reason string) {
 }
 func noteExchange(ctx context.Context, err error) {
 	if s, ok := ctx.Value(targetRunKey{}).(*targetRun); ok {
+		if errors.Is(err, httpclient.ErrHostDeferred) {
+			s.deferred.Store(true)
+			s.skipped(err.Error())
+			return
+		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			s.interrupted.Store(true)
 		}

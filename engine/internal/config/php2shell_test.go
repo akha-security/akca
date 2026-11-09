@@ -18,12 +18,19 @@ func TestPHP2ShellActiveAcceptsExplicitLabHost(t *testing.T) {
 	}
 }
 
-func TestPHP2ShellActiveMustBeExplicitMode(t *testing.T) {
+func TestPHP2ShellActiveSupportsNormalFullScan(t *testing.T) {
 	cfg := DefaultScanConfig()
 	cfg.PHP2ShellActive = true
 	cfg.Targets = []string{"http://127.0.0.1:8080"}
+	if err := ApplyScanModes(&cfg, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ValidatePHP2ShellOptions(); err != nil {
+		t.Fatalf("active assessment should be accepted in a normal full scan: %v", err)
+	}
+	cfg.PassiveMode = true
 	if err := cfg.ValidatePHP2ShellOptions(); err == nil {
-		t.Fatal("active option must not silently broaden a full scan")
+		t.Fatal("active assessment must remain disabled in passive scans")
 	}
 }
 

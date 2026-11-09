@@ -90,7 +90,7 @@ func moduleSignalConfirmed(
 		if signal == "delayed_timing_confirmed" || signal == "timing_differential" {
 			return true
 		}
-		return nosqlSignalConfirmed(body, baseBody, probeStatus, baseStatus, signal)
+		return nosqlSignalConfirmed(body, baseBody, probeStatus, baseStatus, signal, probeHeaders)
 	case "ssrf":
 		if signal == "blind_oast" {
 			return false
@@ -102,7 +102,7 @@ func moduleSignalConfirmed(
 		}
 		return xxeSignalConfirmed(body, baseBody, signal)
 	case "lfi":
-		if signal == "rfi_oast" {
+		if signal == "rfi_oast" || probeStatus < 200 || probeStatus >= 300 {
 			return false
 		}
 		return deeptraversal.DetectSignal(body, baseBody, signal)
@@ -350,15 +350,14 @@ func differentialBodyConfirmed(body, baseline, payload string) bool {
 	return bodyDiffRatio(normBase, normBody) >= 0.12
 }
 
-func nosqlSignalConfirmed(body, baseline string, probeStatus, baseStatus int, signal string) bool {
+func nosqlSignalConfirmed(body, baseline string, probeStatus, baseStatus int, signal string, probeHeaders map[string]string) bool {
 	if body == baseline && probeStatus == baseStatus {
 		return false
 	}
 	if signal == "nosql_error_disclosure" {
-		// MongoDB/operator exceptions commonly use HTTP 500. Accept only the
-		// provider-specific marker set; generic status changes and framework
-		// error pages remain insufficient.
-		return nosql.IsMongoErrorDisclosure(body, baseline)
+		return nosql.IsMongoErrorResponse(
+			body, baseline, probeStatus, headerCI(probeHeaders, "Content-Type"),
+		)
 	}
 	if statusOnlyDifferential(probeStatus, baseStatus) {
 		return false

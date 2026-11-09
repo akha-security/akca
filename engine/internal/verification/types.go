@@ -81,17 +81,19 @@ type BaselineKey struct {
 }
 
 type BooleanPairProof struct {
-	BaselineHash      string `json:"baseline_hash"`
-	FirstTrueHash     string `json:"first_true_hash"`
-	FirstFalseHash    string `json:"first_false_hash"`
-	ReplayTrueHash    string `json:"replay_true_hash"`
-	ReplayFalseHash   string `json:"replay_false_hash"`
-	SecondTrueHash    string `json:"second_true_hash"`
-	SecondFalseHash   string `json:"second_false_hash"`
-	SyntaxControlHash string `json:"syntax_control_hash"`
-	Orientation       int    `json:"orientation"`
-	SameSurface       bool   `json:"same_surface"`
-	SyntaxControlOK   bool   `json:"syntax_control_ok"`
+	BaselineHash        string `json:"baseline_hash"`
+	FirstTrueHash       string `json:"first_true_hash"`
+	FirstFalseHash      string `json:"first_false_hash"`
+	ReplayTrueHash      string `json:"replay_true_hash"`
+	ReplayFalseHash     string `json:"replay_false_hash"`
+	SecondTrueHash      string `json:"second_true_hash"`
+	SecondFalseHash     string `json:"second_false_hash"`
+	NativeControlHash   string `json:"native_control_hash"`
+	ComplementTrueHash  string `json:"complement_true_hash"`
+	ComplementFalseHash string `json:"complement_false_hash"`
+	Orientation         int    `json:"orientation"`
+	SameSurface         bool   `json:"same_surface"`
+	NativeControlOK     bool   `json:"native_control_ok"`
 }
 
 // ArithmeticOracleProof records a stable numeric-expression oracle. It is a
@@ -111,42 +113,43 @@ type ArithmeticOracleProof struct {
 }
 
 type Candidate struct {
-	CrossOriginRead      bool
-	ScanID               string                        `json:"scan_id"`
-	Title                string                        `json:"title"`
-	VulnClass            string                        `json:"vuln_class"`
-	EndpointURL          string                        `json:"endpoint_url"`
-	Method               string                        `json:"method"`
-	Parameter            string                        `json:"parameter"`
-	Location             string                        `json:"location,omitempty"`
-	Payload              string                        `json:"payload"`
-	Module               string                        `json:"module"`
-	Signal               string                        `json:"signal,omitempty"`
-	Baseline             ResponseSnapshot              `json:"baseline"`
-	Probe                ResponseSnapshot              `json:"probe"`
-	Reflection           *reflection.ReflectionProfile `json:"reflection,omitempty"`
-	OAST                 *oast.Correlation             `json:"oast,omitempty"`
-	StabilityRuns        []ResponseSnapshot            `json:"stability_runs,omitempty"`
-	TypedReplayHits      []bool                        `json:"typed_replay_hits,omitempty"`
-	PolymorphicHits      []bool                        `json:"polymorphic_hits,omitempty"`
-	NegativeControlSet   bool                          `json:"negative_control_set,omitempty"`
-	NegativeControlOK    bool                          `json:"negative_control_ok,omitempty"`
-	HoneypotCanaries     []string                      `json:"honeypot_canaries,omitempty"`
-	HoneypotBodies       []string                      `json:"honeypot_bodies,omitempty"`
-	TimingSamples        []int64                       `json:"timing_samples,omitempty"`
-	TimingControl        []int64                       `json:"timing_control,omitempty"`
-	TimingBaseline       []int64                       `json:"timing_baseline,omitempty"`
-	TimingMatchedControl []int64                       `json:"timing_matched_control,omitempty"`
-	DOMPresent           bool                          `json:"dom_present"`
-	DOMExecuted          bool                          `json:"dom_executed"`
-	ExpectedEquivalent   bool                          `json:"expected_equivalent,omitempty"`
-	DirectTypedSignal    bool                          `json:"direct_typed_signal,omitempty"`
-	BooleanPairProof     *BooleanPairProof             `json:"boolean_pair_proof,omitempty"`
-	ArithmeticProof      *ArithmeticOracleProof        `json:"arithmetic_oracle_proof,omitempty"`
-	Observations         []Observation                 `json:"observations,omitempty"`
-	ProofPolicyVersion   string                        `json:"proof_policy_version,omitempty"`
-	RequestedProofType   ProofType                     `json:"requested_proof_type,omitempty"`
-	LearningFP           float64                       `json:"learning_false_positive_rate,omitempty"`
+	CrossOriginRead       bool
+	ScanID                string                        `json:"scan_id"`
+	Title                 string                        `json:"title"`
+	VulnClass             string                        `json:"vuln_class"`
+	EndpointURL           string                        `json:"endpoint_url"`
+	Method                string                        `json:"method"`
+	Parameter             string                        `json:"parameter"`
+	Location              string                        `json:"location,omitempty"`
+	Payload               string                        `json:"payload"`
+	Module                string                        `json:"module"`
+	Signal                string                        `json:"signal,omitempty"`
+	Baseline              ResponseSnapshot              `json:"baseline"`
+	Probe                 ResponseSnapshot              `json:"probe"`
+	Reflection            *reflection.ReflectionProfile `json:"reflection,omitempty"`
+	OAST                  *oast.Correlation             `json:"oast,omitempty"`
+	StabilityRuns         []ResponseSnapshot            `json:"stability_runs,omitempty"`
+	TypedReplayHits       []bool                        `json:"typed_replay_hits,omitempty"`
+	PolymorphicHits       []bool                        `json:"polymorphic_hits,omitempty"`
+	NegativeControlSet    bool                          `json:"negative_control_set,omitempty"`
+	NegativeControlOK     bool                          `json:"negative_control_ok,omitempty"`
+	HoneypotCanaries      []string                      `json:"honeypot_canaries,omitempty"`
+	HoneypotBodies        []string                      `json:"honeypot_bodies,omitempty"`
+	TimingSamples         []int64                       `json:"timing_samples,omitempty"`
+	TimingControl         []int64                       `json:"timing_control,omitempty"`
+	TimingBaseline        []int64                       `json:"timing_baseline,omitempty"`
+	TimingMatchedControl  []int64                       `json:"timing_matched_control,omitempty"`
+	DOMPresent            bool                          `json:"dom_present"`
+	DOMExecuted           bool                          `json:"dom_executed"`
+	ExpectedEquivalent    bool                          `json:"expected_equivalent,omitempty"`
+	DirectTypedSignal     bool                          `json:"direct_typed_signal,omitempty"`
+	BooleanPairProof      *BooleanPairProof             `json:"boolean_pair_proof,omitempty"`
+	ArithmeticProof       *ArithmeticOracleProof        `json:"arithmetic_oracle_proof,omitempty"`
+	PrivateResourceCanary string                        `json:"private_resource_canary,omitempty"`
+	Observations          []Observation                 `json:"observations,omitempty"`
+	ProofPolicyVersion    string                        `json:"proof_policy_version,omitempty"`
+	RequestedProofType    ProofType                     `json:"requested_proof_type,omitempty"`
+	LearningFP            float64                       `json:"learning_false_positive_rate,omitempty"`
 }
 
 type Result struct {

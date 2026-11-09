@@ -3,16 +3,21 @@ package jsanalyzer
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/akha-security/akca/engine/internal/crawler"
 	"github.com/akha-security/akca/engine/internal/findingevent"
 	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/queue"
 	"github.com/akha-security/akca/engine/internal/scope"
 	"github.com/akha-security/akca/engine/internal/secretscan"
 	"github.com/akha-security/akca/engine/internal/storage"
+	"github.com/akha-security/akca/engine/internal/urlutil"
 )
 
 type HTTPDoer interface {
@@ -28,12 +33,22 @@ type Analyzer struct {
 	emit     EventSink
 	maxBytes int
 	preview  int
+	workers  int
 }
 
 func New(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *storage.DB, q *queue.RequestQueue, emit EventSink) *Analyzer {
+	if emit == nil {
+		emit = func(string, string, map[string]interface{}) error { return nil }
+	}
 	return &Analyzer{
 		scanID: scanID, client: client, scope: scopeEngine, db: db, queue: q, emit: emit,
-		maxBytes: DefaultMaxJSBytes, preview: DefaultPreviewBytes,
+		maxBytes: DefaultMaxJSBytes, preview: DefaultPreviewBytes, workers: 4,
+	}
+}
+
+func (a *Analyzer) SetConcurrency(workers int) {
+	if workers > 0 {
+		a.workers = min(workers, 8)
 	}
 }
 
@@ -41,7 +56,32 @@ func (a *Analyzer) AnalyzeContent(jsURL, body string) AnalysisResult {
 	content, truncated, previewOnly := PrepareContent(body, a.maxBytes, a.preview)
 	ast := ExtractASTLite(content)
 	heur := ExtractHeuristic(content)
-	merged := DeduplicateSemantic(append(ast, heur...))
+	// Reuse the call-expression parser so fetch options and axios request
+	// bodies survive discovery instead of being guessed from adjacent words.
+	var extracted []ExtractedEndpoint
+	callURLs := map[string]bool{}
+	for _, ep := range crawler.ExtractASTFromJSBundle(jsURL, content) {
+		callURLs[ep.URL] = true
+		item := ExtractedEndpoint{URL: ep.URL, Method: ep.Method, Source: "call_expression",
+			Extraction: "ast", Confidence: ep.Confidence, Why: ep.WhyDiscovered}
+		if strings.HasPrefix(ep.WhyDiscovered, "dynamic import") {
+			item.Source = "dynamic_import"
+		}
+		if ep.RequestTemplate != nil {
+			t := ep.RequestTemplate
+			item.RequestTemplate = &storage.DiscoveryRequestTemplate{
+				Method: ep.Method, URL: ep.URL, Headers: t.Headers, Body: t.Body, ContentType: t.ContentType,
+			}
+		}
+		extracted = append(extracted, item)
+	}
+	for _, ep := range append(ast, heur...) {
+		resolved, _ := resolveReference(jsURL, ep.URL)
+		if !callURLs[resolved] {
+			extracted = append(extracted, ep)
+		}
+	}
+	merged := DeduplicateSemantic(extracted)
 	filtered := make([]ExtractedEndpoint, 0, len(merged))
 	for _, endpoint := range merged {
 		// Script dependencies are navigation inputs, not vulnerability signals.
@@ -61,19 +101,33 @@ func (a *Analyzer) AnalyzeContent(jsURL, body string) AnalysisResult {
 }
 
 func (a *Analyzer) DownloadAndAnalyze(ctx context.Context, jsURL string) (AnalysisResult, error) {
+	result, err := a.downloadAndAnalyze(ctx, jsURL)
+	if err == nil && result.JSURL != "" {
+		err = a.publishResult(result)
+	}
+	return result, err
+}
+
+func (a *Analyzer) downloadAndAnalyze(ctx context.Context, jsURL string) (AnalysisResult, error) {
 	if !a.scope.IsInScope(jsURL) {
 		return AnalysisResult{}, nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	rr, err := a.client.Do(ctx, http.MethodGet, jsURL, nil, nil)
 	if err != nil {
 		return AnalysisResult{}, err
 	}
-	if rr.Response.StatusCode == http.StatusNotFound || rr.Response.StatusCode == http.StatusGone {
+	if rr.Response.StatusCode < 200 || rr.Response.StatusCode >= 300 {
 		return AnalysisResult{}, nil
+	}
+	for key, value := range rr.Response.Headers {
+		if strings.EqualFold(key, "Content-Type") && strings.Contains(strings.ToLower(value), "html") {
+			return AnalysisResult{}, nil
+		}
 	}
 	result := a.AnalyzeContent(jsURL, rr.Response.Body)
 	result.SourceMaps = a.verifySourceMaps(ctx, result.SourceMaps)
-	a.publishResult(result)
 	return result, nil
 }
 
@@ -82,51 +136,95 @@ func (a *Analyzer) Run(ctx context.Context, jsURLs []string) error {
 		"scan_id": a.scanID, "sources": len(jsURLs),
 	})
 	const maxRecursiveScripts = 2000
-	pending := append([]string(nil), jsURLs...)
-	scheduled := make(map[string]struct{}, len(pending))
-	for _, jsURL := range pending {
+	var pending []string
+	scheduled := make(map[string]struct{})
+	limitReached := false
+	schedule := func(rawURL string) {
+		u, err := url.Parse(rawURL)
+		if err != nil {
+			return
+		}
+		u.Fragment = ""
+		jsURL := u.String()
+		if !urlutil.IsPlausibleEndpointURL(jsURL) || urlutil.HasPathTemplate(jsURL) || !a.scope.IsInScope(jsURL) {
+			return
+		}
+		if _, duplicate := scheduled[jsURL]; duplicate {
+			return
+		}
+		if len(scheduled) >= maxRecursiveScripts {
+			limitReached = true
+			return
+		}
 		scheduled[jsURL] = struct{}{}
+		pending = append(pending, jsURL)
 	}
-	seen := make(map[string]struct{}, len(pending))
-	analyzed := 0
-	for len(pending) > 0 && analyzed < maxRecursiveScripts {
+	for _, jsURL := range jsURLs {
+		schedule(jsURL)
+	}
+	workers := a.workers
+	if workers <= 0 {
+		workers = 4
+	}
+	analyzed, attempted, failures := 0, 0, 0
+	for len(pending) > 0 {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		jsURL := pending[0]
-		pending = pending[1:]
-		if _, duplicate := seen[jsURL]; duplicate {
-			continue
+		batch := pending[:min(workers, len(pending))]
+		pending = pending[len(batch):]
+		type outcome struct {
+			result AnalysisResult
+			err    error
 		}
-		seen[jsURL] = struct{}{}
-		result, err := a.DownloadAndAnalyze(ctx, jsURL)
-		if err != nil {
-			_ = a.emit("log", err.Error(), map[string]interface{}{"js_url": jsURL})
-			continue
+		results := make([]outcome, len(batch))
+		var wg sync.WaitGroup
+		for i, jsURL := range batch {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				results[i].result, results[i].err = a.downloadAndAnalyze(ctx, jsURL)
+			}()
 		}
-		analyzed++
-		for _, endpoint := range result.Endpoints {
-			if !javascriptDependency(endpoint) {
+		wg.Wait()
+		// Persist and publish on one goroutine. Event sinks and request template
+		// merging retain their ordering while network downloads run concurrently.
+		for i, item := range results {
+			attempted++
+			if item.err == nil && item.result.JSURL != "" {
+				analyzed++
+				item.err = a.publishResult(item.result)
+			}
+			if item.err != nil {
+				failures++
+				_ = a.emit("log", item.err.Error(), map[string]interface{}{"js_url": batch[i]})
 				continue
 			}
-			resolved, resolveErr := resolveReference(jsURL, endpoint.URL)
-			if resolveErr != nil || resolved == "" || !a.scope.IsInScope(resolved) {
-				continue
-			}
-			if _, duplicate := scheduled[resolved]; !duplicate {
-				scheduled[resolved] = struct{}{}
-				pending = append(pending, resolved)
+			for _, endpoint := range item.result.Endpoints {
+				if javascriptDependency(endpoint) {
+					resolved, err := resolveReference(batch[i], endpoint.URL)
+					if err == nil {
+						schedule(resolved)
+					}
+				}
 			}
 		}
+		_ = a.emit("js_analysis_progress", "JavaScript analysis progress", map[string]interface{}{
+			"scan_id": a.scanID, "completed": attempted, "analyzed_sources": analyzed,
+			"queued_sources": len(pending), "discovered_sources": len(scheduled), "failed_sources": failures,
+		})
 	}
-	if len(pending) > 0 {
+	if limitReached {
 		_ = a.emit("coverage_gap", "JavaScript dependency analysis reached its safety ceiling", map[string]interface{}{
-			"phase": "js_analysis", "analyzed": analyzed, "remaining": len(pending), "reason": "js_dependency_limit",
+			"phase": "js_analysis", "analyzed": analyzed, "limit": maxRecursiveScripts, "reason": "js_dependency_limit",
 		})
 	}
 	_ = a.emit("js_analysis_finished", "js analysis finished", map[string]interface{}{
-		"scan_id": a.scanID, "analyzed_sources": analyzed, "discovered_dependencies": len(scheduled),
+		"scan_id": a.scanID, "analyzed_sources": analyzed, "discovered_dependencies": len(scheduled), "failed_sources": failures,
 	})
+	if failures > 0 || limitReached {
+		return fmt.Errorf("JavaScript analysis incomplete: %d failed sources (dependency limit reached: %t)", failures, limitReached)
+	}
 	return nil
 }
 
@@ -151,7 +249,7 @@ func (a *Analyzer) RunFromStorage(ctx context.Context) error {
 	return a.Run(ctx, urls)
 }
 
-func (a *Analyzer) publishResult(result AnalysisResult) {
+func (a *Analyzer) publishResult(result AnalysisResult) error {
 	_ = a.emit("crawler_js_file_found", result.JSURL, map[string]interface{}{
 		"scan_id": a.scanID, "js_url": result.JSURL, "truncated": result.Truncated,
 		"preview_only": result.PreviewOnly, "bytes": result.BytesAnalyzed,
@@ -160,14 +258,19 @@ func (a *Analyzer) publishResult(result AnalysisResult) {
 
 	for _, ep := range result.Endpoints {
 		resolved, _ := resolveReference(result.JSURL, ep.URL)
-		if resolved == "" || !a.scope.IsInScope(resolved) {
+		if !urlutil.IsPlausibleEndpointURL(resolved) || !a.scope.IsInScope(resolved) {
 			continue
 		}
-		_ = a.db.SaveDiscoveredEndpoint(a.scanID, map[string]interface{}{
+		if err := a.db.SaveDiscoveredEndpoint(a.scanID, map[string]interface{}{
 			"url": resolved, "method": ep.Method, "normalized_url": resolved,
 			"source": "js_analyzer", "confidence": ep.Confidence, "why_discovered": ep.Why,
-		})
-		a.queue.Enqueue(queue.Item{URL: resolved, Method: ep.Method, Priority: int(ep.Confidence * 100)})
+			"request_template": ep.RequestTemplate,
+		}); err != nil {
+			return err
+		}
+		if a.queue != nil {
+			a.queue.Enqueue(queue.Item{URL: resolved, Method: ep.Method, Priority: int(ep.Confidence * 100)})
+		}
 	}
 
 	if len(result.Endpoints) > 0 {
@@ -241,6 +344,7 @@ func (a *Analyzer) publishResult(result AnalysisResult) {
 			}
 		}
 	}
+	return nil
 }
 
 func (a *Analyzer) verifySourceMaps(ctx context.Context, refs []SourceMapRef) []SourceMapRef {

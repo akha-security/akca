@@ -304,9 +304,15 @@ func (r *Runner) shouldRunModule(name string, target ScanTarget) (bool, string) 
 	if !r.cfg.AllowsModule(name) {
 		return false, "disabled by scan config"
 	}
+	if reason := r.activeTargetReason(name, target); reason != "" {
+		return false, reason
+	}
 	loc := strings.ToLower(strings.TrimSpace(target.Location))
 	if loc == "" {
 		loc = strings.ToLower(strings.TrimSpace(target.Profile.ParameterLocation))
+	}
+	if loc == "header" && activeInputModule(name) && isBrowserControlHeader(target.Parameter) {
+		return false, "browser control header is not an application input"
 	}
 	// These checks currently produce useful leads, but they do not yet have a
 	// deterministic, class-specific automatic proof contract. Keep them out of

@@ -120,7 +120,7 @@ func (b *Builder) BuildMeta(opts Options) (Document, error) {
 		doc.Warnings = append(doc.Warnings, "Scan coverage contains explicit gaps; review the coverage section before treating absence of findings as assurance.")
 	}
 
-	if !opts.FastPartial && (opts.Template == TemplateInternal || opts.Template == TemplateAppendix) {
+	if opts.Template == TemplateInternal || opts.Template == TemplateAppendix {
 		leads, err := b.buildManualLeads(opts)
 		if err != nil {
 			doc.Partial = true
@@ -197,7 +197,7 @@ func (b *Builder) buildManualLeads(opts Options) ([]ManualLeadEntry, error) {
 		FindingIDs: opts.FindingIDs, SearchQuery: opts.SearchQuery,
 	}
 	var out []ManualLeadEntry
-	err := b.db.IterateFindingsFiltered(filter, func(rec storage.FindingRecord) error {
+	appendLead := func(rec storage.FindingRecord) error {
 		entry := FindingFromRecord(rec, opts.Redact)
 		if reportableFinding(entry, opts.Template) {
 			return nil
@@ -207,8 +207,23 @@ func (b *Builder) buildManualLeads(opts Options) ([]ManualLeadEntry, error) {
 			Warning: "This lead was not automatically proven and must not be submitted as a bug-bounty finding.",
 		})
 		return nil
-	})
-	return out, err
+	}
+	if opts.FastPartial {
+		// Interrupt reports remain bounded, but must retain the same candidate
+		// records the CLI already showed during this scan.
+		filter.Limit = opts.MaxFindings
+		rows, err := b.db.ListFindingsFiltered(filter)
+		if err != nil {
+			return nil, err
+		}
+		for _, rec := range rows {
+			if err := appendLead(rec); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+	}
+	return out, b.db.IterateFindingsFiltered(filter, appendLead)
 }
 
 func (b *Builder) buildTrafficSection(scanID string, redact bool) ([]TrafficEntry, error) {
@@ -326,9 +341,7 @@ func FindingFromRecord(rec storage.FindingRecord, redact bool) FindingEntry {
 		desc = rec.Summary
 	}
 	httpEv := httpEvidenceFromRecord(rec)
-	if isPassiveVulnClass(rec.VulnClass) || strings.HasPrefix(strings.ToLower(httpEv.Signal), "passive_") {
-		httpEv.ProofSatisfied = true
-	}
+	httpEv.ProofSatisfied = storedProofEligible(rec.VulnClass, httpEv)
 	cwe, owasp := taxonomyFor(rec.VulnClass, httpEv.Signal)
 	entry := FindingEntry{
 		ID:                rec.ID,
@@ -377,24 +390,8 @@ func (b *Builder) ReportFinding(rec storage.FindingRecord, opts Options) (Findin
 	return entry, reportableFinding(entry, opts.Template)
 }
 
-func isPassiveVulnClass(vulnClass string) bool {
-	switch strings.ToLower(strings.TrimSpace(vulnClass)) {
-	case "secret_exposure", "security_headers", "tls_misconfig", "vulnerable_components",
-		"sensitive_data", "cicd_exposure", "git_recovery", "source_code_disclosure",
-		"graphql", "script_source", "websocket", "cloud_storage", "cloud_posture",
-		"actuator", "backup_archives", "cloud_takeover", "devops_exposure",
-		"api_exposure", "api_versioning", "debug_admin", "wordpress_fuzz":
-		return true
-	default:
-		return false
-	}
-}
-
 func reportableFinding(entry FindingEntry, template TemplateKind) bool {
 	if !entry.HTTPEvidence.ProofSatisfied {
-		if isPassiveVulnClass(entry.VulnClass) && (strings.EqualFold(entry.Confidence, "Confirmed") || strings.EqualFold(entry.Confidence, "HighConfidence")) {
-			return true
-		}
 		return false
 	}
 	if template == TemplateHackerOne || template == TemplateBugcrowd {
@@ -466,7 +463,7 @@ func templateSummary(t TemplateKind) string {
 	case TemplateAppendix:
 		return "Detailed technical evidence supporting findings from the automated scan."
 	default:
-		return "Bug-bounty-ready report with scope, reproduction steps, evidence, impact, and remediation guidance."
+		return "Assessment findings, supporting evidence, and remediation guidance for the scanned scope."
 	}
 }
 

@@ -276,6 +276,7 @@ type ScanConfig struct {
 	OASTDrainTimeout              time.Duration                 `json:"oast_drain_timeout,omitempty"`
 	EnableFuzzing                 bool                          `json:"enable_fuzzing"`
 	Enable403BypassChecks         bool                          `json:"enable_403_bypass_checks"`
+	ForceActiveScanURLs           []string                      `json:"force_active_scan_urls,omitempty"`
 	EnableRawTrafficStorage       bool                          `json:"enable_raw_traffic_storage"`
 	RedactionEnabled              bool                          `json:"redaction_enabled"`
 	SmartScanProfile              string                        `json:"smart_scan_profile"`

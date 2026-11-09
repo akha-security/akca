@@ -156,7 +156,7 @@ func (r *Runner) recordFinding(_ context.Context, out *[]ModuleFinding, f *Modul
 
 func findingProofEligible(f ModuleFinding) bool {
 	if _, governed := verification.ProofPolicy(f.VulnClass); !governed {
-		return true
+		return false
 	}
 	result := f.Evidence.Verification
 	return result.ProofSatisfied &&

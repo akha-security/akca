@@ -4,21 +4,27 @@ import (
 	"context"
 
 	"github.com/akha-security/akca/engine/internal/fuzzing"
+	"github.com/akha-security/akca/engine/internal/httpclient"
 )
 
-func (e *Engine) runFuzzingPhase(ctx context.Context, targets []string) error {
+func (e *Engine) runFuzzingPhase(ctx context.Context, targets []string) (phaseErr error) {
+	ctx = httpclient.WithBackgroundDiscovery(ctx)
 	if !e.session.Config.EnableFuzzing {
 		return nil
 	}
 	e.session.SetPhase("fuzzing")
 	_ = e.Emit("phase_started", "fuzzing", map[string]interface{}{"phase": "fuzzing"})
 	defer func() {
+		status := "completed"
+		if phaseErr != nil {
+			status = "partial"
+		}
 		var metrics interface{}
 		if e.queue403 != nil {
 			metrics = e.queue403.Metrics()
 		}
 		_ = e.Emit("phase_finished", "fuzzing", map[string]interface{}{
-			"phase": "fuzzing", "queue_403": metrics,
+			"phase": "fuzzing", "queue_403": metrics, "status": status,
 		})
 	}()
 
@@ -39,9 +45,10 @@ func (e *Engine) runFuzzingPhase(ctx context.Context, targets []string) error {
 		if ctx.Err() != nil {
 			return err
 		}
-		_ = e.Emit("log", "fuzzing phase encountered non-fatal errors: "+err.Error(), map[string]interface{}{
+		_ = e.Emit("coverage_gap", "fuzzing phase incomplete: "+err.Error(), map[string]interface{}{
 			"scan_id": e.session.ID, "phase": "fuzzing",
 		})
+		return err
 	}
 	return nil
 }

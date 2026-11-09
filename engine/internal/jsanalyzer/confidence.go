@@ -1,19 +1,28 @@
 package jsanalyzer
 
 import (
+	"net/url"
 	"regexp"
 	"strings"
 )
 
-var dynamicSeg = regexp.MustCompile(`/:id|/\{[^}]+\}|/\[[^\]]+\]|/\d+`)
+var dynamicSeg = regexp.MustCompile(`^(?::id|\{[^}]+\}|\[[^\]]+\]|\d+)$`)
 
 func NormalizeTemplate(raw string) string {
-	t := strings.TrimSpace(raw)
-	t = dynamicSeg.ReplaceAllString(t, "/:id")
-	for strings.Contains(t, "//") {
-		t = strings.ReplaceAll(t, "//", "/")
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return strings.TrimSpace(raw)
 	}
-	return t
+	parts := strings.Split(u.Path, "/")
+	for i, part := range parts {
+		if dynamicSeg.MatchString(part) {
+			parts[i] = ":id"
+		}
+	}
+	u.Path = strings.Join(parts, "/")
+	u.RawPath = ""
+	u.Fragment = ""
+	return u.String()
 }
 
 func ScoreEndpoint(raw, extraction, method string) float64 {

@@ -19,6 +19,7 @@
 /engine/coverage
 /dist/
 /release/
+/.akca-test/
 
 # Scan output and local state
 /output/

@@ -80,21 +80,22 @@ type ScanTarget struct {
 }
 
 type Evidence struct {
-	Module          string                    `json:"module"`
-	Signal          string                    `json:"signal"`
-	Payload         payloadgen.Payload        `json:"payload"`
-	RawRequest      string                    `json:"raw_request,omitempty"`
-	Parameter       string                    `json:"parameter,omitempty"`
-	Location        string                    `json:"location,omitempty"`
-	ResponseMarkers []string                  `json:"response_markers,omitempty"`
-	MethodVariants  []MethodVariantEvidence   `json:"method_variants,omitempty"`
-	Request         httpclient.RequestRecord  `json:"request"`
-	Response        httpclient.ResponseRecord `json:"response"`
-	Verification    verification.Result       `json:"verification"`
-	OASTURL         string                    `json:"oast_url,omitempty"`
-	StoredMarker    string                    `json:"stored_marker,omitempty"`
-	ReplayPlan      []ReplayStep              `json:"replay_plan,omitempty"`
-	DetectedAt      time.Time                 `json:"detected_at"`
+	Module            string                     `json:"module"`
+	Signal            string                     `json:"signal"`
+	Payload           payloadgen.Payload         `json:"payload"`
+	RawRequest        string                     `json:"raw_request,omitempty"`
+	Parameter         string                     `json:"parameter,omitempty"`
+	Location          string                     `json:"location,omitempty"`
+	ResponseMarkers   []string                   `json:"response_markers,omitempty"`
+	MethodVariants    []MethodVariantEvidence    `json:"method_variants,omitempty"`
+	Request           httpclient.RequestRecord   `json:"request"`
+	Response          httpclient.ResponseRecord  `json:"response"`
+	Verification      verification.Result        `json:"verification"`
+	OASTURL           string                     `json:"oast_url,omitempty"`
+	StoredMarker      string                     `json:"stored_marker,omitempty"`
+	ReplayPlan        []ReplayStep               `json:"replay_plan,omitempty"`
+	ResourceReference *httpclient.ResponseRecord `json:"private_resource_reference,omitempty"`
+	DetectedAt        time.Time                  `json:"detected_at"`
 }
 
 type MethodVariantEvidence struct {
@@ -154,6 +155,8 @@ type Runner struct {
 	secretScanCache   map[string][]secretscan.Match
 	sqliBaselineMu    sync.Mutex
 	sqliBaselines     map[string]*sqliBaselineCacheEntry
+	sqliTimingGateMu  sync.Mutex
+	sqliTimingGates   map[string]*sync.RWMutex
 	timingMu          sync.Mutex
 	delayedTiming     []delayedTimingProbe
 	noticeMu          sync.Mutex
@@ -163,6 +166,10 @@ type Runner struct {
 	tlsReported       map[string]struct{}
 	moduleSeenMu      sync.Mutex
 	moduleSeen        map[string]struct{}
+	completedWorkMu   sync.Mutex
+	completedWork     map[string]map[string]bool
+	moduleStatusMu    sync.Mutex
+	moduleStatuses    map[string]string
 	testedEndpointMu  sync.Mutex
 	testedEndpoints   map[string]struct{}
 	backupOriginMu    sync.Mutex
@@ -185,6 +192,26 @@ type Runner struct {
 	adaptiveBudgetMu       sync.Mutex
 	adaptiveBudget         *adaptiveScanBudget
 	remainingRequestBudget *int
+}
+
+// LastModuleStatus reports the last RunModule outcome without changing its
+// established error contract for callers that treat skipped work as benign.
+func (r *Runner) LastModuleStatus(module string) string {
+	if r == nil {
+		return ""
+	}
+	r.moduleStatusMu.Lock()
+	defer r.moduleStatusMu.Unlock()
+	return r.moduleStatuses[module]
+}
+
+func (r *Runner) setModuleStatus(module, status string) {
+	r.moduleStatusMu.Lock()
+	defer r.moduleStatusMu.Unlock()
+	if r.moduleStatuses == nil {
+		r.moduleStatuses = make(map[string]string)
+	}
+	r.moduleStatuses[module] = status
 }
 
 // ProbeCount reports vulnerability-module probe attempts independently from
@@ -1060,7 +1087,13 @@ func (r *Runner) findingKey(f ModuleFinding) string {
 	}
 	signal := strings.ToLower(strings.TrimSpace(f.Evidence.Signal))
 	if collapsePayloadVariants(module, parameter) {
-		signal = ""
+		// Keep one finding per proof family. A verified delay is independently
+		// useful evidence even when a boolean oracle was found first.
+		if module == "sqli" && (signal == "timing_differential" || signal == "stacked_timing" || signal == "delayed_timing_confirmed") {
+			signal = "timing"
+		} else {
+			signal = ""
+		}
 	}
 	return strings.Join([]string{r.scanID, module, method, endpoint, parameter, location, signal}, "\x1f")
 }

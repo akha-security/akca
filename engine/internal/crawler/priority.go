@@ -32,6 +32,9 @@ func ScoreEndpoint(ep DiscoveredEndpoint) int {
 	}
 
 	score -= staticAssetPenalty(path)
+	if (strings.Contains(ep.WhyDiscovered, "common API/OIDC/AsyncAPI discovery path") || ep.Source == SourceRobots || ep.Source == SourceSitemap) && score > 55 {
+		score = 55
+	}
 
 	if score < 1 {
 		score = 1

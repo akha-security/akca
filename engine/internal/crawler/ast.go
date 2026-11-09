@@ -1,7 +1,7 @@
 package crawler
 
 import (
-	"fmt"
+	"encoding/json"
 	"strings"
 )
 
@@ -300,8 +300,8 @@ func objURLMethodFull(toks []token, k int) (rawURL, method string, headers map[s
 				}
 			}
 			if (key == "data" || key == "body" || key == "params") && isPunct(toks, i+1, ":") {
-				if isPunct(toks, i+2, "{") {
-					keys, _ := parseObjectLiteralKeys(toks, i+2)
+				if brace := bodyObjectStart(toks, i+2); brace >= 0 {
+					keys, _ := parseObjectLiteralKeys(toks, brace)
 					bodyKeys = append(bodyKeys, keys...)
 				} else if s, ok := stringAt(toks, i+2); ok {
 					body = s
@@ -376,8 +376,8 @@ func parseFetchOptions(toks []token, start int) (method string, headers map[stri
 				}
 			}
 			if key == "body" && isPunct(toks, i+1, ":") {
-				if isPunct(toks, i+2, "{") {
-					keys, _ := parseObjectLiteralKeys(toks, i+2)
+				if brace := bodyObjectStart(toks, i+2); brace >= 0 {
+					keys, _ := parseObjectLiteralKeys(toks, brace)
 					bodyKeys = append(bodyKeys, keys...)
 				} else if s, ok := stringAt(toks, i+2); ok {
 					body = s
@@ -432,6 +432,8 @@ func parseObjectLiteralKeys(toks []token, braceIdx int) ([]string, int) {
 	}
 	var keys []string
 	depth := 0
+	brackets, parens := 0, 0
+	expectKey := true
 	for i := braceIdx; i < len(toks); i++ {
 		if toks[i].kind == tokPunct && toks[i].val == "{" {
 			depth++
@@ -441,6 +443,41 @@ func parseObjectLiteralKeys(toks []token, braceIdx int) ([]string, int) {
 				return keys, i
 			}
 		} else if depth == 1 {
+			if isPunct(toks, i, "[") {
+				brackets++
+				expectKey = false
+				continue
+			}
+			if isPunct(toks, i, "]") {
+				brackets--
+				continue
+			}
+			if isPunct(toks, i, "(") {
+				parens++
+				expectKey = false
+				continue
+			}
+			if isPunct(toks, i, ")") {
+				parens--
+				continue
+			}
+			if brackets != 0 || parens != 0 {
+				continue
+			}
+			if isPunct(toks, i, ",") {
+				expectKey = true
+				continue
+			}
+			if !expectKey {
+				continue
+			}
+			expectKey = false
+			// Values and function arguments are not parameter names. Accept
+			// only a property key or an identifier used as a shorthand member.
+			isKey := isPunct(toks, i+1, ":") || (toks[i].kind == tokIdent && (isPunct(toks, i+1, ",") || isPunct(toks, i+1, "}")))
+			if !isKey {
+				continue
+			}
 			if toks[i].kind == tokIdent {
 				k := strings.TrimSpace(toks[i].val)
 				if k != "" && !isReservedJSKeyword(k) {
@@ -455,6 +492,18 @@ func parseObjectLiteralKeys(toks []token, braceIdx int) ([]string, int) {
 		}
 	}
 	return keys, len(toks)
+}
+
+func bodyObjectStart(toks []token, start int) int {
+	if isPunct(toks, start, "{") {
+		return start
+	}
+	if start+4 < len(toks) && toks[start].kind == tokIdent && toks[start].val == "JSON" &&
+		isPunct(toks, start+1, ".") && toks[start+2].val == "stringify" &&
+		isPunct(toks, start+3, "(") && isPunct(toks, start+4, "{") {
+		return start + 4
+	}
+	return -1
 }
 
 func parseObjectLiteralKeyValue(toks []token, braceIdx int) (map[string]string, int) {
@@ -504,7 +553,8 @@ func buildObjectTemplate(keys []string) string {
 			continue
 		}
 		seen[k] = true
-		parts = append(parts, fmt.Sprintf(`"%s":"test"`, k))
+		encoded, _ := json.Marshal(k)
+		parts = append(parts, string(encoded)+`:"test"`)
 	}
 	return "{" + strings.Join(parts, ",") + "}"
 }

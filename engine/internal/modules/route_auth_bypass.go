@@ -76,24 +76,36 @@ func (r *Runner) runRouteAuthBypass(ctx context.Context, target ScanTarget) []Mo
 	owner, ownerErr := r.client.Do(ctx, method, targetURL, nil, nil)
 	canary := r.privateCanary("route_auth_bypass", target)
 	ownerOK := ownerErr == nil && successfulResourceResponse(owner.Response) &&
+		requestCarriesAuthentication(owner.Request.Headers) && privateAuthResourceEvidence(owner.Response.Body) &&
 		!anonymousExposesSameResource(baselineRR.Response, owner.Response)
+	if !ownerOK && canary == "" {
+		r.emitDiscovery("route_auth_bypass", target, "resource_reference_missing", "No authenticated private-resource reference or configured private canary; status differences cannot prove an authentication bypass")
+		return nil
+	}
 	// Step 2: Negative Control (Catch-All / Soft 404 Guard)
 	// Probe a guaranteed non-existent sibling route to ensure server doesn't blindly return 200 for everything.
 	nonexistentURL := buildNonexistentProbeURL(u)
-	if nonexistentURL != "" && r.scope.IsInScope(nonexistentURL) {
-		negRR, negErr := client.DoWithoutSession(ctx, method, nonexistentURL, nil, nil)
-		if negErr == nil && negRR.Response.StatusCode == http.StatusOK && !authDeniedBody(strings.ToLower(negRR.Response.Body)) {
-			// Catch-all SPA or custom 200 error page detected
-			r.emitSkip("route_auth_bypass", target, "server catch-all/soft-404 behavior detected on sibling routes")
-			return nil
-		}
+	if nonexistentURL == "" || !r.scope.IsInScope(nonexistentURL) {
+		return nil
+	}
+	negRR, negErr := client.DoWithoutSession(ctx, method, nonexistentURL, nil, nil)
+	if negErr != nil || !routeNegativeControlOK(negRR.Response) {
+		r.emitSkip("route_auth_bypass", target, "missing or successful nonexistent-route control")
+		return nil
 	}
 
 	// Step 2b: Root Homepage Control - Ensure path normalization doesn't just route back to the public homepage
 	rootURL := u.Scheme + "://" + u.Host + "/"
 	var rootRR httpclient.RequestResponse
+	var rootErr error
 	if r.scope.IsInScope(rootURL) {
-		rootRR, _ = client.DoWithoutSession(ctx, http.MethodGet, rootURL, nil, nil)
+		rootRR, rootErr = client.DoWithoutSession(ctx, http.MethodGet, rootURL, nil, nil)
+	} else {
+		return nil
+	}
+	if rootErr != nil || rootRR.Response.StatusCode == 0 || rootRR.Response.StatusCode >= 500 {
+		r.emitSkip("route_auth_bypass", target, "public-root control unavailable")
+		return nil
 	}
 
 	// Step 3: Generate Route Normalization & Proxy Discrepancy Variants
@@ -120,7 +132,7 @@ func (r *Runner) runRouteAuthBypass(ctx context.Context, target ScanTarget) []Mo
 			}
 		}
 
-		// Step 4: Strict Verification (Zero False-Positive Filter)
+		// A response difference is only a candidate, never private-resource proof.
 		if !isRouteBypassSuccessful(probeRR.Response, baselineRR.Response) {
 			continue
 		}
@@ -132,35 +144,63 @@ func (r *Runner) runRouteAuthBypass(ctx context.Context, target ScanTarget) []Mo
 			}
 		}
 
-		bound := ownerOK && sameResourceFingerprint(owner.Response.Body, probeRR.Response.Body)
-		if !ownerOK && isAuthBlocked && successfulResourceResponse(probeRR.Response) &&
-			anonymousRouteResourceBound(targetURL, probeRR.Response.Body) {
-			// For an unauthenticated scan there is no privileged owner response to
-			// bind. A denied canonical route becoming a stable non-login resource on
-			// an equivalent transformed route is sufficient once the sibling soft-404
-			// and public-root controls above have passed.
-			bound = true
-		}
-		if canary != "" && !strings.Contains(baselineRR.Response.Body, canary) && strings.Contains(probeRR.Response.Body, canary) {
-			bound = true
-		}
+		bound := ownerOK && sameBrokenAuthResource(owner.Response.Body, probeRR.Response.Body)
+		canaryBound := canary != "" && !strings.Contains(baselineRR.Response.Body, canary) &&
+			!strings.Contains(rootRR.Response.Body, canary) && !strings.Contains(negRR.Response.Body, canary) &&
+			strings.Contains(probeRR.Response.Body, canary)
+		bound = bound || canaryBound
 		if !bound {
 			r.emitDiscovery("route_auth_bypass", target, v.technique, "Alternate route observed without private-resource identity proof")
 			continue
 		}
+		if sameBrokenAuthResource(negRR.Response.Body, probeRR.Response.Body) ||
+			sameBrokenAuthResource(rootRR.Response.Body, probeRR.Response.Body) {
+			continue
+		}
+		// A proxy header must select the protected route, rather than trigger a
+		// generic response for every header value (or simply be ignored).
+		var headerControl httpclient.RequestResponse
+		if v.technique == "x_original_url_header" || v.technique == "x_rewrite_url_header" {
+			missing, _ := url.Parse(nonexistentURL)
+			controlHeaders := make(map[string]string, len(v.headers))
+			for name := range v.headers {
+				controlHeaders[name] = missing.RequestURI()
+			}
+			var controlErr error
+			headerControl, controlErr = client.DoWithoutSession(ctx, method, v.url, nil, controlHeaders)
+			if controlErr != nil || !routeNegativeControlOK(headerControl.Response) ||
+				sameBrokenAuthResource(headerControl.Response.Body, probeRR.Response.Body) ||
+				(canaryBound && strings.Contains(headerControl.Response.Body, canary)) {
+				continue
+			}
+		}
 		// Dual Replay Confirmation: Replay probe twice to ensure it's not a flaky network/race response
 		replay1, err1 := client.DoWithoutSession(ctx, method, v.url, nil, v.headers)
-		if err1 != nil || (!isRouteBypassSuccessful(replay1.Response, baselineRR.Response) || !sameResourceFingerprint(probeRR.Response.Body, replay1.Response.Body)) {
+		if err1 != nil || !routeReplayMatches(replay1.Response, probeRR.Response, baselineRR.Response, canary, canaryBound) {
 			continue
 		}
 		replay2, err2 := client.DoWithoutSession(ctx, method, v.url, nil, v.headers)
-		if err2 != nil || (!isRouteBypassSuccessful(replay2.Response, baselineRR.Response) || !sameResourceFingerprint(probeRR.Response.Body, replay2.Response.Body)) {
+		if err2 != nil || !routeReplayMatches(replay2.Response, probeRR.Response, baselineRR.Response, canary, canaryBound) {
 			continue
 		}
 
 		// Ensure body content is stable across replays
 		if replay1.Response.Body != replay2.Response.Body && !sameBrokenAuthResource(replay1.Response.Body, replay2.Response.Body) {
 			continue
+		}
+		baselineAfter, baselineErr := client.DoWithoutSession(ctx, method, targetURL, nil, nil)
+		if baselineErr != nil || baselineAfter.Response.StatusCode != baselineRR.Response.StatusCode ||
+			!sameResourceFingerprint(baselineAfter.Response.Body, baselineRR.Response.Body) {
+			continue
+		}
+		var ownerAfter httpclient.RequestResponse
+		if ownerOK {
+			var ownerAfterErr error
+			ownerAfter, ownerAfterErr = r.client.Do(ctx, method, targetURL, nil, nil)
+			if ownerAfterErr != nil || !requestCarriesAuthentication(ownerAfter.Request.Headers) ||
+				!successfulResourceResponse(ownerAfter.Response) || !sameBrokenAuthResource(owner.Response.Body, ownerAfter.Response.Body) {
+				continue
+			}
 		}
 
 		p := defaultPayload("route_auth_bypass", v.technique, v.url, v.technique)
@@ -170,15 +210,44 @@ func (r *Runner) runRouteAuthBypass(ctx context.Context, target ScanTarget) []Mo
 				c.NegativeControlSet = true
 				c.NegativeControlOK = true
 				c.TypedReplayHits = []bool{true, true, true}
-				c.Observations = append(c.Observations, r.observation("route_auth_bypass", target, verification.RoleNegativeControl, 1, baselineRR), r.observation("route_auth_bypass", target, verification.RolePositiveReplay, 2, replay1), r.observation("route_auth_bypass", target, verification.RolePositiveReplay, 3, replay2))
+				c.PrivateResourceCanary = ""
+				if canaryBound {
+					c.PrivateResourceCanary = canary
+				}
+				c.StabilityRuns = []verification.ResponseSnapshot{snapshot(probeRR.Response), snapshot(replay1.Response), snapshot(replay2.Response)}
+				c.Observations = append(c.Observations, r.observation("route_auth_bypass", target, verification.RoleNegativeControl, 1, negRR), r.observation("route_auth_bypass", target, verification.RoleNegativeControl, 2, rootRR), r.observation("route_auth_bypass", target, verification.RolePositiveReplay, 2, replay1), r.observation("route_auth_bypass", target, verification.RolePositiveReplay, 3, replay2))
+				c.Observations = append(c.Observations, r.observation("route_auth_bypass", target, verification.RoleBaselineReplay, 2, baselineAfter))
+				if ownerOK {
+					c.Observations = append(c.Observations, r.identityObservation("route_auth_bypass", target, verification.RoleIdentityA, 1, "authenticated", owner), r.identityObservation("route_auth_bypass", target, verification.RoleIdentityA, 2, "authenticated", ownerAfter))
+				}
+				if headerControl.Request.URL != "" {
+					c.Observations = append(c.Observations, r.observation("route_auth_bypass", target, verification.RoleNegativeControl, 3, headerControl))
+				}
 			})
+		if f == nil {
+			continue
+		}
 
 		if f != nil {
+			proofStep := func(role verification.ObservationRole, identity string, rr httpclient.RequestResponse) ReplayStep {
+				return ReplayStep{Role: role, IdentityID: identity, Request: rr.Request,
+					ExpectedNormalizedHash: r.observation("route_auth_bypass", target, role, 1, rr).NormalizedHash}
+			}
 			f.Title = "Route Authentication Bypass: Proxy/Normalization Discrepancy (" + v.technique + ")"
-			f.Description = fmt.Sprintf("An access-controlled endpoint (%s) returning HTTP %d was successfully bypassed using path normalization variation (%s), granting unauthorized access to private application resources.",
-				targetURL, baselineRR.Response.StatusCode, v.url)
+			binding := "the authenticated private-resource response"
+			if canaryBound {
+				binding = "the explicitly configured private-resource canary"
+			}
+			f.Description = fmt.Sprintf("The canonical endpoint (%s) returned HTTP %d anonymously. Three independent anonymous requests using %s reproduced %s. Nonexistent-route and public-root controls did not expose that resource.", targetURL, baselineRR.Response.StatusCode, v.technique, binding)
 			f.Severity = "High"
-
+			f.Evidence.ReplayPlan = append(f.Evidence.ReplayPlan, proofStep(verification.RoleNegativeControl, "", negRR), proofStep(verification.RoleNegativeControl, "", rootRR))
+			if ownerOK {
+				f.Evidence.ResourceReference = &owner.Response
+				f.Evidence.ReplayPlan = append(f.Evidence.ReplayPlan, proofStep(verification.RoleIdentityA, "authenticated", owner))
+			}
+			if headerControl.Request.URL != "" {
+				f.Evidence.ReplayPlan = append(f.Evidence.ReplayPlan, proofStep(verification.RoleNegativeControl, "", headerControl))
+			}
 		}
 		r.recordFinding(ctx, &out, f, "route_auth_bypass", v.technique)
 		// One solid, confirmed finding per endpoint is sufficient
@@ -188,21 +257,16 @@ func (r *Runner) runRouteAuthBypass(ctx context.Context, target ScanTarget) []Mo
 	return out
 }
 
-func anonymousRouteResourceBound(targetURL, body string) bool {
-	lowerBody := strings.ToLower(body)
-	if authDeniedBody(lowerBody) || strings.Contains(lowerBody, "public documentation") {
+func routeNegativeControlOK(response httpclient.ResponseRecord) bool {
+	return response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden ||
+		response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone
+}
+
+func routeReplayMatches(replay, probe, baseline httpclient.ResponseRecord, canary string, canaryBound bool) bool {
+	if replay.Redirected || !isRouteBypassSuccessful(replay, baseline) || !sameBrokenAuthResource(probe.Body, replay.Body) {
 		return false
 	}
-	if privateObjectRecordSignal(lowerBody) {
-		return true
-	}
-	lowerURL := strings.ToLower(targetURL)
-	for _, marker := range []string{"admin", "dashboard", "manage", "settings", "internal", "private", "account", "billing", "users"} {
-		if strings.Contains(lowerURL, marker) && strings.Contains(lowerBody, marker) {
-			return true
-		}
-	}
-	return false
+	return !canaryBound || strings.Contains(replay.Body, canary)
 }
 
 func isRouteBypassSuccessful(probe, baseline httpclient.ResponseRecord) bool {

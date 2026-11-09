@@ -2,6 +2,7 @@ package fuzzing
 
 import (
 	"container/heap"
+	"github.com/akha-security/akca/engine/internal/targeting"
 	"sync"
 )
 
@@ -81,6 +82,9 @@ func NewQueue403(maxSize int) *Queue403 {
 }
 
 func (q *Queue403) Enqueue(url, method string) bool {
+	if !targeting.BypassCandidate(url) {
+		return false
+	}
 	key := method + " " + url
 	q.mu.Lock()
 	defer q.mu.Unlock()

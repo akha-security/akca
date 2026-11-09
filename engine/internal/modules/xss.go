@@ -16,6 +16,10 @@ import (
 )
 
 func (r *Runner) runXSS(ctx context.Context, target ScanTarget) []ModuleFinding {
+	if reason := r.activeTargetReason("xss", target); reason != "" {
+		r.emitSkip("xss", target, reason)
+		return nil
+	}
 	if strings.TrimSpace(target.Parameter) == "" {
 		return nil
 	}

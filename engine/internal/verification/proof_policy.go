@@ -413,7 +413,7 @@ func evaluateProofPolicy(candidate Candidate, result Result) (ProofType, bool) {
 		return proofType, roles[RoleRuntimeTrace] > 0
 	case ProofBooleanPair:
 		return proofType, validBooleanPairProof(candidate.BooleanPairProof) &&
-			roles[RoleTrueBranch] >= 3 && roles[RoleFalseBranch] >= 3 && roles[RoleSyntaxControl] > 0
+			roles[RoleTrueBranch] >= 4 && roles[RoleFalseBranch] >= 4 && roles[RoleNegativeControl] > 0
 	case ProofArithmeticOracle:
 		return proofType, validArithmeticOracleProof(candidate.ArithmeticProof) &&
 			roles[RoleTrueBranch] >= 3 && roles[RoleFalseBranch] >= 3
@@ -436,7 +436,8 @@ func evaluateProofPolicy(candidate Candidate, result Result) (ProofType, bool) {
 			roles[RolePositiveProbe]+roles[RolePositiveReplay] >= policy.MinimumIndependentRuns &&
 			roles[RoleNegativeControl] >= 2
 	case ProofDifferentialReplay:
-		return proofType, negativeControlSatisfied(candidate, result, roles, false) &&
+		resourceOK := candidateModule(candidate) != "route_auth_bypass" || routeResourceEvidence(candidate)
+		return proofType, resourceOK && negativeControlSatisfied(candidate, result, roles, false) &&
 			roles[RolePositiveProbe]+roles[RolePositiveReplay] >= policy.MinimumIndependentRuns
 	case ProofHeaderEvidence:
 		return proofType, negativeControlSatisfied(candidate, result, roles, false) &&
@@ -461,6 +462,62 @@ func evaluateProofPolicy(candidate Candidate, result Result) (ProofType, bool) {
 	default:
 		return proofType, false
 	}
+}
+
+// Replayed 403-to-200 differences do not establish access to a protected
+// resource. Require a recorded authenticated reference or an explicit canary
+// in every independently observed positive response.
+func routeResourceEvidence(candidate Candidate) bool {
+	roles := observationRoles(candidate.Observations)
+	if roles[RoleBaselineReplay] == 0 || roles[RoleNegativeControl] < 2 {
+		return false
+	}
+	var positives []Observation
+	var ownerHashes []string
+	for _, item := range candidate.Observations {
+		switch item.Role {
+		case RolePositiveProbe, RolePositiveReplay:
+			if item.StatusCode < 200 || item.StatusCode >= 300 {
+				return false
+			}
+			positives = append(positives, item)
+		case RoleIdentityA:
+			if item.IdentityID == "authenticated" && item.StatusCode >= 200 && item.StatusCode < 300 {
+				ownerHashes = append(ownerHashes, item.NormalizedHash)
+			}
+		}
+	}
+	if len(positives) < 3 {
+		return false
+	}
+	for _, ownerHash := range ownerHashes {
+		matches := true
+		for _, positive := range positives {
+			matches = matches && positive.NormalizedHash == ownerHash
+		}
+		if matches {
+			return true
+		}
+	}
+	canary := candidate.PrivateResourceCanary
+	if len(strings.TrimSpace(canary)) < 12 || strings.Contains(candidate.Baseline.Body, canary) ||
+		!strings.Contains(candidate.Probe.Body, canary) || len(candidate.StabilityRuns) < 3 {
+		return false
+	}
+	matchedHashes := map[string]int{}
+	for _, response := range candidate.StabilityRuns {
+		if response.StatusCode < 200 || response.StatusCode >= 300 || !strings.Contains(response.Body, canary) {
+			return false
+		}
+		matchedHashes[ProofResponseHash("route_auth_bypass", response)]++
+	}
+	for _, positive := range positives {
+		if matchedHashes[positive.NormalizedHash] == 0 {
+			return false
+		}
+		matchedHashes[positive.NormalizedHash]--
+	}
+	return true
 }
 
 func identityBoundaryEvidence(observations []Observation) bool {

@@ -601,7 +601,8 @@ func printDetailedUsage() {
 		{"--waf-evasion", "Enable payload adaptation even without a detected WAF (default: auto)"},
 		{"--no-waf-evasion", "Disable automatic WAF payload adaptation"},
 		{"--waf-bypass-headers", "Opt into additional WAF header/protocol mutations"},
-		{"--php2shell-active", "Compatibility flag; --mode php2shell now enables the authorized active checks automatically"},
+		{"--php2shell-active", "Compatibility flag; full scans include the bounded PHP2Shell memory-signature check automatically"},
+		{"--force-active-url <url>", "Include an exact static/ambiguous URL in active tests (repeatable; scope and unavailable-resource checks still apply)"},
 		{"--no-oast", "Disable DNS/HTTP out-of-band probes"},
 		{"--oast-server <urls>", "Custom OAST server APIs in priority order"},
 		{"--oast-wait <seconds>", "Final callback collection window (default: 60)"},
@@ -1246,24 +1247,27 @@ func moduleFriendlyName(name string) string {
 
 func phaseLabel(phase string) string {
 	labels := map[string]string{
-		"bootstrap":           "Initializing Scan Engine",
-		"fingerprint":         "Technology & WAF Fingerprinting",
-		"fingerprinting":      "Technology & WAF Fingerprinting",
-		"learning_waf":        "WAF Learning & Calibration",
-		"crawling":            "Crawling Application Surface",
-		"js_analysis":         "JavaScript Analysis",
-		"parameter_discovery": "Hidden Parameter Discovery",
-		"fuzzing":             "Directory & Path Fuzzing",
-		"bypass403":           "403 Bypass Testing",
-		"auth_bypass":         "403 Bypass Testing",
-		"reflection":          "Reflection Analysis",
-		"vuln_modules":        "Vulnerability Scanning",
-		"vuln_modules_a":      "Injection Vulnerability Scanning",
-		"vuln_modules_b":      "SSRF, LFI & XXE Scanning",
-		"vuln_modules_c":      "Auth & API Security Scanning",
-		"vuln_modules_d":      "Config & Exposure Scanning",
-		"oast_drain":          "OAST Callback Collection",
-		"report_generation":   "Generating Report",
+		"bootstrap":                    "Initializing Scan Engine",
+		"fingerprint":                  "Technology & WAF Fingerprinting",
+		"fingerprinting":               "Technology & WAF Fingerprinting",
+		"learning_waf":                 "WAF Learning & Calibration",
+		"crawling":                     "Crawling Application Surface",
+		"crawling_extended":            "Extended Application Crawling",
+		"js_analysis":                  "JavaScript Analysis",
+		"parameter_discovery":          "Hidden Parameter Discovery",
+		"parameter_discovery_extended": "Hidden Parameter Discovery",
+		"fuzzing":                      "Directory & Path Fuzzing",
+		"bypass403":                    "403 Bypass Testing",
+		"auth_bypass":                  "403 Bypass Testing",
+		"reflection":                   "Reflection Analysis",
+		"reflection_extended":          "New Input Reflection Analysis",
+		"vuln_modules":                 "Vulnerability Scanning",
+		"vuln_modules_a":               "Injection Vulnerability Scanning",
+		"vuln_modules_b":               "SSRF, LFI & XXE Scanning",
+		"vuln_modules_c":               "Auth & API Security Scanning",
+		"vuln_modules_d":               "Config & Exposure Scanning",
+		"oast_drain":                   "OAST Callback Collection",
+		"report_generation":            "Generating Report",
 	}
 	if l, ok := labels[phase]; ok {
 		return l
@@ -1272,6 +1276,14 @@ func phaseLabel(phase string) string {
 		return moduleFriendlyName(strings.TrimPrefix(phase, "vuln_module_"))
 	}
 	return safeTerminalText(phase)
+}
+
+func phaseEventLabel(phase string, payload map[string]interface{}) string {
+	label := phaseLabel(phase)
+	if newInputs, _ := payload["new_inputs"].(bool); newInputs {
+		return label + " (new inputs)"
+	}
+	return label
 }
 
 func phaseIcon(phase string) string {
@@ -1862,7 +1874,7 @@ func (cw *ConsoleWriter) eventNeedsProgressClose(e events.Event) bool {
 		return false
 	case "plugin_skipped", "coverage_gap":
 		return cw.mode == "verbose"
-	case "crawler_started", "crawler_finished", "oast_started", "oast_probe_sent":
+	case "crawler_started", "crawler_finished", "oast_started", "oast_probe_sent", "php2shell_assessment", "php2shell_probe":
 		return cw.mode == "verbose"
 	case "scan_progress":
 		msg := safeTerminalText(e.Message)
@@ -2018,7 +2030,7 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		cw.phaseInterrupted = false
 		cw.mu.Unlock()
 
-		label := phaseLabel(phase)
+		label := phaseEventLabel(phase, e.Payload)
 		icon := phaseIcon(phase)
 		if !cw.interactive {
 			fmt.Fprintf(cw.outputWriter(), "PHASE START name=%s\n", safeTerminalText(label))
@@ -2066,13 +2078,13 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 			status = "completed"
 		}
 		if !cw.interactive {
-			fmt.Fprintf(cw.outputWriter(), "PHASE %s name=%s duration=%s\n", strings.ToUpper(status), safeTerminalText(phaseLabel(phase)), shortDuration(elapsed))
+			fmt.Fprintf(cw.outputWriter(), "PHASE %s name=%s duration=%s\n", strings.ToUpper(status), safeTerminalText(phaseEventLabel(phase, e.Payload)), shortDuration(elapsed))
 			return nil
 		}
-		label := phaseLabel(phase)
-		if status == "partial" {
-			fmt.Fprintf(cw.outputWriter(), "\033[1A\r\033[2K%s%02d%s  %s!%s  %s%s%s  %sPARTIAL%s%s\n",
-				cGhost, phaseIndex, rst, cAmber, rst, bCloud, label, rst, bAmber, rst, duration)
+		label := phaseEventLabel(phase, e.Payload)
+		if status == "partial" || status == "inconclusive" || status == "skipped" || status == "blocked" {
+			fmt.Fprintf(cw.outputWriter(), "\033[1A\r\033[2K%s%02d%s  %s!%s  %s%s%s  %s%s%s%s\n",
+				cGhost, phaseIndex, rst, cAmber, rst, bCloud, label, rst, bAmber, strings.ToUpper(status), rst, duration)
 			return nil
 		}
 		if status == "failed" {
@@ -2178,7 +2190,11 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 
 		w := currentUIWidth()
 		fmt.Fprintln(cw.outputWriter())
-		fmt.Fprintln(cw.outputWriter(), panelTitle("SECURITY FINDING", fmt.Sprintf("%s · %.2f", statusLabel, score), w, sevCol))
+		panelName := "SECURITY FINDING"
+		if statusLabel == "CANDIDATE" || statusLabel == "MANUAL REVIEW" {
+			panelName = "UNVERIFIED LEAD"
+		}
+		fmt.Fprintln(cw.outputWriter(), panelTitle(panelName, fmt.Sprintf("%s · %.2f", statusLabel, score), w, sevCol))
 		badge := severityBadge(sev)
 		fmt.Fprintln(cw.outputWriter(), boxTextWithBorder(fmt.Sprintf(" %s  %s%s%s", badge, bCloud, title, rst), w, sevCol))
 		fmt.Fprintln(cw.outputWriter(), panelDivider(w, sevCol))
@@ -2326,7 +2342,9 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 			cw.requests++
 			cw.mu.Unlock()
 		}
-		fmt.Fprintf(cw.outputWriter(), "%s[PHP2SHELL PROBE]%s  %s\n", bAmber, rst, details)
+		if cw.mode == "verbose" {
+			fmt.Fprintf(cw.outputWriter(), "%s[PHP2SHELL PROBE]%s  %s\n", bAmber, rst, details)
+		}
 
 	// ── Health snapshots ────────────────────────────────────────────────
 	case "oast_started":
@@ -2422,7 +2440,9 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 			bAmber, rst, cAmber, trafficText, rst)
 
 	case "php2shell_assessment":
-		fmt.Fprintf(cw.outputWriter(), "%s[PHP2SHELL]%s  %s\n", bAmber, rst, safeTerminalText(e.Message))
+		if cw.mode == "verbose" {
+			fmt.Fprintf(cw.outputWriter(), "%s[PHP2SHELL]%s  %s\n", bAmber, rst, safeTerminalText(e.Message))
+		}
 
 	case "coverage_gap":
 		cw.mu.Lock()
@@ -2573,8 +2593,8 @@ func printSummary(cw *ConsoleWriter, outPath string) {
 	cw.mu.Unlock()
 
 	if !interactive || mode == "quiet" {
-		fmt.Fprintf(os.Stderr, "RESULT duration=%s detected=%d confirmed=%d suppressed=%d skipped=%d requests=%d payload_probes=%d oast_hits=%d report=%s\n",
-			elapsed, det, ver, suppressed, skipped, requests, payloadProbes, oastCallbacks, safeTerminalText(outPath))
+		fmt.Fprintf(os.Stderr, "RESULT duration=%s detected=%d confirmed=%d suppressed=%d skipped=%d requests=%d payload_probes=%d oast_hits=%d coverage_warnings=%d report=%s\n",
+			elapsed, det, ver, suppressed, skipped, requests, payloadProbes, oastCallbacks, coverageGaps, safeTerminalText(outPath))
 		return
 	}
 
@@ -2628,8 +2648,10 @@ func printSummary(cw *ConsoleWriter, outPath string) {
 			value := fmt.Sprintf("%s %s  %s%d%s", entry.dot, bar, entry.color, entry.count, rst)
 			fmt.Fprintln(os.Stderr, panelDetail(entry.name, value, w, entry.color))
 		}
+	} else if coverageGaps > 0 {
+		fmt.Fprintln(os.Stderr, boxText(fmt.Sprintf(" %s!%s  %sNo confirmed findings; coverage is incomplete%s", cAmber, rst, cAmber, rst), w))
 	} else {
-		fmt.Fprintln(os.Stderr, boxText(fmt.Sprintf(" %s✓%s  %sNo vulnerabilities detected%s", cMint, rst, cMint, rst), w))
+		fmt.Fprintln(os.Stderr, boxText(fmt.Sprintf(" %sNo findings were observed in the completed checks%s", cSlate, rst), w))
 	}
 	fmt.Fprintln(os.Stderr, panelDivider(w, cGhost))
 	fmt.Fprintln(os.Stderr, panelDetail("Report", outPath, w, cIce))
@@ -2817,6 +2839,7 @@ func runScanCommand(args []string) int {
 	var cookieVal string
 	var headers sliceFlag
 	var apiSpecs sliceFlag
+	var forceActiveURLs sliceFlag
 	var outputFormat string
 	var outputFilePath string
 	var noOAST bool
@@ -2868,6 +2891,7 @@ func runScanCommand(args []string) int {
 	fs.Var(&headers, "header", "")
 	fs.Var(&headers, "H", "")
 	fs.Var(&apiSpecs, "api-spec", "")
+	fs.Var(&forceActiveURLs, "force-active-url", "")
 	fs.StringVar(&outputFormat, "format", "html", "")
 	fs.StringVar(&outputFormat, "f", "html", "")
 	fs.StringVar(&outputFilePath, "output", "", "")
@@ -3093,14 +3117,15 @@ func runScanCommand(args []string) int {
 		cfg.ScanID = config.GenerateScanID(cfg.Targets)
 	}
 	cfg.APIImportFiles = append([]string(nil), apiSpecs...)
-	// Standalone PHP2Shell mode is intentionally a combined passive+active
-	// workflow. Keep the flag as a backwards-compatible alias for scripts that
-	// still pass it explicitly.
-	cfg.PHP2ShellActive = php2shellActive || strings.EqualFold(strings.TrimSpace(scanMode), "php2shell")
+	cfg.ForceActiveScanURLs = append([]string(nil), forceActiveURLs...)
 	if err := config.ApplyScanModes(&cfg, scanMode); err != nil {
 		printCLIError(err)
 		return 2
 	}
+	// Full scans include the bounded PHP2Shell memory-signature assessment on
+	// explicitly configured origins. Passive and narrowly scoped module scans
+	// remain unaffected; the dedicated mode retains its historical behavior.
+	cfg.PHP2ShellActive = php2shellActive || cfg.OnlyPHP2Shell() || cfg.SmartScanProfile == "Full Scan"
 	cfg.SkipAutoReport = true
 
 	if proxyURL != "" {
@@ -3197,9 +3222,6 @@ func runScanCommand(args []string) int {
 	if err := cfg.ValidatePHP2ShellOptions(); err != nil {
 		printCLIError(err)
 		return 2
-	}
-	if cfg.PHP2ShellActive {
-		printCLIStatus("warn", "PHP2Shell intrusive lab check enabled: crafted requests may exhaust memory or terminate a PHP worker; RCE is not verified")
 	}
 	if cfg.EnableHeadlessCrawler {
 		if browserPath, downloaded, browserErr := browserpool.EnsureBrowser(); browserErr != nil {

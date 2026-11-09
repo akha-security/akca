@@ -522,6 +522,10 @@ func (r *Runner) sqliTimingMedianMs(ctx context.Context, target ScanTarget, payl
 
 func (r *Runner) sqliTimingVerified(ctx context.Context, target ScanTarget, payload string, dbHint string,
 	timingBase timingblind.Baseline, sleepSec int, matchedControls ...string) (ok bool, delayMs int64, samples []int64, zeroSamples []int64) {
+	gate := r.sqliTimingGate(target.EndpointURL)
+	gate.Lock()
+	defer gate.Unlock()
+	ctx = context.WithValue(ctx, sqliTimingIsolationKey{}, gate)
 	var delaySamples []int64
 	var delayStatus int
 	var delayDelivered, zeroDelivered, falseDelivered int

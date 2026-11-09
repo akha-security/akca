@@ -26,7 +26,8 @@ type DiscoveryEndpoint struct {
 func (db *DB) ListDiscoveryEndpoints(scanID string, limit int) ([]DiscoveryEndpoint, error) {
 	query := `SELECT id, url, method, COALESCE(discovery_trail_json, '') FROM endpoints
 WHERE scan_id = ? 
-	  AND COALESCE(json_extract(discovery_trail_json, '$.request_template.response_status'), 0) NOT IN (404, 410) ` + endpointDiscoveryOrderSQL
+	  AND COALESCE(json_extract(discovery_trail_json, '$.request_template.response_status'), 0) NOT IN (404, 410, 429)
+	  AND COALESCE(json_extract(discovery_trail_json, '$.request_template.response_status'), 0) < 500 ` + endpointDiscoveryOrderSQL
 	var rows *sql.Rows
 	var err error
 	if limit > 0 {

@@ -20,19 +20,31 @@ func (c ScanConfig) ValidatePHP2ShellOptions() error {
 	if !c.PHP2ShellActive {
 		return nil
 	}
-	if !c.OnlyPHP2Shell() || c.PassiveMode {
-		return fmt.Errorf("php2shell_active requires --mode php2shell alone and cannot run in passive mode")
+	if c.PassiveMode {
+		return fmt.Errorf("php2shell_active cannot run in passive mode")
 	}
-	if len(c.Targets) != 1 || len(c.APIImportFiles) > 0 {
-		return fmt.Errorf("php2shell_active requires exactly one explicit laboratory target and no API imports")
+	if len(c.Targets) == 0 {
+		return fmt.Errorf("php2shell_active requires at least one explicit target")
 	}
-	_, err := c.PHP2ShellLabURL()
-	return err
+	for _, raw := range c.Targets {
+		normalized, err := NormalizeTargetURL(raw)
+		if err != nil {
+			return err
+		}
+		u, err := url.Parse(normalized)
+		if err != nil || u.User != nil || strings.TrimSpace(u.Hostname()) == "" {
+			return fmt.Errorf("PHP2Shell target must be an HTTP(S) URL without credentials")
+		}
+		if c.OnlyPHP2Shell() {
+			if u.RawQuery != "" || u.Fragment != "" {
+				return fmt.Errorf("PHP2Shell dedicated-mode target must not include a query or fragment")
+			}
+		}
+	}
+	return nil
 }
 
-// PHP2ShellLabURL validates the explicit laboratory URL. Active probing is
-// opt-in and the caller is responsible for authorizing the supplied target;
-// redirects and query strings are still excluded from the probe surface.
+// PHP2ShellLabURL validates the single URL used by the dedicated mode.
 func (c ScanConfig) PHP2ShellLabURL() (string, error) {
 	if len(c.Targets) != 1 {
 		return "", fmt.Errorf("PHP2Shell active checks require one isolated lab target")

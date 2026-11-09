@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 )
@@ -73,5 +74,50 @@ func TestListDiscoveryEndpointsPrioritizesWriteMethodsBeforeQueryGET(t *testing.
 	}
 	if endpoints[0].Method != http.MethodPost || endpoints[0].URL != "https://example.com/api/orders" {
 		t.Fatalf("POST API endpoint should be first, got %+v", endpoints)
+	}
+}
+
+func TestFailedHTTPStatusesAreExcludedFromActiveTargets(t *testing.T) {
+	db, err := Open(t.TempDir() + "/failed-targets.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	const scanID = "failed-targets"
+	for _, status := range []int{200, 400, 404, 410, 429, 500, 503} {
+		endpointURL := fmt.Sprintf("https://example.test/status-%d.js", status)
+		if err := db.SaveDiscoveredEndpoint(scanID, map[string]interface{}{
+			"url": endpointURL, "method": http.MethodGet, "normalized_url": endpointURL, "source": "script",
+			"request_template": map[string]interface{}{"response_status": status},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		id, err := db.GetEndpointID(scanID, endpointURL, http.MethodGet)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.SaveParameter(id, "debug", "query", 90); err != nil {
+			t.Fatal(err)
+		}
+	}
+	endpoints, err := db.ListDiscoveryEndpoints(scanID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := db.ListParameterTargets(scanID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scripts, err := db.ListScriptEndpoints(scanID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for label, count := range map[string]int{"endpoints": len(endpoints), "parameters": len(targets), "scripts": len(scripts)} {
+		if count != 2 {
+			t.Fatalf("%s included failed response status: got %d targets, want 2", label, count)
+		}
 	}
 }

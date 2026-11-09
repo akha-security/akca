@@ -168,6 +168,9 @@ func FinalizeOASTFindings(db *storage.DB, scanID string, emit EventSink) ([]Modu
 			continue
 		}
 		f := buildOASTFinding(cor, rec, cb)
+		if !findingProofEligible(f) {
+			continue
+		}
 		ev, _ := json.Marshal(f.Evidence)
 		evJSON := string(ev)
 		desc := f.Description + "\n\nevidence: " + evJSON

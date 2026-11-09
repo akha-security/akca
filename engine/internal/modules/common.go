@@ -87,6 +87,13 @@ func (r *Runner) probeTemplateForModule(ctx context.Context, module string, targ
 	if payload != nil {
 		headers = r.registerRuntimeProbe(target, *payload, headers)
 	}
+	if module == "sqli" {
+		gate := r.sqliTimingGate(target.EndpointURL)
+		if !sqliTimingIsolated(ctx, gate) {
+			gate.RLock()
+			defer gate.RUnlock()
+		}
+	}
 	rr, err := r.client.Do(ctx, effMethod, probeURL, body, headers)
 	if err != nil && strings.Contains(err.Error(), "global request budget exhausted") {
 		r.markBudgetExhausted(module, target.EndpointURL)

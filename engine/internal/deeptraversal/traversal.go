@@ -1,6 +1,11 @@
 package deeptraversal
 
-import "strings"
+import (
+	"encoding/base64"
+	"html"
+	"regexp"
+	"strings"
+)
 
 // Payload is a path traversal probe with WAF-bypass encoding variant.
 type Payload struct {
@@ -99,83 +104,129 @@ func MergeBalanced(linux, windows []Payload) []Payload {
 }
 
 var (
-	linuxMarkers       = []string{"root:x:0:0:", "root:*:0:0:", "root:", "daemon:", "/bin/bash", "/sbin/nologin", "/bin/sh", "id=debian", "id=ubuntu", "id=alpine"}
-	linuxBase64Markers = []string{"cm9vdDo", "cm9vdDox", "cm9vdDp4"}
-	// These are file-content signatures. Do not include path names such as
-	// /proc/version: applications commonly echo the requested filename and that
-	// is not proof that the file was read.
-	linuxProcMarkers = []string{"linux version ", "swapfile", "sys_clone", "sys_execve"}
-	winMarkers       = []string{"[fonts]", "[extensions]", "for 16-bit app support", "[boot loader]", "[operating systems]"}
-	winHosts         = []string{"127.0.0.1 localhost", "127.0.0.1\tlocalhost", "# localhost name resolution", "::1 localhost"}
+	markupRE        = regexp.MustCompile(`(?s)<[^>]*>`)
+	passwdEntryRE   = regexp.MustCompile(`(?m)^[ \t]*root:[^:\r\n]*:0:0:[^:\r\n]*:[^:\r\n]*:[^:\r\n]*[ \t]*$`)
+	base64RunRE     = regexp.MustCompile(`[A-Za-z0-9+/]{24,}={0,2}`)
+	procMapsLineRE  = regexp.MustCompile(`(?m)^[0-9a-f]{4,}-[0-9a-f]{4,}\s+[rwxps-]{4}\s+[0-9a-f]+\s+[0-9a-f]{2}:[0-9a-f]{2}\s+\d+`)
+	procUIDGIDRE    = regexp.MustCompile(`(?i)\buid=\d+(?:\([^)]*\))?\s+gid=\d+`)
+	procEnvPathRE   = regexp.MustCompile(`(?i)(?:^|\x00)PATH=[^\x00]+`)
+	procEnvHomeRE   = regexp.MustCompile(`(?i)(?:^|\x00)HOME=[^\x00]+`)
+	procVersionRE   = regexp.MustCompile(`(?im)^linux version [0-9][^\r\n]*(?:gcc|clang) version [0-9]`)
+	osReleaseIDRE   = regexp.MustCompile(`(?m)^id=["']?[a-z0-9._-]+["']?\s*$`)
+	osReleaseNameRE = regexp.MustCompile(`(?m)^name=["'][^\r\n]+["']\s*$`)
+	osReleaseVerRE  = regexp.MustCompile(`(?m)^version_id=["'][^\r\n]+["']\s*$`)
+	linuxIssueRE    = regexp.MustCompile(`(?im)^(?:ubuntu|debian gnu/linux|alpine linux|centos linux|red hat enterprise linux)[^\r\n]*[0-9][^\r\n]*`)
+	winLoopbackRE   = regexp.MustCompile(`(?im)^\s*(?:127\.0\.0\.1|::1)\s+localhost\b`)
+	winFontRE       = regexp.MustCompile(`(?m)^\s*[^=\r\n]+\.fon\s*=`)
+	winBootEntryRE  = regexp.MustCompile(`(?im)^\s*(?:default=|multi\()`)
 )
 
 // DetectSignal reports whether a traversal probe succeeded against baseline.
 func DetectSignal(body, baseline, signal string) bool {
-	lower := strings.ToLower(body)
-	base := strings.ToLower(baseline)
+	text := normalizedFileText(body)
+	base := normalizedFileText(baseline)
 	switch {
 	case strings.HasPrefix(signal, "linux_passwd_base64"):
-		for _, m := range linuxBase64Markers {
-			if strings.Contains(body, m) && !strings.Contains(baseline, m) {
-				return true
-			}
-		}
-	case strings.HasPrefix(signal, "linux_proc"):
-		for _, m := range linuxProcMarkers {
-			if strings.Contains(lower, m) && !strings.Contains(base, m) {
-				return true
-			}
-		}
-		// proc files also contain standard linux markers
-		for _, m := range linuxMarkers {
-			if strings.Contains(lower, m) && !strings.Contains(base, m) {
-				return true
-			}
-		}
+		return hasBase64PasswdEntry(body) && !hasBase64PasswdEntry(baseline)
+	case signal == "linux_passwd":
+		return hasPasswdEntry(text) && !hasPasswdEntry(base)
+	case signal == "linux_proc_version":
+		return hasLinuxProcVersion(text) && !hasLinuxProcVersion(base)
+	case signal == "linux_proc_maps":
+		return procMapsLineRE.MatchString(text) && !procMapsLineRE.MatchString(base)
+	case signal == "linux_proc_environ":
+		return hasProcEnvironment(text) && !hasProcEnvironment(base)
+	case signal == "linux_proc_cmdline":
+		return hasProcCommandLine(text) && !hasProcCommandLine(base)
+	case signal == "linux_proc":
+		return hasLinuxProcVersion(text) && !hasLinuxProcVersion(base) ||
+			procMapsLineRE.MatchString(text) && !procMapsLineRE.MatchString(base) ||
+			hasProcEnvironment(text) && !hasProcEnvironment(base) ||
+			hasProcCommandLine(text) && !hasProcCommandLine(base)
+	case signal == "linux_os_release":
+		return hasOSRelease(text) && !hasOSRelease(base)
+	case signal == "linux_issue":
+		return hasLinuxIssue(text) && !hasLinuxIssue(base)
 	case signal == "command_output":
-		for _, m := range []string{"uid=", "gid=", "root:", "/bin/", "www-data", "nt authority"} {
-			if strings.Contains(lower, m) && !strings.Contains(base, m) {
-				return true
-			}
-		}
-	case strings.HasPrefix(signal, "linux"):
-		for _, m := range linuxMarkers {
-			if strings.Contains(lower, m) && !strings.Contains(base, m) {
-				return true
-			}
-		}
+		return procUIDGIDRE.MatchString(text) && !procUIDGIDRE.MatchString(base)
 	case strings.HasPrefix(signal, "windows_hosts"):
-		for _, m := range winHosts {
-			if strings.Contains(lower, m) && !strings.Contains(base, m) {
-				return true
-			}
-		}
-		if (strings.Contains(lower, "127.0.0.1") || strings.Contains(lower, "::1")) &&
-			strings.Contains(lower, "microsoft corp") && !strings.Contains(base, "microsoft corp") {
-			return true
-		}
-	case strings.HasPrefix(signal, "windows"):
-		for _, m := range winMarkers {
-			if strings.Contains(lower, m) && !strings.Contains(base, m) {
-				return true
-			}
-		}
+		return hasWindowsHosts(text) && !hasWindowsHosts(base)
+	case strings.HasPrefix(signal, "windows_ini"):
+		return hasWindowsINI(text) && !hasWindowsINI(base)
+	case strings.HasPrefix(signal, "windows_boot"):
+		return hasWindowsBoot(text) && !hasWindowsBoot(base)
 	default:
-		// Legacy signals (traversal, encoded_traversal, …) and unknown variants.
-		for _, m := range append(append([]string{}, linuxMarkers...), winMarkers...) {
-			if strings.Contains(lower, m) && !strings.Contains(base, m) {
-				return true
-			}
+		// Unknown or generic traversal signals have no file-content proof.
+		return false
+	}
+}
+
+func normalizedFileText(body string) string {
+	text := strings.ToLower(html.UnescapeString(body))
+	text = strings.ReplaceAll(text, "<br>", "\n")
+	text = strings.ReplaceAll(text, "<br/>", "\n")
+	text = strings.ReplaceAll(text, "<br />", "\n")
+	text = strings.ReplaceAll(text, "</p>", "\n")
+	text = strings.ReplaceAll(text, "</div>", "\n")
+	text = markupRE.ReplaceAllString(text, " ")
+	return strings.ReplaceAll(text, "\r", "")
+}
+
+func hasPasswdEntry(text string) bool {
+	return passwdEntryRE.MatchString(text)
+}
+
+func hasBase64PasswdEntry(text string) bool {
+	for _, encoded := range base64RunRE.FindAllString(text, -1) {
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			decoded, err = base64.RawStdEncoding.DecodeString(strings.TrimRight(encoded, "="))
 		}
-		for _, m := range winHosts {
-			if strings.Contains(lower, m) && !strings.Contains(base, m) {
-				return true
-			}
-		}
-		if (strings.Contains(lower, "127.0.0.1") || strings.Contains(lower, "::1")) &&
-			strings.Contains(lower, "microsoft corp") && !strings.Contains(base, "microsoft corp") {
+		if err == nil && hasPasswdEntry(normalizedFileText(string(decoded))) {
 			return true
 		}
 	}
 	return false
+}
+
+func hasLinuxProcVersion(text string) bool {
+	return procVersionRE.MatchString(text)
+}
+
+func hasProcEnvironment(text string) bool {
+	return strings.ContainsRune(text, '\x00') && procEnvPathRE.MatchString(text) && procEnvHomeRE.MatchString(text)
+}
+
+func hasProcCommandLine(text string) bool {
+	separator := strings.IndexByte(text, '\x00')
+	if separator <= 1 || text[0] != '/' {
+		return false
+	}
+	return !strings.ContainsAny(text[:separator], " \t\r\n<>")
+}
+
+func hasOSRelease(text string) bool {
+	return osReleaseIDRE.MatchString(text) && osReleaseNameRE.MatchString(text) && osReleaseVerRE.MatchString(text)
+}
+
+func hasLinuxIssue(text string) bool {
+	return linuxIssueRE.MatchString(text)
+}
+
+func hasWindowsHosts(text string) bool {
+	hasLoopback := winLoopbackRE.MatchString(text)
+	hasWindowsCopyright := strings.Contains(text, "microsoft corp")
+	hasBothMappings := strings.Contains(text, "127.0.0.1 localhost") && strings.Contains(text, "::1 localhost")
+	return hasLoopback && (hasWindowsCopyright || hasBothMappings)
+}
+
+func hasWindowsINI(text string) bool {
+	extensions := strings.Contains(text, "[extensions]") && strings.Contains(text, "for 16-bit app support")
+	fonts := strings.Contains(text, "[fonts]") && winFontRE.MatchString(text)
+	return extensions || fonts
+}
+
+func hasWindowsBoot(text string) bool {
+	return strings.Contains(text, "[boot loader]") && strings.Contains(text, "[operating systems]") &&
+		winBootEntryRE.MatchString(text)
 }

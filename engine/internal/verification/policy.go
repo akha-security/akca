@@ -37,13 +37,14 @@ func hasClassSpecificProof(candidate Candidate, result Result) bool {
 }
 
 func validBooleanPairProof(proof *BooleanPairProof) bool {
-	if proof == nil || !proof.SameSurface || !proof.SyntaxControlOK ||
+	if proof == nil || !proof.SameSurface || !proof.NativeControlOK ||
 		(proof.Orientation != 1 && proof.Orientation != -1) {
 		return false
 	}
 	for _, hash := range []string{
 		proof.BaselineHash, proof.FirstTrueHash, proof.FirstFalseHash, proof.ReplayTrueHash, proof.ReplayFalseHash,
-		proof.SecondTrueHash, proof.SecondFalseHash, proof.SyntaxControlHash,
+		proof.SecondTrueHash, proof.SecondFalseHash, proof.NativeControlHash,
+		proof.ComplementTrueHash, proof.ComplementFalseHash,
 	} {
 		if strings.TrimSpace(hash) == "" {
 			return false
@@ -53,7 +54,9 @@ func validBooleanPairProof(proof *BooleanPairProof) bool {
 		proof.FirstFalseHash != proof.ReplayFalseHash ||
 		proof.FirstTrueHash != proof.SecondTrueHash ||
 		proof.FirstFalseHash != proof.SecondFalseHash ||
-		proof.SyntaxControlHash != proof.BaselineHash ||
+		proof.FirstTrueHash != proof.ComplementTrueHash ||
+		proof.FirstFalseHash != proof.ComplementFalseHash ||
+		proof.NativeControlHash != proof.BaselineHash ||
 		proof.FirstTrueHash == proof.FirstFalseHash {
 		return false
 	}

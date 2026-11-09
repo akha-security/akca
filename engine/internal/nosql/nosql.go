@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -18,12 +19,13 @@ type Probe struct {
 
 // ResponseContext carries HTTP metadata used to reduce false positives.
 type ResponseContext struct {
-	BaselineBody   string
-	ProbeBody      string
-	ControlBody    string
-	BaselineStatus int
-	ProbeStatus    int
-	ControlStatus  int
+	BaselineBody     string
+	ProbeBody        string
+	ControlBody      string
+	BaselineStatus   int
+	ProbeStatus      int
+	ControlStatus    int
+	ProbeContentType string
 }
 
 // Probes returns MongoDB/NoSQL operator injection templates.
@@ -198,24 +200,11 @@ func IsLoginLikeEndpoint(endpointURL string) bool {
 	return false
 }
 
-// Mongo and in-memory engine error strings (avoid generic "syntax error", "javascript", etc.).
-var mongoStrongErrorMarkers = []string{
-	"syntaxerror: unexpected", "syntaxerror: unterminated", "syntax error: unexpected",
-	"referenceerror:", "in \"$where\" condition", "$where not allowed",
-	"evalmachine.<anonymous>", "function compilation failed",
-	"in csp mode, sift does not support strings", "unknown operator",
-	"cast to objectid failed", "invalid bson", "unexpected identifier",
-	"unexpected token", "is not defined",
-}
-
-var mongoErrorMarkers = []string{
-	"mongoerror", "mongoservererror", "unknown operator", "bad query",
-	"invalid bson", "failed to parse", "cast to objectid failed",
-	"bson type", "cannot use type", "$where not allowed", "unrecognized field",
-	"in csp mode, sift does not support strings", "in \"$where\" condition",
-	"function compilation failed", "evalmachine.<anonymous>",
-	"syntaxerror: unexpected", "syntaxerror: unterminated", "referenceerror:",
-}
+// Only provider-labelled database errors with a specific query/BSON failure
+// count as typed evidence. Generic JavaScript parser messages and bare terms
+// such as "unknown operator" often occur in static bundles and docs.
+var mongoErrorDisclosureRE = regexp.MustCompile(`(?i)\b(?:mongo(?:server)?error|bson(?:type)?error)\s*:\s*(?:unknown operator\b|bad query\b|invalid bson\b|failed to parse\b|cannot use type\b|unrecognized field\b|\$where not allowed\b|in \"\$where\" condition\b)`)
+var mongoCastErrorRE = regexp.MustCompile(`(?i)\bcast to objectid failed\b`)
 
 var authFailureMarkers = []string{
 	"invalid credentials", "invalid username", "invalid password", "login failed",
@@ -252,7 +241,12 @@ func AnalyzeWithContext(ctx ResponseContext, probe Probe) (bool, string) {
 	controlLower := strings.ToLower(ctx.ControlBody)
 
 	if sig := detectMongoError(probeLower, baseLower); sig != "" {
-		return true, sig
+		if ctx.ProbeStatus == 0 || IsMongoErrorResponse(
+			ctx.ProbeBody, ctx.BaselineBody, ctx.ProbeStatus, ctx.ProbeContentType,
+		) {
+			return true, sig
+		}
+		return false, ""
 	}
 
 	switch probe.Signal {
@@ -267,21 +261,10 @@ func AnalyzeWithContext(ctx ResponseContext, probe Probe) (bool, string) {
 }
 
 func detectMongoError(probeLower, baseLower string) string {
-	for _, kw := range mongoStrongErrorMarkers {
-		if strings.Contains(probeLower, kw) && !strings.Contains(baseLower, kw) {
-			return "nosql_error_disclosure"
-		}
-	}
-	hits := 0
-	for _, kw := range mongoErrorMarkers {
-		if strings.Contains(probeLower, kw) && !strings.Contains(baseLower, kw) {
-			hits++
-		}
-	}
-	if hits >= 1 && (strings.Contains(probeLower, "mongo") || strings.Contains(probeLower, "bson") || strings.Contains(probeLower, "$")) {
+	if mongoErrorDisclosureRE.MatchString(probeLower) && !mongoErrorDisclosureRE.MatchString(baseLower) {
 		return "nosql_error_disclosure"
 	}
-	if hits >= 2 {
+	if mongoCastErrorRE.MatchString(probeLower) && !mongoCastErrorRE.MatchString(baseLower) {
 		return "nosql_error_disclosure"
 	}
 	return ""
@@ -293,6 +276,46 @@ func detectMongoError(probeLower, baseLower string) string {
 // still rejected because they do not contain these markers.
 func IsMongoErrorDisclosure(body, baseline string) bool {
 	return detectMongoError(strings.ToLower(body), strings.ToLower(baseline)) != ""
+}
+
+// IsMongoErrorResponse accepts a typed database error only when the HTTP
+// response is consistent with an application error. A successful response is
+// considered only when it is a valid JSON error object; HTML and static content
+// carrying a database-related string are not proof.
+func IsMongoErrorResponse(body, baseline string, status int, contentType string) bool {
+	if !IsMongoErrorDisclosure(body, baseline) {
+		return false
+	}
+	contentType = strings.ToLower(contentType)
+	if status == 400 || status == 422 || status == 500 {
+		if strings.Contains(contentType, "json") {
+			return hasJSONMongoError(body, baseline)
+		}
+		plainBody := strings.ToLower(strings.TrimSpace(body))
+		return strings.Contains(contentType, "text/plain") &&
+			(mongoErrorDisclosureRE.MatchString(plainBody) || mongoCastErrorRE.MatchString(plainBody))
+	}
+	if status != 200 || !strings.Contains(contentType, "json") {
+		return false
+	}
+	return hasJSONMongoError(body, baseline)
+}
+
+func hasJSONMongoError(body, baseline string) bool {
+	var payload map[string]json.RawMessage
+	if json.Unmarshal([]byte(strings.TrimSpace(body)), &payload) != nil || payload == nil {
+		return false
+	}
+	for key, raw := range payload {
+		switch strings.ToLower(key) {
+		case "error", "errors", "message", "exception", "details":
+			var message string
+			if json.Unmarshal(raw, &message) == nil && IsMongoErrorDisclosure(message, baseline) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func analyzeAuthBypass(ctx ResponseContext, probeLower, baseLower, controlLower string) (bool, string) {

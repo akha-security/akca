@@ -23,13 +23,23 @@ func (r *Runner) runNoSQLi(ctx context.Context, target ScanTarget) []ModuleFindi
 		return nil
 	}
 
-	baseline, err := r.probeForModule(ctx, "nosql", target, "akca-nosql-base")
-	if err != nil {
-		baseline, err = r.cachedEmptyProbe(ctx, target)
-		if err != nil {
-			r.emitSkip("nosql", target, "baseline and empty-request fallback failed: "+err.Error())
+	baseline, baselineOK, baselineReason := r.stableNativeBaselineForModule(ctx, "nosql", target)
+	if (!baselineOK || !nosqlBaselineUsable(target, baseline.Response.StatusCode)) &&
+		jsonBodySurface(target) && nosql.IsLoginLikeEndpoint(target.EndpointURL) && target.Parameter != "" {
+		controlBaseline, controlErr := r.probeWithBodyForModule(
+			ctx, "nosql", target, nosql.ControlBody(target.Parameter), "application/json", nil,
+		)
+		if controlErr == nil && nosqlBaselineUsable(target, controlBaseline.Response.StatusCode) {
+			baseline, baselineOK = controlBaseline, true
+		}
+	}
+	if !baselineOK || !nosqlBaselineUsable(target, baseline.Response.StatusCode) {
+		if !baselineOK {
+			r.emitSkip("nosql", target, "native baseline failed: "+baselineReason)
 			return nil
 		}
+		r.emitSkip("nosql", target, "native endpoint response is not a reachable application baseline")
+		return nil
 	}
 
 	var controlRR httpclient.RequestResponse
@@ -131,15 +141,22 @@ func (r *Runner) runNoSQLi(ctx context.Context, target ScanTarget) []ModuleFindi
 		}
 
 		actx := nosql.ResponseContext{
-			BaselineBody:   baseline.Response.Body,
-			ProbeBody:      rr.Response.Body,
-			ControlBody:    controlRR.Response.Body,
-			BaselineStatus: baseline.Response.StatusCode,
-			ProbeStatus:    rr.Response.StatusCode,
-			ControlStatus:  controlRR.Response.StatusCode,
+			BaselineBody:     baseline.Response.Body,
+			ProbeBody:        rr.Response.Body,
+			ControlBody:      controlRR.Response.Body,
+			BaselineStatus:   baseline.Response.StatusCode,
+			ProbeStatus:      rr.Response.StatusCode,
+			ControlStatus:    controlRR.Response.StatusCode,
+			ProbeContentType: headerCI(rr.Response.Headers, "Content-Type"),
 		}
 		ok, signal := nosql.AnalyzeWithContext(actx, probe)
 		if !ok {
+			continue
+		}
+		if signal == "nosql_error_disclosure" && !nosql.IsMongoErrorResponse(
+			rr.Response.Body, baseline.Response.Body, rr.Response.StatusCode,
+			headerCI(rr.Response.Headers, "Content-Type"),
+		) {
 			continue
 		}
 		reprobe, err := r.nosqlProbe(ctx, target, probe)
@@ -150,6 +167,9 @@ func (r *Runner) runNoSQLi(ctx context.Context, target ScanTarget) []ModuleFindi
 		negativeControl := queryControlRR
 		if probe.Mode == "json_body" && controlRR.Request.Method != "" {
 			negativeControl = controlRR
+		}
+		if negativeControl.Request.Method == "" || !usableNegativeControl(baseline.Response, negativeControl.Response) {
+			continue
 		}
 		f := r.verifyAndBuildWithCandidate(ctx, "nosql", target, p, baseline, rr, signal,
 			false, false, "", "", func(candidate *verification.Candidate) {
@@ -181,7 +201,10 @@ func nosqlReprobeConfirmed(first nosql.ResponseContext, repeated httpclient.Resp
 		return false
 	}
 	if signal == "nosql_error_disclosure" {
-		return nosql.IsMongoErrorDisclosure(repeated.Body, first.BaselineBody)
+		return repeated.StatusCode == first.ProbeStatus && nosql.IsMongoErrorResponse(
+			repeated.Body, first.BaselineBody, repeated.StatusCode,
+			headerCI(repeated.Headers, "Content-Type"),
+		)
 	}
 	if repeated.StatusCode != first.ProbeStatus {
 		return false
@@ -197,8 +220,19 @@ func nosqlReprobeConfirmed(first nosql.ResponseContext, repeated httpclient.Resp
 }
 
 func nosqlSurface(target ScanTarget) bool {
+	if isStaticAssetURL(target.EndpointURL) {
+		return false
+	}
+	location := strings.ToLower(strings.TrimSpace(target.Location))
+	if location == "" {
+		location = strings.ToLower(strings.TrimSpace(target.Profile.ParameterLocation))
+	}
+	if strings.HasPrefix(location, "path") || strings.HasPrefix(strings.ToLower(target.Parameter), "path_segment_") ||
+		location == "header" || location == "cookie" {
+		return false
+	}
 	if strings.TrimSpace(target.Parameter) != "" {
-		return true
+		return location == "" || location == "query" || location == "form" || location == "json" || location == "body"
 	}
 	ct := strings.ToLower(target.Profile.ContentType)
 	if strings.Contains(ct, "json") {
@@ -215,6 +249,14 @@ func nosqlSurface(target ScanTarget) bool {
 		return true
 	}
 	return false
+}
+
+func nosqlBaselineUsable(target ScanTarget, status int) bool {
+	if status >= 200 && status < 300 {
+		return true
+	}
+	return (status == http.StatusUnauthorized || status == http.StatusForbidden) &&
+		nosql.IsLoginLikeEndpoint(target.EndpointURL)
 }
 
 func jsonBodySurface(target ScanTarget) bool {

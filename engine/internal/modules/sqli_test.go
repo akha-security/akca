@@ -172,6 +172,27 @@ func TestSQLiAdvancedSurfaceKeepsHeaderProbingEnabled(t *testing.T) {
 	}
 }
 
+func TestBrowserControlHeaderDoesNotBecomeSQLiSurface(t *testing.T) {
+	if got := mutableObservedHeaders(map[string]string{
+		"Upgrade-Insecure-Requests": "1", "Sec-Fetch-User": "?1", "X-Search-Filter": "recent",
+	}); len(got) != 1 || got[0] != "X-Search-Filter" {
+		t.Fatalf("observed header selection admitted browser controls: %v", got)
+	}
+	calls := 0
+	r := newActiveRunner(t, auditDoer(func(context.Context, string, string, []byte, map[string]string) (httpclient.RequestResponse, error) {
+		calls++
+		return httpclient.RequestResponse{}, nil
+	}))
+	target := ScanTarget{EndpointURL: "https://example.test/?id=39", Method: "GET",
+		Parameter: "Upgrade-Insecure-Requests", Location: "header"}
+	if ok, _ := r.shouldRunModule("sqli", target); ok {
+		t.Fatal("SQLi admitted a browser control header as an input")
+	}
+	if findings := r.runSQLi(context.Background(), target); len(findings) != 0 || calls != 0 {
+		t.Fatalf("SQLi probed browser control header: findings=%d requests=%d", len(findings), calls)
+	}
+}
+
 func TestRunSQLiDoesNotReportStablePagesOnHeaderPayloads(t *testing.T) {
 	for _, header := range []string{"X-Forwarded-For", "X-Forwarded-Host", "User-Agent"} {
 		t.Run(header, func(t *testing.T) {
@@ -234,6 +255,9 @@ func TestBooleanBlindXORPairEndToEnd(t *testing.T) {
 		if pair.variant == "boolean_xor_leading" {
 			c.responses[pair.secondTrueVal] = "normal product list"
 			c.responses[pair.secondFalseVal] = "no matching products"
+			complementTrue, complementFalse, _ := sqliComplementaryPair(pair)
+			c.responses[complementTrue] = "normal product list"
+			c.responses[complementFalse] = "no matching products"
 			c.responses[booleanSyntaxControl(pair.trueVal)] = "normal product list"
 		}
 	}
@@ -618,6 +642,54 @@ func TestSQLiEncodedTimingUsesMatchedEncodedControls(t *testing.T) {
 	r := groupBRunner(t, client)
 	if ok, _, _, _ := r.sqliTimingVerified(context.Background(), target, encoded[0], "mysql", baseline, 6, encoded[1], encoded[2]); !ok {
 		t.Fatal("encoded timing payload should verify with controls using the same WAF technique")
+	}
+}
+
+func TestSQLiTimingProofSurvivesBooleanFindingOnSameInput(t *testing.T) {
+	r := newActiveRunner(t, nil)
+	base := ModuleFinding{Endpoint: "https://example.test/item?id=1", Parameter: "id", Location: "query",
+		Evidence: Evidence{Module: "sqli", Signal: "boolean_pair_confirmed",
+			Request: httpclient.RequestRecord{Method: "GET"}}}
+	timed := base
+	timed.Evidence.Signal = "delayed_timing_confirmed"
+	if r.findingKey(base) == r.findingKey(timed) {
+		t.Fatal("timing proof was collapsed into an earlier boolean finding")
+	}
+	stacked := timed
+	stacked.Evidence.Signal = "stacked_timing"
+	if r.findingKey(timed) != r.findingKey(stacked) {
+		t.Fatal("timing payload variants should still deduplicate")
+	}
+}
+
+func TestSQLiTimingWindowBlocksCompetingSQLiRequests(t *testing.T) {
+	delivered := make(chan struct{}, 1)
+	r := newActiveRunner(t, auditDoer(func(context.Context, string, string, []byte, map[string]string) (httpclient.RequestResponse, error) {
+		delivered <- struct{}{}
+		return httpclient.RequestResponse{Response: httpclient.ResponseRecord{StatusCode: 200}}, nil
+	}))
+	target := ScanTarget{EndpointURL: "https://example.test/item?id=1", Method: "GET", Parameter: "id", Location: "query"}
+	gate := r.sqliTimingGate(target.EndpointURL)
+	gate.Lock()
+	started := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		close(started)
+		_, _ = r.probeForModule(context.Background(), "sqli", target, "1")
+		close(finished)
+	}()
+	<-started
+	select {
+	case <-delivered:
+		gate.Unlock()
+		t.Fatal("competing request reached transport during timing window")
+	case <-time.After(40 * time.Millisecond):
+	}
+	gate.Unlock()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("SQLi request did not resume after timing window")
 	}
 }
 

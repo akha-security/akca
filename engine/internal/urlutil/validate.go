@@ -8,6 +8,24 @@ import (
 
 const MaxURLLength = 2048
 
+// HasPathTemplate identifies JS/router placeholders that need real values
+// before a request can validate the endpoint. Keep them in discovery inventory.
+func HasPathTemplate(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if strings.ContainsAny(u.Path, "{}[]") {
+		return true
+	}
+	for _, segment := range strings.Split(u.Path, "/") {
+		if len(segment) > 1 && segment[0] == ':' {
+			return true
+		}
+	}
+	return false
+}
+
 var (
 	embeddedSchemeRe = regexp.MustCompile(`(?i)(?:^|/)(?:https?://|%68%74%74%70|%48%54%54%50)`)
 	templateTokenRe  = regexp.MustCompile(`[{][{]|[:]\w+[/)]|\$\{`)
@@ -50,6 +68,14 @@ func IsPlausibleEndpointURL(raw string) bool {
 	}
 
 	lowerPath := strings.ToLower(u.Path)
+	// JS string extraction can accidentally capture an entire minified
+	// expression. Inspect the decoded path, including URL-encoded operators;
+	// punctuation in query values and valid matrix/OData paths stays valid.
+	for _, fragment := range []string{"&&", "||", "=>", "function(", "function (", ".exports)", ".exports=", ".exports,", "){", ";return "} {
+		if strings.Contains(lowerPath, fragment) {
+			return false
+		}
+	}
 	// Reject semantic noise and JS artifacts
 	for _, noise := range []string{
 		"/undefined", "/null", "/nan", "/[object object]",

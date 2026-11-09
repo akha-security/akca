@@ -729,6 +729,9 @@ func (r *Runner) booleanBlindSQLiProbe(ctx context.Context, target ScanTarget, b
 	}()
 
 	for _, pair := range pairs {
+		if strings.Contains(pair.variant, "boolean_numeric_") && !isNumericTargetValue(target) {
+			continue
+		}
 		if ctx.Err() != nil {
 			break
 		}
@@ -800,6 +803,24 @@ func (r *Runner) booleanBlindSQLiProbe(ctx context.Context, target ScanTarget, b
 			continue
 		}
 
+		// Equality-only filtering can imitate two stable operand pairs without
+		// executing SQL. Reverse the comparator and operands: the same logical
+		// truth must still produce the same response on both branches.
+		complementTrue, complementFalse, complementary := sqliComplementaryPair(pair.sqliBooleanPair)
+		if !complementary {
+			continue
+		}
+		complementTrueRR, err := r.probeForModule(ctx, "sqli", trueAttempt.Target, complementTrue)
+		if err != nil {
+			continue
+		}
+		complementFalseRR, err := r.probeForModule(ctx, "sqli", trueAttempt.Target, complementFalse)
+		if err != nil || !booleanPairConfirmed(baseline.Response, complementTrueRR.Response, complementFalseRR.Response, complementTrue, complementFalse) ||
+			booleanResponseHash(complementTrueRR.Response.Body) != booleanResponseHash(trueRR.Body) ||
+			booleanResponseHash(complementFalseRR.Response.Body) != booleanResponseHash(falseRR.Body) {
+			continue
+		}
+
 		// Replaying the native value is the reliable clean control. Deliberately
 		// corrupting SQL keywords (OR->XR, AND->XND) creates a database syntax
 		// error on genuinely injectable endpoints and used to suppress exactly
@@ -830,17 +851,19 @@ func (r *Runner) booleanBlindSQLiProbe(ctx context.Context, target ScanTarget, b
 			proofRR.Request = falseAttempt.RR.Request
 		}
 		booleanProof := &verification.BooleanPairProof{
-			BaselineHash:      booleanResponseHash(baseline.Response.Body),
-			FirstTrueHash:     booleanResponseHash(trueRR.Body),
-			FirstFalseHash:    booleanResponseHash(falseRR.Body),
-			ReplayTrueHash:    booleanResponseHash(trueReplay.Response.Body),
-			ReplayFalseHash:   booleanResponseHash(falseReplay.Response.Body),
-			SecondTrueHash:    booleanResponseHash(secondTrue.Response.Body),
-			SecondFalseHash:   booleanResponseHash(secondFalse.Response.Body),
-			SyntaxControlHash: booleanResponseHash(controlRR.Response.Body),
-			Orientation:       orientation,
-			SameSurface:       true,
-			SyntaxControlOK:   true,
+			BaselineHash:        booleanResponseHash(baseline.Response.Body),
+			FirstTrueHash:       booleanResponseHash(trueRR.Body),
+			FirstFalseHash:      booleanResponseHash(falseRR.Body),
+			ReplayTrueHash:      booleanResponseHash(trueReplay.Response.Body),
+			ReplayFalseHash:     booleanResponseHash(falseReplay.Response.Body),
+			SecondTrueHash:      booleanResponseHash(secondTrue.Response.Body),
+			SecondFalseHash:     booleanResponseHash(secondFalse.Response.Body),
+			NativeControlHash:   booleanResponseHash(controlRR.Response.Body),
+			ComplementTrueHash:  booleanResponseHash(complementTrueRR.Response.Body),
+			ComplementFalseHash: booleanResponseHash(complementFalseRR.Response.Body),
+			Orientation:         orientation,
+			SameSurface:         true,
+			NativeControlOK:     true,
 		}
 		f := r.verifyAndBuildWithCandidate(ctx, "sqli", trueAttempt.Target, p, baseline, proofRR, signal,
 			false, false, "", "", func(candidate *verification.Candidate) {
@@ -854,13 +877,15 @@ func (r *Runner) booleanBlindSQLiProbe(ctx context.Context, target ScanTarget, b
 					r.observation("sqli", trueAttempt.Target, verification.RoleTrueBranch, 2, trueReplay),
 					r.observation("sqli", trueAttempt.Target, verification.RoleTrueBranch, 3, secondTrue),
 					r.observation("sqli", trueAttempt.Target, verification.RoleFalseBranch, 3, secondFalse),
-					r.observation("sqli", trueAttempt.Target, verification.RoleSyntaxControl, 1, controlRR),
+					r.observation("sqli", trueAttempt.Target, verification.RoleNegativeControl, 1, controlRR),
+					r.observation("sqli", trueAttempt.Target, verification.RoleTrueBranch, 4, complementTrueRR),
+					r.observation("sqli", trueAttempt.Target, verification.RoleFalseBranch, 4, complementFalseRR),
 				)
 			})
 		if f != nil {
-			f.Description += " Confirmed with two independent operand pairs in the same SQL context and a clean native-value control."
+			f.Description += " Confirmed with independent operand pairs, complementary comparison operators and a clean native-value control."
 			f.Evidence.Verification.UpgradeReasons = append(f.Evidence.Verification.UpgradeReasons,
-				"two_independent_boolean_pairs", "native_value_control_clean")
+				"two_independent_boolean_pairs", "complementary_comparison_reproduced", "native_value_control_clean")
 			var out []ModuleFinding
 			if r.recordFinding(ctx, &out, f, "sqli", "boolean_pair_confirmed") {
 				return out
@@ -869,6 +894,22 @@ func (r *Runner) booleanBlindSQLiProbe(ctx context.Context, target ScanTarget, b
 		}
 	}
 	return nil
+}
+
+var sqliNumericEqualityRE = regexp.MustCompile(`['"]?\b[0-9]+['"]?\s*=\s*['"]?[0-9]+\b['"]?`)
+
+func sqliComplementaryPair(pair sqliBooleanPair) (trueValue, falseValue string, ok bool) {
+	reverse := func(value string) (string, bool) {
+		span := sqliNumericEqualityRE.FindStringIndex(value)
+		if span == nil {
+			return "", false
+		}
+		comparison := strings.Replace(value[span[0]:span[1]], "=", "<>", 1)
+		return value[:span[0]] + comparison + value[span[1]:], true
+	}
+	trueValue, trueOK := reverse(pair.falseVal)
+	falseValue, falseOK := reverse(pair.trueVal)
+	return trueValue, falseValue, trueOK && falseOK
 }
 
 func booleanResponseHash(body string) string {

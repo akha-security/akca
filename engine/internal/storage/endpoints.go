@@ -65,6 +65,33 @@ VALUES (?, ?, ?, ?)`, scanID, fields.URL, fields.Method, fields.Source)
 	return nil
 }
 
+// SaveEndpointResponseStatus records a failed baseline without replacing the
+// observed request template or discovery source.
+func (db *DB) SaveEndpointResponseStatus(endpointID int64, status int) error {
+	var trailJSON string
+	if err := db.conn.QueryRow(`SELECT COALESCE(discovery_trail_json, '') FROM endpoints WHERE id = ?`, endpointID).Scan(&trailJSON); err != nil {
+		return err
+	}
+	trail := map[string]interface{}{}
+	if trailJSON != "" {
+		if err := json.Unmarshal([]byte(trailJSON), &trail); err != nil {
+			return err
+		}
+	}
+	template, ok := trail["request_template"].(map[string]interface{})
+	if !ok {
+		template = map[string]interface{}{}
+	}
+	template["response_status"] = status
+	trail["request_template"] = template
+	updated, err := json.Marshal(trail)
+	if err != nil {
+		return err
+	}
+	_, err = db.conn.Exec(`UPDATE endpoints SET discovery_trail_json = ? WHERE id = ?`, string(updated), endpointID)
+	return err
+}
+
 func mergeDiscoveryTrail(existingJSON, incomingJSON string) string {
 	if existingJSON == "" {
 		return incomingJSON

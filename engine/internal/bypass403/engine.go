@@ -3,6 +3,7 @@ package bypass403
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -35,6 +36,7 @@ type Engine struct {
 	workers  int
 	limits   Limits
 	requests atomic.Int64
+	deferred atomic.Int64
 }
 
 type Limits struct {
@@ -140,6 +142,10 @@ func (e *Engine) Run(ctx context.Context) error {
 	_ = e.emit("bypass403_finished", "auth bypass checks finished", map[string]interface{}{
 		"scan_id": e.scanID, "queue": e.queue.Metrics(),
 	})
+	if e.deferred.Load() > 0 {
+		_ = e.emit("coverage_gap", "403 bypass deferred after WAF/rate-limit response", map[string]interface{}{"scan_id": e.scanID, "module": "bypass403", "deferred": e.deferred.Load()})
+		return httpclient.ErrHostDeferred
+	}
 	return nil
 }
 
@@ -198,6 +204,10 @@ func (e *Engine) processEntry(ctx context.Context, entry fuzzing.QueueEntry) {
 		}
 		rr, err := e.client.Do(ctx, attempt.Method, attempt.URL, nil, attempt.Headers)
 		if err != nil {
+			if errors.Is(err, httpclient.ErrHostDeferred) {
+				e.deferred.Add(1)
+				return
+			}
 			continue
 		}
 
@@ -252,6 +262,9 @@ func isAuthBlockedStatus(code int) bool {
 func (e *Engine) captureBaseline(ctx context.Context, rawURL, method string) (Baseline, error) {
 	rr, err := e.client.Do(ctx, method, rawURL, nil, nil)
 	if err != nil {
+		if errors.Is(err, httpclient.ErrHostDeferred) {
+			e.deferred.Add(1)
+		}
 		return Baseline{}, err
 	}
 	wwwAuth := headerValue(rr.Response.Headers, "WWW-Authenticate")

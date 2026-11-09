@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	pathpkg "path"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -23,6 +22,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/stategraph"
 	"github.com/akha-security/akca/engine/internal/storage"
 	"github.com/akha-security/akca/engine/internal/urlutil"
+	"golang.org/x/net/html"
 )
 
 // maxSecretScanBytes caps how much of a response body is scanned for secrets to
@@ -66,6 +66,8 @@ type Crawler struct {
 	startedAt        time.Time
 	eventBatch       []map[string]interface{}
 	stateGraph       *stategraph.Graph
+	seedRequestsOnly bool
+	progressPhase    string
 }
 
 func New(scanID string, cfg config.ScanConfig, client HTTPDoer, scopeEngine *scope.Engine, db *storage.DB, emit EventSink) *Crawler {
@@ -99,6 +101,7 @@ func New(scanID string, cfg config.ScanConfig, client HTTPDoer, scopeEngine *sco
 		browserBlocked:  make(map[string]struct{}),
 		emit:            emit,
 		stateGraph:      stategraph.New(db),
+		progressPhase:   "crawling",
 	}
 }
 
@@ -195,6 +198,8 @@ func (c *Crawler) IngestSeeds(urls []string) int {
 }
 
 func (c *Crawler) Crawl(ctx context.Context, seeds []string) error {
+	c.seedRequestsOnly = false
+	c.progressPhase = "crawling"
 	c.mu.Lock()
 	c.startedAt = time.Now()
 	c.pagesVisited = 0
@@ -224,12 +229,14 @@ func (c *Crawler) Crawl(ctx context.Context, seeds []string) error {
 		TimeBudget:    c.cfg.TimeBudget,
 	}
 	for _, seed := range seeds {
+		if u, err := url.Parse(seed); err == nil {
+			c.linkedHostsSeen[strings.ToLower(u.Hostname())] = struct{}{}
+		}
 		c.enqueueCandidate(seed, "GET", 0, SourceSeed, 1.0, "initial seed", budget, nil, "")
 	}
 	seedQueueSize := c.q.Len()
 	c.IngestSeeds(c.seeds)
 
-	c.fetchSpecialPaths(ctx, seeds, budget)
 	if c.q.Len() == 0 {
 		message := "Crawler has no crawlable in-scope requests; verify the target URL and include/exclude domain rules"
 		_ = c.emit("coverage_gap", message, map[string]interface{}{
@@ -251,7 +258,18 @@ func (c *Crawler) Crawl(ctx context.Context, seeds []string) error {
 		"queue_size": c.q.Len(), "discovered": c.discovered,
 	})
 
-	c.runWorkers(ctx, budget)
+	// Complete the entry requests before speculative paths can occupy workers
+	// or consume a small crawl budget while the first page is still loading.
+	bootstrapBudget := budget
+	bootstrapBudget.MaxPages = c.q.Len()
+	if budget.MaxPages > 0 {
+		bootstrapBudget.MaxPages = min(bootstrapBudget.MaxPages, budget.MaxPages)
+	}
+	c.runWorkers(ctx, bootstrapBudget)
+	if ctx.Err() == nil && !c.budgetExceeded(budget) {
+		c.fetchSpecialPaths(ctx, seeds, budget)
+		c.runWorkers(ctx, budget)
+	}
 	c.emitBrowserBlockedSummary()
 	c.mu.Lock()
 	contentPages, rejectedPages, networkErrors := c.contentPages, c.rejectedPages, c.networkErrors
@@ -313,7 +331,7 @@ func (c *Crawler) runWorkers(ctx context.Context, budget Budget) {
 				_ = c.flushEndpointEvents()
 				pages, requests, discovered := c.Stats()
 				_ = c.emit("scan_progress", "crawling", map[string]interface{}{
-					"scan_id": c.scanID, "phase": "crawling",
+					"scan_id": c.scanID, "phase": c.progressPhase,
 					"pages": pages, "requests": requests,
 					"discovered": discovered, "queue_size": c.q.Len(),
 				})
@@ -461,7 +479,17 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget, req
 		c.q.Enqueue(item)
 		return nil
 	}
-	rr, err := c.client.Do(ctx, method, visitURL, reqBody, reqHeaders)
+	if c.seedRequestsOnly {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		// Inspect each redirect before fetching it so an API redirect to an
+		// already-crawled login/root page does not download that page again.
+		ctx = httpclient.WithoutRedirects(ctx)
+	}
+	requestCtx, requestCancel := context.WithTimeout(ctx, 15*time.Second)
+	rr, err := c.client.Do(requestCtx, method, visitURL, reqBody, reqHeaders)
+	requestCancel()
 	if err != nil {
 		c.mu.Lock()
 		c.networkErrors++
@@ -505,23 +533,7 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget, req
 		}
 	}
 
-	lowerCT := strings.ToLower(contentType)
-	lowerBody := strings.ToLower(body)
-	isHTML := strings.Contains(lowerCT, "html") ||
-		strings.Contains(lowerCT, "xhtml") ||
-		strings.Contains(lowerCT, "xml") ||
-		strings.Contains(lowerCT, "text/") ||
-		lowerCT == "" ||
-		strings.Contains(lowerBody, "<html") ||
-		strings.Contains(lowerBody, "<!doctype") ||
-		strings.Contains(lowerBody, "<body") ||
-		strings.Contains(lowerBody, "<head") ||
-		strings.Contains(lowerBody, "<div") ||
-		strings.Contains(lowerBody, "<table") ||
-		strings.Contains(lowerBody, "<form") ||
-		strings.Contains(lowerBody, "<a ") ||
-		strings.Contains(lowerBody, "<a\n") ||
-		strings.Contains(lowerBody, "<a\t")
+	responseUsable := rr.Response.StatusCode >= 200 && rr.Response.StatusCode < 300
 
 	c.recordEndpoint(rawURL, method, source, 1.0, depth, why, &RequestTemplate{
 		Method: method, URL: visitURL, Headers: mergeHeaderMaps(reqHeaders, rr.Request.Headers),
@@ -567,18 +579,43 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget, req
 			}
 		}
 	}
-	for _, linkURL := range extractLinkHeaderURLs(pageURL, rr.Response.Headers) {
-		c.enqueueCandidate(linkURL, http.MethodGet, depth+1, SourceLinkHeader, 0.75, "Link response header", budget, nil, rawURL)
+	// This follow-up phase validates new JS API requests. Parsing an HTML
+	// fallback here would start another site crawl and repeat browser work.
+	if c.seedRequestsOnly {
+		return nil
 	}
+	for _, linkURL := range extractLinkHeaderURLs(pageURL, rr.Response.Headers) {
+		if responseUsable {
+			c.enqueueCandidate(linkURL, http.MethodGet, depth+1, SourceLinkHeader, 0.75, "Link response header", budget, nil, rawURL)
+		}
+	}
+	if rr.Response.StatusCode >= 300 && rr.Response.StatusCode < 400 {
+		return nil
+	}
+	if rr.Response.StatusCode >= 400 && !browserRecoverableDocumentStatus(rr.Response.StatusCode) {
+		return nil
+	}
+	lowerCT := strings.ToLower(contentType)
+	lowerBody := strings.ToLower(body)
+	isHTML := responseUsable && (strings.Contains(lowerCT, "html") ||
+		strings.Contains(lowerCT, "xhtml") || strings.Contains(lowerCT, "xml") ||
+		strings.Contains(lowerCT, "text/") || lowerCT == "" ||
+		strings.Contains(lowerBody, "<html") || strings.Contains(lowerBody, "<!doctype") ||
+		strings.Contains(lowerBody, "<body") || strings.Contains(lowerBody, "<head") ||
+		strings.Contains(lowerBody, "<div") || strings.Contains(lowerBody, "<table") ||
+		strings.Contains(lowerBody, "<form") || strings.Contains(lowerBody, "<a ") ||
+		strings.Contains(lowerBody, "<a\n") || strings.Contains(lowerBody, "<a\t"))
 
 	// Scan every response body (HTML, JSON, JS, plain text, …) for leaked
 	// secrets and compromised supply chain scripts (Polyfill.io / CWE-829).
-	c.scanSecrets(rawURL, body)
-	c.scanSupplyChain(rawURL, body)
-	c.scanThirdPartyScriptIntegrity(rawURL, body)
+	if responseUsable {
+		c.scanSecrets(rawURL, body)
+		c.scanSupplyChain(rawURL, body)
+		c.scanThirdPartyScriptIntegrity(rawURL, body)
+	}
 
-	isJS := strings.Contains(lowerCT, "javascript") || strings.Contains(lowerCT, "ecmascript") ||
-		strings.HasSuffix(strings.ToLower(rawURL), ".js") || strings.HasSuffix(strings.ToLower(rawURL), ".mjs")
+	isJS := responseUsable && (strings.Contains(lowerCT, "javascript") || strings.Contains(lowerCT, "ecmascript") ||
+		strings.HasSuffix(strings.ToLower(rawURL), ".js") || strings.HasSuffix(strings.ToLower(rawURL), ".mjs"))
 
 	var discovered []DiscoveredEndpoint
 	if isHTML {
@@ -657,6 +694,9 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget, req
 				discovered = append(discovered, ExtractFromHTML(pageURL, dom)...)
 			}
 		}
+	}
+	if rr.Response.StatusCode >= 400 && browserState == nil {
+		return nil
 	}
 
 	apiCalls := make([]string, 0, len(discovered))
@@ -866,6 +906,8 @@ func (c *Crawler) fetchSpecialPaths(_ context.Context, seeds []string, budget Bu
 
 // CrawlEndpointSeeds enqueues discovered endpoints with their HTTP methods (used for JS API re-crawl).
 func (c *Crawler) CrawlEndpointSeeds(ctx context.Context, seeds []DiscoveredEndpoint, budget Budget) error {
+	c.seedRequestsOnly = true
+	c.progressPhase = "js_api_crawl"
 	c.mu.Lock()
 	c.startedAt = time.Now()
 	c.mu.Unlock()
@@ -875,13 +917,16 @@ func (c *Crawler) CrawlEndpointSeeds(ctx context.Context, seeds []DiscoveredEndp
 	for _, ep := range seeds {
 		c.enqueueCandidate(ep.URL, ep.Method, 0, ep.Source, ep.Confidence, ep.WhyDiscovered, budget, ep.RequestTemplate, "")
 	}
+	_ = c.emit("scan_progress", "validating JS API requests", map[string]interface{}{
+		"scan_id": c.scanID, "phase": c.progressPhase, "queue_size": c.q.Len(), "seeds": len(seeds),
+	})
 	c.runWorkers(ctx, budget)
 	_ = c.flushEndpointEvents()
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if c.q.Len() > 0 || c.failureCount() > 0 {
-		return fmt.Errorf("JS crawl incomplete: %d queued URLs, %d persistence/worker errors", c.q.Len(), c.failureCount())
+	if c.q.Len() > 0 || c.failureCount() > 0 || c.networkErrors > 0 {
+		return fmt.Errorf("%w: JS API validation has %d queued URLs, %d request errors and %d persistence/worker errors", ErrIncomplete, c.q.Len(), c.networkErrors, c.failureCount())
 	}
 	return nil
 }
@@ -900,6 +945,9 @@ func (c *Crawler) enqueueCandidate(rawURL, method string, depth int, source Disc
 	if !c.scope.IsInScope(rawURL) {
 		return
 	}
+	if c.seedRequestsOnly && urlutil.HasPathTemplate(rawURL) {
+		return
+	}
 	if IsCrawlerTrap(rawURL) {
 		c.recordEndpoint(rawURL, method, source, confidence, depth, "discovered; excluded by structural URL limit", tmpl)
 		if c.emit != nil {
@@ -910,9 +958,16 @@ func (c *Crawler) enqueueCandidate(rawURL, method string, depth int, source Disc
 		}
 		return
 	}
+	if c.seedRequestsOnly && c.db != nil {
+		var status int
+		_ = c.db.Conn().QueryRow(`SELECT COALESCE(json_extract(discovery_trail_json, '$.request_template.response_status'), 0) FROM endpoints WHERE scan_id = ? AND url = ? AND method = ?`, c.scanID, rawURL, method).Scan(&status)
+		if status > 0 {
+			return
+		}
+	}
 
 	// When a newly discovered linked host/subdomain is encountered, probe its API docs & robots.txt
-	if u, err := url.Parse(rawURL); err == nil && u.Host != "" {
+	if u, err := url.Parse(rawURL); !c.seedRequestsOnly && err == nil && u.Host != "" {
 		host := strings.ToLower(u.Hostname())
 		c.mu.Lock()
 		if _, seenHost := c.linkedHostsSeen[host]; !seenHost {
@@ -981,10 +1036,13 @@ func (c *Crawler) enqueueCandidate(rawURL, method string, depth int, source Disc
 	// Skip enqueuing static binary assets (images, fonts, media, binary downloads, css) into the active crawl queue.
 	// They do not contain navigable links, HTML, or scripts to parse.
 	if isStaticMediaAsset(rawURL) {
+		if c.seedRequestsOnly {
+			return
+		}
 		// The binary itself is not crawlable, but its parent may expose a web
 		// server directory index. Infer a small, bounded ancestor chain from the
 		// observed asset instead of relying only on a fixed wordlist.
-		for _, directoryURL := range staticAssetDirectoryURLs(rawURL, 4) {
+		for _, directoryURL := range staticAssetDirectoryURLs(rawURL, 1) {
 			c.enqueueCandidate(directoryURL, http.MethodGet, depth, SourceStaticRoot, 0.75,
 				"parent directory inferred from observed static asset", budget, nil, rawURL)
 		}
@@ -1071,19 +1129,39 @@ func (c *Crawler) recordEndpoint(rawURL, method string, source DiscoverySource, 
 		tmpl.ResponseBody = tmpl.ResponseBody[:4096] + "...[truncated]"
 	}
 
-	isSeed := source == SourceSeed
-	hasFailedStatus := tmpl != nil && (tmpl.ResponseStatus == 404 || tmpl.ResponseStatus == 410)
+	isSeed := source == SourceSeed || source == SourceSeedIngest
+	hasFailedStatus := tmpl != nil && (tmpl.ResponseStatus == 404 || tmpl.ResponseStatus == 410 ||
+		tmpl.ResponseStatus == 429 || tmpl.ResponseStatus >= 500)
 
-	// If it returned a 404/410, it's not a real/accessible URL.
-	// Keep 400 responses: API routes often return Bad Request until required
-	// parameters or body templates are supplied.
-	// Delete it from endpoints table if it was previously saved.
+	// Exclude known missing, throttled and server-error routes from active
+	// scanning. Keep 400 responses: API routes often need a request body.
+	// Preserve failed seed status for coverage reporting, but remove failed
+	// speculative discoveries from the endpoint inventory.
 	if hasFailedStatus {
+		if c.db != nil {
+			if !isSeed {
+				if _, err := c.db.Conn().Exec(
+					"DELETE FROM endpoints WHERE scan_id = ? AND url = ? AND method = ? AND COALESCE(discovery_source,'') <> 'api_import'",
+					c.scanID, rawURL, method,
+				); err != nil {
+					c.recordFailure()
+				}
+			}
+			// Imported endpoints are retained, with the failed status attached so
+			// later target queries can exclude them. Other failed links need no
+			// extra insert/update before deletion.
+			_, retainedErr := c.db.GetEndpointID(c.scanID, rawURL, method)
+			if isSeed || retainedErr == nil {
+				failed := DiscoveredEndpoint{
+					URL: rawURL, Method: method, NormalizedURL: norm, Source: source,
+					Confidence: confidence, Depth: depth, WhyDiscovered: why, RequestTemplate: tmpl,
+				}
+				if err := c.db.SaveDiscoveredEndpoint(c.scanID, failed); err != nil {
+					c.recordFailure()
+				}
+			}
+		}
 		if !isSeed {
-			_, _ = c.db.Conn().Exec(
-				"DELETE FROM endpoints WHERE scan_id = ? AND url = ? AND method = ? AND COALESCE(discovery_source,'') <> 'api_import'",
-				c.scanID, rawURL, method,
-			)
 			key := dedupeKey(method, norm)
 			c.mu.Lock()
 			if _, alreadyRecorded := c.recorded[key]; alreadyRecorded {
@@ -1251,10 +1329,40 @@ func (c *Crawler) scanSupplyChain(sourceURL, body string) {
 	}
 }
 
-var externalURLRe = regexp.MustCompile(`(?i)(?:https?:)?//[^\s"'<>]+`)
-var scriptTagRe = regexp.MustCompile(`(?is)<script\b([^>]*)>`)
-var scriptSrcAttributeRe = regexp.MustCompile(`(?i)\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))`)
-var integrityAttributeRe = regexp.MustCompile(`(?i)\bintegrity\s*=\s*(?:"[^"]+"|'[^']+'|[^\s>]+)`)
+type scriptReference struct {
+	src          string
+	hasIntegrity bool
+}
+
+func scriptReferences(body string) []scriptReference {
+	tokenizer := html.NewTokenizer(strings.NewReader(body))
+	var refs []scriptReference
+	for {
+		tokenType := tokenizer.Next()
+		if tokenType == html.ErrorToken {
+			return refs
+		}
+		if tokenType != html.StartTagToken && tokenType != html.SelfClosingTagToken {
+			continue
+		}
+		token := tokenizer.Token()
+		if !strings.EqualFold(token.Data, "script") {
+			continue
+		}
+		ref := scriptReference{}
+		for _, attr := range token.Attr {
+			switch strings.ToLower(attr.Key) {
+			case "src":
+				ref.src = strings.TrimSpace(attr.Val)
+			case "integrity":
+				ref.hasIntegrity = strings.TrimSpace(attr.Val) != ""
+			}
+		}
+		if ref.src != "" {
+			refs = append(refs, ref)
+		}
+	}
+}
 
 func (c *Crawler) scanThirdPartyScriptIntegrity(sourceURL, body string) {
 	if body == "" || len(body) > maxSecretScanBytes {
@@ -1264,11 +1372,11 @@ func (c *Crawler) scanThirdPartyScriptIntegrity(sourceURL, body string) {
 	if err != nil || page.Hostname() == "" {
 		return
 	}
-	for _, match := range scriptTagRe.FindAllStringSubmatch(body, -1) {
-		if len(match) < 2 || integrityAttributeRe.MatchString(match[1]) {
+	for _, ref := range scriptReferences(body) {
+		if ref.hasIntegrity {
 			continue
 		}
-		src := scriptSource(match[1])
+		src := ref.src
 		if src == "" {
 			continue
 		}
@@ -1318,19 +1426,6 @@ func (c *Crawler) scanThirdPartyScriptIntegrity(sourceURL, body string) {
 	}
 }
 
-func scriptSource(attributes string) string {
-	match := scriptSrcAttributeRe.FindStringSubmatch(attributes)
-	if len(match) == 0 {
-		return ""
-	}
-	for _, value := range match[1:] {
-		if value != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
 func sameHost(left, right string) bool {
 	return strings.EqualFold(strings.TrimSuffix(left, "."), strings.TrimSuffix(right, "."))
 }
@@ -1348,7 +1443,8 @@ func isKnownSupplyChainDomain(host string) bool {
 // responseReferencesDomain accepts an actual URL reference, not a domain name
 // merely mentioned in prose, a comment, or an example string.
 func responseReferencesDomain(body, domain string) bool {
-	for _, raw := range externalURLRe.FindAllString(body, -1) {
+	for _, ref := range scriptReferences(body) {
+		raw := ref.src
 		if strings.HasPrefix(raw, "//") {
 			raw = "https:" + raw
 		}

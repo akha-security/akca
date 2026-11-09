@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/akha-security/akca/engine/internal/httpclient"
 	"strings"
 	"sync"
 )
 
 var ErrModuleCoverageIncomplete = errors.New("module coverage incomplete")
+
+// A completed assessment can still lack the evidence needed for a conclusion.
+var ErrModuleAssessmentInconclusive = errors.New("module assessment inconclusive")
 
 func moduleCoverageMessage(module string, failed, exhausted, unfinished int) string {
 	parts := make([]string, 0, 3)
@@ -41,6 +45,8 @@ func classifyTargetRun(state *targetRun, panicked bool, findingCount int, ctxErr
 	state.mu.Unlock()
 
 	switch {
+	case state.deferred.Load():
+		return "incomplete", "active tests deferred after WAF/rate-limit response"
 	case state.budgetExhausted.Load():
 		return "incomplete", reason
 	case state.interrupted.Load() || state.pendingTiming.Load() > 0:
@@ -55,6 +61,8 @@ func classifyTargetRun(state *targetRun, panicked bool, findingCount int, ctxErr
 		return "completed", reason
 	case state.failures.Load() > 0 && reason != "":
 		return "error", reason
+	case state.inconclusive.Load():
+		return "inconclusive", reason
 	case state.blockedResponse.Load() && !state.usableResponse.Load():
 		if reason == "" {
 			reason = "only authentication, WAF, rate-limit or gateway rejection responses were observed"
@@ -78,15 +86,21 @@ func (r *Runner) RunModuleFromDB(ctx context.Context, module string, limit int) 
 }
 
 func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTarget) ([]ModuleFinding, error) {
+	ctx = httpclient.WithActiveScan(ctx)
 	if !r.cfg.AllowsModule(module) {
+		r.setModuleStatus(module, "skipped")
 		return nil, nil
 	}
 	if module == "php2shell" && r.cfg.PHP2ShellActive {
 		if err := r.cfg.ValidatePHP2ShellOptions(); err != nil {
 			return nil, err
 		}
-		labURL, _ := r.cfg.PHP2ShellLabURL()
-		targets = []ScanTarget{{EndpointURL: labURL, Method: "GET"}}
+		if r.cfg.OnlyPHP2Shell() {
+			labURL, _ := r.cfg.PHP2ShellLabURL()
+			targets = []ScanTarget{{EndpointURL: labURL, Method: "GET"}}
+		} else {
+			targets = r.php2ShellFullScanTargets(targets)
+		}
 	} else if module == "php2shell" && !r.cfg.OnlyPHP2Shell() {
 		// Discovery can contain thousands of routes and adopted subdomains.
 		// This origin-level assessment needs only one root/index response per
@@ -115,6 +129,10 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 	if workers <= 0 {
 		workers = 8
 	}
+	if module == "php2shell" && r.cfg.PHP2ShellActive {
+		// Keep memory pressure probes serial across configured origins.
+		workers = 1
+	}
 	workers = min(workers, len(targets))
 	type result struct {
 		state    *targetRun
@@ -137,7 +155,11 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 				state := &targetRun{managed: true}
 				results[i].state = state
 				if !r.budgetEligible(module, target) {
-					state.skipped("no applicable in-scope mutation surface")
+					_, reason := r.shouldRunModule(module, target)
+					if reason == "" {
+						reason = "no applicable in-scope mutation surface"
+					}
+					state.skipped(reason)
 					continue
 				}
 				if allocation != nil {
@@ -185,6 +207,7 @@ feed:
 		findings = append(findings, r.flushDelayedTimingVerifications(ctx)...)
 	}
 	tested, attempted, skipped, failed, exhausted, unprocessed, blocked := 0, 0, 0, 0, 0, 0, 0
+	inconclusive := 0
 	requests, responses, usableResponses := int64(0), int64(0), int64(0)
 	authBlocks, rateBlocks, gatewayBlocks := int64(0), int64(0), int64(0)
 	timeoutFailures, transportErrors := int64(0), int64(0)
@@ -206,6 +229,12 @@ feed:
 		timeoutFailures += state.timeoutFailures.Load()
 		transportErrors += state.transportErrors.Load()
 		status, reason := classifyTargetRun(state, result.panicked, len(result.findings), ctx.Err())
+		// A skipped or blocked target has already been assessed for this scan.
+		// Requeueing it in the follow-up stage repeats 404/403 baselines and
+		// makes XSS/SQLi appear to run twice without any new input.
+		if status == "completed" || status == "inconclusive" || status == "skipped" || status == "blocked" {
+			r.markCompletedWork(module, targets[i])
+		}
 		switch status {
 		case "completed":
 			tested++
@@ -221,6 +250,8 @@ feed:
 			} else {
 				unprocessed++
 			}
+		case "inconclusive":
+			inconclusive++
 		default:
 			skipped++
 		}
@@ -241,12 +272,26 @@ feed:
 		"scan_id": r.scanID, "module": module, "findings": len(findings), "targets_total": len(targets), "targets_eligible": eligible,
 		"targets_tested": tested, "targets_attempted": attempted, "targets_skipped": skipped, "targets_failed": failed,
 		"targets_budget_exhausted": exhausted, "targets_unprocessed": unprocessed,
-		"targets_blocked":     blocked,
-		"coverage_percentage": fmt.Sprintf("%.1f%%", coverage), "coverage_pct": coverage,
+		"targets_blocked":      blocked,
+		"targets_inconclusive": inconclusive,
+		"coverage_percentage":  fmt.Sprintf("%.1f%%", coverage), "coverage_pct": coverage,
 		"requests_attempted": requests, "responses_received": responses, "usable_responses": usableResponses,
 		"auth_blocked_responses": authBlocks, "rate_limited_responses": rateBlocks, "gateway_blocked_responses": gatewayBlocks,
 		"timeout_failures": timeoutFailures, "transport_errors": transportErrors,
 	}
+	moduleStatus := "completed"
+	switch {
+	case inconclusive > 0 && tested == 0:
+		moduleStatus = "inconclusive"
+	case len(targets) > 0 && blocked == len(targets):
+		moduleStatus = "blocked"
+	case tested == 0 && findings == nil:
+		moduleStatus = "skipped"
+	case tested == 0 && len(findings) == 0:
+		moduleStatus = "skipped"
+	}
+	r.setModuleStatus(module, moduleStatus)
+	data["status"] = moduleStatus
 	for key, value := range summarizeProofCoverage(findings) {
 		data[key] = value
 	}
@@ -269,6 +314,10 @@ feed:
 	}
 	if count := r.executionErrors.Load() - errorsBefore; count > 0 {
 		return findings, fmt.Errorf("module %s completed with %d execution or persistence errors", module, count)
+	}
+	if inconclusive > 0 {
+		_ = r.emit("coverage_gap", module+" assessment is inconclusive; no clean result was established", data)
+		return findings, fmt.Errorf("%w: %s has %d inconclusive target(s)", ErrModuleAssessmentInconclusive, module, inconclusive)
 	}
 	return findings, nil
 }

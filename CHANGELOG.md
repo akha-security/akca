@@ -7,9 +7,27 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.3.1] - 2026-11-09
+
+### Changed
+
+- Complete crawling and the unified GET/POST hidden-parameter discovery pass before vulnerability modules. Prioritize injection checks before noisy path and access-control checks, and avoid duplicate follow-up runs.
+- Restrict active probes to eligible application endpoints, with bounded discovery and request pressure controls for JavaScript, crawling, and hidden parameters.
+- Run the bounded PHP2Shell memory-signature assessment against explicit origins in normal full scans, while preserving inconclusive results and accurate request evidence.
+- Refresh the offline HTML report with a centered AKCA logo, larger typography, a clearer assessment overview, and more readable finding and HTTP evidence sections.
+
 ### Fixed
 
-- Restrict PHP2Shell in full scans to one passive root or `/index.php` assessment per explicitly configured origin, without probing crawled routes, adopted subdomains or redirect destinations.
+- Require class-specific, current-version observations before reporting findings; keep unproven passive records in manual review and reject unknown module classes.
+- Require corroborated SQL injection timing and authentication-bypass evidence, and keep interrupted or partial verification candidates visible without treating them as confirmed.
+- Parse real HTML script attributes for third-party supply-chain checks so comments and `data-src` examples do not become findings.
+- Preserve highlighted request and response proof, including exact error markers, in generated reports.
+- Restrict PHP2Shell checks to one root or `/index.php` assessment per explicitly configured origin, without probing crawled routes, adopted subdomains or redirect destinations.
+
+### Validation
+
+- Full `go test ./... -count=1`, `go vet ./...`, formatting, and the strict observed benchmark gate pass locally; the mobile stress preview has no horizontal overflow at a 360-pixel content viewport.
+- No release claim of zero false positives or complete per-module target validation is made.
 
 ## [v0.3.0] - 2026-10-23
 
@@ -461,7 +479,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - HTML, JSON, Markdown, CSV and SARIF reporting.
 - CWE and OWASP Top 10:2025 report classification.
 
-[Unreleased]: https://github.com/akha-security/akca/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/akha-security/akca/compare/v0.3.1...HEAD
+[v0.3.1]: https://github.com/akha-security/akca/compare/v0.3.0...v0.3.1
 [v0.3.0]: https://github.com/akha-security/akca/compare/v0.2.9...v0.3.0
 [v0.2.9]: https://github.com/akha-security/akca/compare/v0.2.8...v0.2.9
 [v0.2.8]: https://github.com/akha-security/akca/compare/v0.2.7...v0.2.8

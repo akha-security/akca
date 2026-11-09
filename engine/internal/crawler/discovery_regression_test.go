@@ -230,6 +230,80 @@ func (c *discoveryClient) Do(_ context.Context, method, rawURL string, _ []byte,
 	return httpclient.RequestResponse{Request: httpclient.RequestRecord{URL: rawURL, Method: method}, Response: response}, nil
 }
 
+func TestCrawlerRejectsFailedPagesBeforeScannerSelection(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"example.test"}
+	db, err := storage.Open(t.TempDir() + "/failed-pages.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	client := &discoveryClient{responses: map[string]httpclient.ResponseRecord{
+		"https://example.test/":        {StatusCode: 200, Headers: map[string]string{"Content-Type": "text/html"}, Body: `<a href="/missing">missing</a>`},
+		"https://example.test/missing": {StatusCode: 404, Headers: map[string]string{"Content-Type": "text/html"}, Body: `<a href="/ghost">ghost</a>`},
+	}, visited: map[string]bool{}}
+	c := New("failed-pages", cfg, client, scope.NewEngine(cfg), db, nil)
+	if err := c.Crawl(context.Background(), []string{"https://example.test/"}); err != nil {
+		t.Fatal(err)
+	}
+	if !client.visited["https://example.test/missing"] {
+		t.Fatal("expected the linked 404 to be checked")
+	}
+	if client.visited["https://example.test/ghost"] {
+		t.Fatal("404 response body was used for link discovery")
+	}
+	var count int
+	if err := db.Conn().QueryRow(`SELECT COUNT(*) FROM endpoints WHERE scan_id = ? AND url = ?`, "failed-pages", "https://example.test/missing").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("failed link remained in scanner inventory: count=%d err=%v", count, err)
+	}
+	endpoints, err := db.ListDiscoveryEndpoints("failed-pages", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ep := range endpoints {
+		if ep.URL == "https://example.test/missing" || ep.URL == "https://example.test/ghost" {
+			t.Fatalf("failed page reached active target selection: %+v", ep)
+		}
+	}
+}
+
+func TestFailedSeedStatusIsStoredButExcludedFromActiveTargets(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"example.test"}
+	db, err := storage.Open(t.TempDir() + "/failed-seed.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	client := &discoveryClient{responses: map[string]httpclient.ResponseRecord{
+		"https://example.test/": {StatusCode: 404, Body: `<a href="/ghost">ghost</a>`},
+	}, visited: map[string]bool{}}
+	c := New("failed-seed", cfg, client, scope.NewEngine(cfg), db, nil)
+	_ = c.Crawl(context.Background(), []string{"https://example.test/"})
+	var status int
+	if err := db.Conn().QueryRow(`SELECT COALESCE(json_extract(discovery_trail_json, '$.request_template.response_status'), 0) FROM endpoints WHERE scan_id = ? AND url = ?`, "failed-seed", "https://example.test/").Scan(&status); err != nil || status != 404 {
+		t.Fatalf("seed failure status was not saved: status=%d err=%v", status, err)
+	}
+	endpoints, err := db.ListDiscoveryEndpoints("failed-seed", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ep := range endpoints {
+		if ep.URL == "https://example.test/" {
+			t.Fatal("failed seed reached active target selection")
+		}
+	}
+	if client.visited["https://example.test/ghost"] {
+		t.Fatal("failed seed body was used for link discovery")
+	}
+}
+
 func TestCrawlFollowsRedirectAndRenderedLinks(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

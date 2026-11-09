@@ -2,9 +2,12 @@ package modules
 
 import (
 	"context"
+	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/akha-security/akca/engine/internal/config"
 	"github.com/akha-security/akca/engine/internal/httpclient"
@@ -18,6 +21,29 @@ type sqliLabClient struct {
 	baseline  string
 	responses map[string]string
 	statuses  map[string]int
+}
+
+var labSleepPattern = regexp.MustCompile(`(?i)sleep\s*\(\s*(\d+)\s*\)`)
+
+type sqliTimeLabClient struct{}
+
+func (sqliTimeLabClient) Do(_ context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	u, _ := url.Parse(rawURL)
+	value := u.Query().Get("id")
+	seconds := 0
+	if match := labSleepPattern.FindStringSubmatch(value); len(match) > 1 {
+		_, _ = fmt.Sscanf(match[1], "%d", &seconds)
+	}
+	status, responseBody := 200, "User: admin"
+	if strings.Contains(value, "'") {
+		status, responseBody = 500, "Error"
+	}
+	return httpclient.RequestResponse{
+		Request: httpclient.RequestRecord{Method: method, URL: rawURL, Body: string(body), Headers: headers},
+		Response: httpclient.ResponseRecord{StatusCode: status, Body: responseBody,
+			Duration: time.Duration(120+seconds*1000) * time.Millisecond,
+			Headers:  map[string]string{"Content-Type": "text/html"}},
+	}, nil
 }
 
 func (c *sqliLabClient) Do(_ context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
@@ -52,6 +78,48 @@ func newSQLiLabRunner(client HTTPDoer) *Runner {
 }
 
 func TestBurpBountySQLiRegressionSixSurfaces(t *testing.T) {
+	t.Run("time delay", func(t *testing.T) {
+		cfg := config.DefaultScanConfig()
+		cfg.ScanIntensity = "fast" // Finish local timing verification without a delayed replay timer.
+		cfg.EnableOAST = false
+		r := NewRunner("scan-sqli-time-lab", sqliTimeLabClient{}, scope.NewEngine(cfg), nil,
+			verification.NewEngine(nil, nil), nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
+		defer r.Close()
+		target := ScanTarget{EndpointURL: "http://lab.test/sqli/time?id=1", Method: "GET", Parameter: "id", Location: "query"}
+		findings := r.runSQLi(context.Background(), target)
+		foundTiming := false
+		for _, finding := range findings {
+			if strings.Contains(finding.Evidence.Signal, "timing") {
+				foundTiming = true
+			}
+		}
+		if !foundTiming {
+			t.Fatalf("source-style time lab produced no timing finding: %+v", findings)
+		}
+	})
+	t.Run("normal scan delayed replay", func(t *testing.T) {
+		cfg := config.DefaultScanConfig()
+		cfg.Targets = []string{"http://lab.test"}
+		cfg.ScanIntensity = "normal"
+		cfg.EnableOAST = false
+		r := NewRunner("scan-sqli-time-normal", sqliTimeLabClient{}, scope.NewEngine(cfg), nil,
+			verification.NewEngine(nil, nil), nil, func(string, string, map[string]interface{}) error { return nil }, cfg)
+		defer r.Close()
+		target := ScanTarget{EndpointURL: "http://lab.test/sqli/time?id=1", Method: "GET", Parameter: "id", Location: "query"}
+		findings, err := r.RunModule(context.Background(), "sqli", []ScanTarget{target})
+		if err != nil {
+			t.Fatalf("normal timing run failed: %v", err)
+		}
+		foundTiming := false
+		for _, finding := range findings {
+			if finding.Evidence.Signal == "delayed_timing_confirmed" {
+				foundTiming = true
+			}
+		}
+		if !foundTiming {
+			t.Fatalf("normal scan omitted delayed timing proof: %+v", findings)
+		}
+	})
 	t.Run("error search", func(t *testing.T) {
 		errorBody := `<h1>Database Error</h1><p>Warning: mysql_fetch_array()</p><p>You have an error in your SQL syntax</p><p>ORA-00933</p><p>Microsoft OLE DB Provider for SQL Server</p><p>Unclosed quotation mark</p><p>pg_query(): unterminated quoted string</p>`
 		client := &sqliLabClient{parameter: "q", native: "laptop", baseline: "normal product results", responses: map[string]string{}, statuses: map[string]int{}}
@@ -90,6 +158,8 @@ func TestBurpBountySQLiRegressionSixSurfaces(t *testing.T) {
 			client := pairClient(parameter, native, "Invalid credentials", "Invalid credentials", pair)
 			client.responses[pair.trueVal] = "Welcome admin!"
 			client.responses[pair.secondTrueVal] = "Welcome admin!"
+			complementTrue, _, _ := sqliComplementaryPair(pair)
+			client.responses[complementTrue] = "Welcome admin!"
 			if findings := newSQLiLabRunner(client).booleanBlindSQLiProbe(context.Background(), target, baselineRR(target, "Invalid credentials")); len(findings) != 1 {
 				t.Fatalf("POST form SQLi for %s was missed: %+v", parameter, findings)
 			}
@@ -123,9 +193,11 @@ func findSQLiPair(t *testing.T, target ScanTarget, variant string) sqliBooleanPa
 }
 
 func pairClient(parameter, native, baseline, falseBody string, pair sqliBooleanPair) *sqliLabClient {
+	complementTrue, complementFalse, _ := sqliComplementaryPair(pair)
 	return &sqliLabClient{parameter: parameter, native: native, baseline: baseline, responses: map[string]string{
 		pair.trueVal: baseline, pair.falseVal: falseBody,
 		pair.secondTrueVal: baseline, pair.secondFalseVal: falseBody,
+		complementTrue: baseline, complementFalse: falseBody,
 		native: baseline,
 	}, statuses: map[string]int{}}
 }

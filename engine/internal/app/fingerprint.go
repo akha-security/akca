@@ -45,7 +45,8 @@ func (e *Engine) runFingerprintPhase(ctx context.Context, target string) error {
 					current.GlobalRateLimit, current.PerHostRateLimit,
 					current.MaxConcurrency, current.PerHostConcurrency)
 				if budget.Adjusted && e.limiter != nil {
-					waf.ApplyCautiousMode(e.limiter, wafProfile, current.GlobalRateLimit, budget.GlobalRateLimit)
+					e.session.ApplyTrafficBudget(budget.GlobalRateLimit, budget.PerHostRateLimit, budget.MaxConcurrency, budget.PerHostConcurrency)
+					e.client.ApplyTrafficBudget(budget.GlobalRateLimit, budget.PerHostRateLimit, budget.MaxConcurrency, budget.PerHostConcurrency)
 				}
 				trafficBudget = &budget
 			}

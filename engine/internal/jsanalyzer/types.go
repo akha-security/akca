@@ -1,6 +1,10 @@
 package jsanalyzer
 
-import "time"
+import (
+	"time"
+
+	"github.com/akha-security/akca/engine/internal/storage"
+)
 
 const (
 	DefaultMaxJSBytes   = 2 * 1024 * 1024
@@ -9,13 +13,14 @@ const (
 )
 
 type ExtractedEndpoint struct {
-	URL        string  `json:"url"`
-	Method     string  `json:"method"`
-	Template   string  `json:"template"`
-	Source     string  `json:"source"`
-	Extraction string  `json:"extraction"` // ast | heuristic
-	Confidence float64 `json:"confidence"`
-	Why        string  `json:"why"`
+	URL             string                            `json:"url"`
+	Method          string                            `json:"method"`
+	Template        string                            `json:"template"`
+	Source          string                            `json:"source"`
+	Extraction      string                            `json:"extraction"` // ast | heuristic
+	Confidence      float64                           `json:"confidence"`
+	Why             string                            `json:"why"`
+	RequestTemplate *storage.DiscoveryRequestTemplate `json:"request_template,omitempty"`
 }
 
 type SecretMatch struct {

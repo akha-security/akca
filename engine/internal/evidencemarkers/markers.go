@@ -10,6 +10,7 @@ import (
 var (
 	sstiMathRe       = regexp.MustCompile(`(\d{1,7})\s*[\*x]\s*(\d{1,7})`)
 	unionSentinelRe  = regexp.MustCompile(`\b\d{6,8}\b`)
+	sqlStateRe       = regexp.MustCompile(`(?i)\bSQLSTATE\[[0-9A-Z]{5}\]`)
 	commandIDRe      = regexp.MustCompile(`(?i)\buid=\d+(?:\([a-z0-9._-]+\))?\s+gid=\d+(?:\([a-z0-9._-]+\))?(?:\s+groups=\d+(?:\([a-z0-9._-]+\))?(?:,\d+(?:\([a-z0-9._-]+\))?)*)?`)
 	commandWinDirRe  = regexp.MustCompile(`(?i)volume serial number is[^\r\n]{0,96}`)
 	commandPasswdRe  = regexp.MustCompile(`(?m)^root:[^\r\n]{1,240}:/bin/(?:ba)?sh\s*$`)
@@ -164,6 +165,30 @@ func ForReport(payload, signal, probeBody string, persisted []string) []string {
 	seen := make(map[string]struct{}, len(markers))
 	for _, marker := range markers {
 		seen[strings.ToLower(marker)] = struct{}{}
+	}
+	// Reports may use module-specific names such as database_error instead of
+	// error_based. Highlight only SQL error text actually present in the stored
+	// response; this presentation fallback does not change verification.
+	signalLower := strings.ToLower(signal)
+	if strings.Contains(signalLower, "error") || strings.Contains(signalLower, "syntax") || strings.Contains(signalLower, "database") {
+		if marker := sqlStateRe.FindString(probeBody); marker != "" {
+			key := strings.ToLower(marker)
+			if _, ok := seen[key]; !ok {
+				seen[key] = struct{}{}
+				markers = append(markers, marker)
+			}
+		}
+		for _, keyword := range sqlErrorKeywords {
+			marker := actualCaseMarker(probeBody, keyword)
+			if marker == "" {
+				continue
+			}
+			key := strings.ToLower(marker)
+			if _, ok := seen[key]; !ok {
+				seen[key] = struct{}{}
+				markers = append(markers, marker)
+			}
+		}
 	}
 	// Report highlighting is presentation-only. If the exact recorded payload
 	// appears in the preserved response, show that location even when the

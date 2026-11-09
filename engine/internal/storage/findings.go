@@ -3,7 +3,11 @@ package storage
 import (
 	"database/sql"
 	"encoding/json"
+	"net/url"
+	"path"
 	"strings"
+
+	"github.com/akha-security/akca/engine/internal/urlutil"
 )
 
 const embeddedEvidenceMarker = "\n\nevidence: "
@@ -23,9 +27,11 @@ func (db *DB) ListScriptEndpoints(scanID string, limit int) ([]string, error) {
 SELECT DISTINCT url FROM endpoints
 WHERE scan_id = ? AND (
   url LIKE '%.js' OR url LIKE '%.mjs' OR url LIKE '%.cjs' OR
+  url LIKE '%.js?%' OR url LIKE '%.mjs?%' OR url LIKE '%.cjs?%' OR
   discovery_source IN ('script', 'js_bundle', 'js_analyzer', 'inline_js')
 )
-AND COALESCE(json_extract(discovery_trail_json, '$.request_template.response_status'), 0) NOT IN (404, 410)
+AND COALESCE(json_extract(discovery_trail_json, '$.request_template.response_status'), 0) NOT IN (404, 410, 429)
+AND COALESCE(json_extract(discovery_trail_json, '$.request_template.response_status'), 0) < 500
 `
 	var rows *sql.Rows
 	var err error
@@ -44,7 +50,7 @@ AND COALESCE(json_extract(discovery_trail_json, '$.request_template.response_sta
 		if err := rows.Scan(&u); err != nil {
 			return nil, err
 		}
-		if strings.HasSuffix(strings.ToLower(u), ".js") || strings.Contains(strings.ToLower(u), ".js?") {
+		if isScriptURL(u) {
 			urls = append(urls, u)
 		}
 	}
@@ -75,20 +81,28 @@ func (db *DB) ListJSDiscoveredAPIURLs(scanID string, limit int) ([]string, error
 
 // ListJSDiscoveredAPIEndpoints returns JS-discovered endpoints with HTTP methods.
 func (db *DB) ListJSDiscoveredAPIEndpoints(scanID string, limit int) ([]JSDiscoveredEndpoint, error) {
+	return db.listJSDiscoveredAPIEndpoints(scanID, limit, false)
+}
+
+// ListPendingJSDiscoveredAPIEndpoints selects only requests that have not
+// already received an HTTP response during this scan.
+func (db *DB) ListPendingJSDiscoveredAPIEndpoints(scanID string, limit int) ([]JSDiscoveredEndpoint, error) {
+	return db.listJSDiscoveredAPIEndpoints(scanID, limit, true)
+}
+
+func (db *DB) listJSDiscoveredAPIEndpoints(scanID string, limit int, pendingOnly bool) ([]JSDiscoveredEndpoint, error) {
 	query := `
 SELECT url, method, COALESCE(discovery_trail_json,'') FROM endpoints
-WHERE scan_id = ? AND discovery_source IN ('js_analyzer', 'js_bundle', 'inline_js', 'js_ast')
-AND url NOT LIKE '%.js' AND url NOT LIKE '%.mjs' AND url NOT LIKE '%.cjs'
-AND url NOT LIKE '%.js?%'
-ORDER BY COALESCE(discovery_confidence, 0) DESC, id ASC
+WHERE scan_id = ? AND (discovery_source IN ('js_analyzer', 'js_bundle', 'inline_js', 'js_ast')
+ OR EXISTS (SELECT 1 FROM endpoint_observation_sources s
+ WHERE s.scan_id = endpoints.scan_id AND s.url = endpoints.url AND s.method = endpoints.method
+ AND s.source IN ('js_analyzer', 'js_bundle', 'inline_js', 'js_ast')))
 `
-	var rows *sql.Rows
-	var err error
-	if limit > 0 {
-		rows, err = db.conn.Query(query+` LIMIT ?`, scanID, limit)
-	} else {
-		rows, err = db.conn.Query(query, scanID)
+	if pendingOnly {
+		query += `AND COALESCE(json_extract(discovery_trail_json, '$.request_template.response_status'), 0) = 0 `
 	}
+	query += `ORDER BY COALESCE(discovery_confidence, 0) DESC, id ASC`
+	rows, err := db.conn.Query(query, scanID)
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +112,9 @@ ORDER BY COALESCE(discovery_confidence, 0) DESC, id ASC
 		var u, method, trail string
 		if err := rows.Scan(&u, &method, &trail); err != nil {
 			return nil, err
+		}
+		if isScriptURL(u) || (pendingOnly && urlutil.HasPathTemplate(u)) {
+			continue
 		}
 		if method == "" {
 			method = "GET"
@@ -118,8 +135,24 @@ ORDER BY COALESCE(discovery_confidence, 0) DESC, id ASC
 			}
 		}
 		out = append(out, ep)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
 	}
 	return out, rows.Err()
+}
+
+func isScriptURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(path.Ext(u.Path)) {
+	case ".js", ".mjs", ".cjs":
+		return true
+	default:
+		return false
+	}
 }
 
 // SaveFinding persists a finding and returns its row id. When evidenceJSON is

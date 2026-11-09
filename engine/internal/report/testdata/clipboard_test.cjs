@@ -5,6 +5,48 @@ const source = fs.readFileSync('templates.go', 'utf8');
 const start = source.indexOf('function copyToClipboard(');
 const end = source.indexOf("document.addEventListener('DOMContentLoaded'", start);
 const code = source.slice(start, end);
+// Combining a category with severity must remain reversible through All.
+const filterCode = source.slice(source.indexOf("let activeSeverity ="), source.indexOf('function selectEvidenceTab('));
+function filterElement(attributes, textContent = '') {
+  const classes = new Set();
+  return {textContent, style: {}, getAttribute: name => attributes[name],
+    setAttribute(name, value) {attributes[name] = value;},
+    classList: {toggle(name, enabled) {if (enabled) classes.add(name); else classes.delete(name);}}};
+}
+const cards = [
+  filterElement({'data-class': 'sqli', 'data-severity': 'high'}, 'SQL injection category'),
+  filterElement({'data-class': 'cors', 'data-severity': 'medium'}, 'CORS origin policy')
+];
+const category = filterElement({'data-vclass': 'sqli'});
+const severityButtons = ['all', 'high', 'medium'].map(sev => filterElement({'data-sev': sev}));
+const search = {value: ''}, status = {textContent: ''};
+const filterDocument = {
+  querySelectorAll(selector) {
+    return selector === '.finding' ? cards : selector === '.category-chip' ? [category] : severityButtons;
+  },
+  getElementById(id) {
+    return id === 'vulnSearch' ? search : id === 'filterStatus' ? status : {scrollIntoView() {}};
+  }
+};
+const filterContext = {document: filterDocument};
+vm.createContext(filterContext);
+vm.runInContext(filterCode, filterContext);
+filterContext.setClassFilter('sqli');
+assert.equal(cards[0].style.display, 'block');
+assert.equal(cards[1].style.display, 'none');
+assert.equal(category.getAttribute('aria-pressed'), 'true');
+filterContext.setSeverityFilter('medium', severityButtons[2]);
+assert.equal(status.textContent, '0 findings shown');
+filterContext.setSeverityFilter('all', severityButtons[0]);
+assert.equal(status.textContent, '2 findings shown');
+assert.equal(category.getAttribute('aria-pressed'), 'false');
+filterContext.setClassFilter('sqli');
+filterContext.setClassFilter('sqli');
+assert.equal(status.textContent, '2 findings shown');
+search.value = 'origin';
+filterContext.applyFilters();
+assert.equal(cards[0].style.display, 'none');
+assert.equal(cards[1].style.display, 'block');
 // Exercise the request/response controls without a browser or real clipboard.
 const evidenceCode = source.slice(source.indexOf('function selectEvidenceTab('), source.indexOf('function showToast('));
 const evidenceContext = {};

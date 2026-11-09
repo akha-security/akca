@@ -1,9 +1,29 @@
 package crawler
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+func TestASTJSONBodyKeepsPropertyNamesWithoutValuesAsParameters(t *testing.T) {
+	eps := ExtractASTFromJSBundle("https://example.test/app.js", `fetch("/api/save", {method:"POST", body:JSON.stringify({name:"alice", tags:["one","two"], meta:{role:"member"}, token})});`)
+	if len(eps) != 1 || eps[0].RequestTemplate == nil {
+		t.Fatalf("missing JSON request: %+v", eps)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal([]byte(eps[0].RequestTemplate.Body), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != 4 {
+		t.Fatalf("values were invented as parameter names: %+v", body)
+	}
+	for _, key := range []string{"name", "tags", "meta", "token"} {
+		if _, ok := body[key]; !ok {
+			t.Fatalf("property %q was lost: %+v", key, body)
+		}
+	}
+}
 
 func astURLs(eps []DiscoveredEndpoint) map[string]string {
 	out := map[string]string{}

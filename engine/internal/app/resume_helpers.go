@@ -41,6 +41,7 @@ func (e *Engine) ingestAuthBlockedFromCrawl(scanID string) {
 // resetScanQueues clears per-scan queue state so a new or resumed scan does not
 // inherit URLs from a previous run.
 func (e *Engine) resetScanQueues() {
+	e.initialCrawlRequests = 0
 	e.queue403 = nil
 	e.reqQueue = queue.NewRequestQueue()
 }

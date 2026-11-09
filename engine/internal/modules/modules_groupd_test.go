@@ -263,6 +263,23 @@ func TestPassiveContentCacheIsSharedAcrossModules(t *testing.T) {
 	}
 }
 
+func TestPassiveContentCacheHitCountsAsModuleEvidence(t *testing.T) {
+	client := &passiveCountingClient{body: `{"ok":true}`}
+	runner := groupDRunner(t, client)
+	target := ScanTarget{EndpointURL: "http://example.com/profile", Method: "GET"}
+	if _, err := runner.cachedPassiveContentProbe(context.Background(), "sensitive_data", target); err != nil {
+		t.Fatal(err)
+	}
+	state := &targetRun{managed: true}
+	ctx := withTargetRun(context.Background(), state)
+	if _, err := runner.cachedPassiveContentProbe(ctx, "secret_exposure", target); err != nil {
+		t.Fatal(err)
+	}
+	if client.calls != 1 || state.responses.Load() != 1 || !state.evidence.Load() {
+		t.Fatalf("cache hit not counted as evidence: requests=%d responses=%d evidence=%v", client.calls, state.responses.Load(), state.evidence.Load())
+	}
+}
+
 func TestDirectoryListingIsReportedWithoutInjectedBaseline(t *testing.T) {
 	body := `<html><head><title>Index of /assets/</title></head><body><h1>Index of /assets/</h1><a href="../">Parent Directory</a><a href="logo.png">logo.png</a></body></html>`
 	c := &groupDClient{responses: map[string]string{"/assets/": body}}

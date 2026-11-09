@@ -76,10 +76,17 @@ func (e *Engine) ReplayFinding(ctx context.Context, findingID int64) (FindingRep
 		return out, nil
 	}
 	out.OriginalProofType = evidence.Verification.ProofType
+	if finding.VulnClass == "route_auth_bypass" {
+		out.Reason = "route authentication bypass requires fresh anonymous, authenticated-resource and proxy-header controls; stored HTTP response replay cannot establish private-resource access"
+		return out, nil
+	}
 	switch verification.ProofType(out.OriginalProofType) {
 	case verification.ProofCrossOriginRead, verification.ProofOAST, verification.ProofTiming, verification.ProofDOMExecution,
 		verification.ProofStoredExecution, verification.ProofProtocolDesync, verification.ProofRuntimeTrace:
 		out.Reason = "this proof requires its original browser, timing, callback, runtime or protocol verifier; HTTP body replay cannot determine whether it is fixed"
+		return out, nil
+	case verification.ProofBooleanPair, verification.ProofArithmeticOracle:
+		out.Reason = "SQL injection comparison proof requires its paired SQLi verifier; matching a stored HTTP response cannot establish SQL execution"
 		return out, nil
 	}
 	observations, err := e.db.ListVerificationObservations(scanID, findingID, 1000)

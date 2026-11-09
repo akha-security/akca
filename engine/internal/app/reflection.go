@@ -8,13 +8,23 @@ import (
 )
 
 func (e *Engine) runReflectionPayloadPhase(ctx context.Context) error {
+	return e.runReflectionPayloadStage(ctx, false)
+}
+
+func (e *Engine) runReflectionPayloadStage(ctx context.Context, extended bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	e.session.SetPhase("reflection")
-	_ = e.Emit("phase_started", "reflection and payload generation", map[string]interface{}{"phase": "reflection"})
+	phase := "reflection"
+	if extended {
+		phase = "reflection_extended"
+	}
+	e.session.SetPhase(phase)
+	_ = e.Emit("phase_started", "reflection and payload generation", map[string]interface{}{"phase": phase})
 
 	ra := reflection.NewAnalyzer(e.session.ID, e.client, e.scope, e.db, e.Emit)
+	ra.SetIncremental(extended)
+	ra.SetForcedActiveURLs(e.session.Config.ForceActiveScanURLs)
 	if e.session.Config.MaxConcurrency > 0 {
 		ra.SetConcurrency(e.session.Config.MaxConcurrency)
 	}
@@ -41,7 +51,7 @@ func (e *Engine) runReflectionPayloadPhase(ctx context.Context) error {
 	}
 
 	_ = e.Emit("phase_finished", "reflection and payload generation", map[string]interface{}{
-		"phase": "reflection", "profiles": len(profiles),
+		"phase": phase, "profiles": len(profiles),
 	})
 	return ctx.Err()
 }

@@ -2,7 +2,9 @@ package reflection
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"github.com/akha-security/akca/engine/internal/targeting"
 	"net/http"
 	"net/url"
 	"strings"
@@ -25,6 +27,8 @@ type Analyzer struct {
 	emit        EventSink
 	maxParams   int
 	concurrency int
+	incremental bool
+	forceURLs   []string
 	mu          sync.Mutex
 }
 
@@ -38,6 +42,10 @@ func NewAnalyzer(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db *
 func (a *Analyzer) SetMaxParams(n int) {
 	a.maxParams = n
 }
+
+func (a *Analyzer) SetIncremental(enabled bool) { a.incremental = enabled }
+
+func (a *Analyzer) SetForcedActiveURLs(urls []string) { a.forceURLs = append([]string(nil), urls...) }
 
 func (a *Analyzer) SetConcurrency(n int) {
 	if n > 0 {
@@ -60,8 +68,35 @@ func (a *Analyzer) Run(ctx context.Context, limit int) ([]ReflectionProfile, err
 		return nil, err
 	}
 
+	seen := map[string]bool{}
+	if a.incremental {
+		stored, err := a.db.ListReflectionProfileJSON(a.scanID, 0)
+		if err != nil {
+			return nil, err
+		}
+		for _, raw := range stored {
+			var profile ReflectionProfile
+			if json.Unmarshal([]byte(raw), &profile) == nil {
+				seen[profile.EndpointURL+"\x00"+profile.Method+"\x00"+profile.Parameter+"\x00"+profile.ParameterLocation] = true
+			}
+		}
+	}
 	var validTargets []storage.ParameterTarget
 	for _, target := range params {
+		if seen[target.EndpointURL+"\x00"+target.Method+"\x00"+target.Parameter+"\x00"+target.Location] {
+			continue
+		}
+		ct := ""
+		for name, value := range target.ResponseHeaders {
+			if strings.EqualFold(name, "Content-Type") {
+				ct = value
+			}
+		}
+		if reason := targeting.InactiveReason(targeting.Resource{URL: target.EndpointURL, Method: target.Method,
+			Status: target.ResponseStatus, ContentType: ct, Body: target.ResponseBody, DynamicInput: target.BodyTemplate != "", ForceActive: targeting.ForcedURL(target.EndpointURL, a.forceURLs)}); reason != "" {
+			_ = a.emit("plugin_skipped", reason, map[string]interface{}{"module": "reflection", "endpoint": target.EndpointURL})
+			continue
+		}
 		if a.scope.IsInScope(target.EndpointURL) {
 			validTargets = append(validTargets, target)
 		}

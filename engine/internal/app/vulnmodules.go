@@ -2,9 +2,11 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
+	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/modules"
 )
 
@@ -26,7 +28,7 @@ var fullScanModuleOrder = []vulnModulePhase{
 	{name: "vulnerable_components", title: "Passive component inventory"},
 	{name: "known_cve", title: "Offline CVE catalog matching"},
 	{name: "script_source", title: "Script source scanning"},
-	{name: "php2shell", title: "PHP2Shell non-invasive exposure assessment"},
+	{name: "php2shell", title: "PHP2Shell active memory-signature assessment"},
 
 	// 2. Lightweight Active & Exposure Probing
 	{name: "debug_admin", title: "Debug/admin exposure scanning"},
@@ -143,15 +145,30 @@ func (e *Engine) vulnModuleRunner() *modules.Runner {
 		opts = append(opts, modules.WithRemainingRequestBudget(remaining))
 	}
 	e.moduleRunner = modules.NewRunner(e.session.ID, e.client, e.scope, e.db, e.verifier, oastClient, e.Emit, cfg, opts...)
+	if e.db != nil {
+		if raw, err := e.db.LatestEvidenceJSON(e.session.ID, "completed_module_work_v1"); err == nil {
+			var completed map[string]map[string]bool
+			if json.Unmarshal([]byte(raw), &completed) == nil {
+				e.moduleRunner.RestoreCompletedWork(completed)
+			}
+		}
+	}
 	return e.moduleRunner
 }
 
 func (e *Engine) runVulnModulesSequential(ctx context.Context) error {
+	return e.runVulnModulesStage(ctx, "all")
+}
+
+func (e *Engine) runVulnModulesStage(ctx context.Context, stage string) error {
+	if e.session.Config.OnlyPHP2Shell() && (stage == "followup" || stage == "session") {
+		return nil
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	runner := e.vulnModuleRunner()
-	moduleOrder := fullScanModuleOrder
+	moduleOrder := scheduledModules(stage)
 	if e.session.Config.OnlyPHP2Shell() {
 		moduleOrder = []vulnModulePhase{{name: "php2shell", title: "PHP2Shell exposure assessment"}}
 	}
@@ -188,17 +205,43 @@ func (e *Engine) runVulnModulesSequential(ctx context.Context) error {
 		if !e.session.Config.AllowsModule(item.name) {
 			continue
 		}
+		pending := runner.PendingTargets(item.name, targets)
+		if stage == "priority" && capturedContentModule(item.name) {
+			captured := make([]modules.ScanTarget, 0, len(pending))
+			for _, target := range pending {
+				if target.ObservedResponse != nil {
+					captured = append(captured, target)
+				}
+			}
+			pending = captured
+		}
+		if len(pending) == 0 {
+			continue
+		}
+		if stage == "followup" && initialModule(item.name) && !runner.HasRunnableTargets(item.name, pending) {
+			continue
+		}
 		phase := "vuln_module_" + item.name
 		e.session.SetPhase(phase)
 		moduleIndex := moduleOffset + 1
 		moduleTotal := len(moduleOrder)
 		_ = e.Emit("phase_started", item.title, map[string]interface{}{
 			"phase": phase, "module": item.name, "module_index": moduleIndex, "module_total": moduleTotal,
+			"new_inputs": stage == "followup" && initialModule(item.name),
 		})
-		findings, err := runner.RunModule(ctx, item.name, targets)
+		moduleCtx := ctx
+		if !priorityModule(item.name) {
+			moduleCtx = httpclient.WithBackgroundDiscovery(ctx)
+		}
+		findings, err := runner.RunModule(moduleCtx, item.name, pending)
 		status := "completed"
 		if err != nil {
-			if errors.Is(err, modules.ErrModuleCoverageIncomplete) {
+			if errors.Is(err, modules.ErrModuleAssessmentInconclusive) {
+				// The assessment ran, but could not establish exposure. Its
+				// coverage event remains visible without calling this a failure
+				// or, worse, a successful negative vulnerability check.
+				status = "inconclusive"
+			} else if errors.Is(err, modules.ErrModuleCoverageIncomplete) {
 				hasCoverageGap = true
 				status = "partial"
 			} else {
@@ -206,17 +249,29 @@ func (e *Engine) runVulnModulesSequential(ctx context.Context) error {
 				status = "failed"
 				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": phase, "module": item.name})
 			}
+		} else if outcome := runner.LastModuleStatus(item.name); outcome == "skipped" || outcome == "blocked" {
+			status = outcome
 		}
 		_ = e.Emit("phase_finished", item.title, map[string]interface{}{
 			"phase": phase, "module": item.name, "findings": len(findings),
 			"module_index": moduleIndex, "module_total": moduleTotal, "status": status,
+			"new_inputs": stage == "followup" && initialModule(item.name),
 		})
 		cat := modules.ModuleCategory(item.name)
-		if lastModuleForCategory[cat] == moduleOffset {
+		if stage != "priority" && lastModuleForCategory[cat] == moduleOffset {
 			runner.ReleaseUnusedCategoryBudget(cat)
 		}
 		if item.usesOAST {
 			e.runOASTModuleDrain(ctx, item.name)
+		}
+	}
+	if e.db != nil {
+		raw, err := json.Marshal(runner.CompletedWork())
+		if err == nil {
+			err = e.db.SaveEvidence(e.session.ID, "completed_module_work_v1", string(raw))
+		}
+		if err != nil {
+			return err
 		}
 	}
 	if hasError {

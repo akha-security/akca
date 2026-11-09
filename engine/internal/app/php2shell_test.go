@@ -156,6 +156,11 @@ func TestPHP2ShellDedicatedPipelineChecksOnlyExplicitTargets(t *testing.T) {
 						t.Errorf("unexpected phase %q", phase)
 					}
 				}
+				if event.Type == "phase_finished" && event.Payload["phase"] == "vuln_module_php2shell" && tc.status == "unknown" && !tc.timeout {
+					if event.Payload["status"] != "inconclusive" {
+						t.Errorf("unknown assessment displayed as %v instead of inconclusive", event.Payload["status"])
+					}
+				}
 			}
 		})
 	}

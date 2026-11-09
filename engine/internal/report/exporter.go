@@ -174,25 +174,6 @@ func (e *Exporter) ExportHTMLContext(ctx context.Context, w io.Writer, opts Opti
 	if _, err := io.WriteString(w, htmlDocStart(meta)); err != nil {
 		return err
 	}
-	e.emit(opts, "scope", 15, 0)
-
-	if err := renderHTMLSection(w, "scope", "Scope", scopeHTML(meta.Scope)); err != nil {
-		return err
-	}
-	if err := renderHTMLSection(w, "metrics", "Scan Metrics", metricsHTML(meta.Metrics)); err != nil {
-		return err
-	}
-	if len(meta.Coverage) > 0 && opts.Template != TemplateExecutive {
-		if err := renderHTMLSection(w, "coverage", "Coverage diagnostics", coverageDiagnosticsHTML(meta.Coverage)); err != nil {
-			return err
-		}
-	}
-	if opts.Template != TemplateExecutive {
-		e.emit(opts, "api_keys", 25, 0)
-		if err := renderHTMLSection(w, "api_keys", "API Keys / Tokens", apiKeysHTML(meta.APIKeyValidations)); err != nil {
-			return err
-		}
-	}
 	if opts.Template == TemplateExecutive {
 		e.emit(opts, "executive_findings", 40, 0)
 		if err := e.streamExecutiveFindingsHTML(ctx, w, opts); err != nil {
@@ -201,6 +182,24 @@ func (e *Exporter) ExportHTMLContext(ctx context.Context, w io.Writer, opts Opti
 	} else {
 		e.emit(opts, "findings", 35, 0)
 		if err := e.streamFindingsHTML(ctx, w, opts, meta.Template); err != nil {
+			return err
+		}
+	}
+	e.emit(opts, "scope", 81, 0)
+	if err := renderHTMLSection(w, "scope", "Scope", scopeHTML(meta.Scope)); err != nil {
+		return err
+	}
+	if err := renderHTMLSection(w, "metrics", "Scan metrics", metricsHTML(meta.Metrics)); err != nil {
+		return err
+	}
+	if len(meta.Coverage) > 0 && opts.Template != TemplateExecutive {
+		if err := renderHTMLSection(w, "coverage", "Coverage diagnostics", coverageDiagnosticsHTML(meta.Coverage)); err != nil {
+			return err
+		}
+	}
+	if opts.Template != TemplateExecutive && len(meta.APIKeyValidations) > 0 {
+		e.emit(opts, "api_keys", 83, 0)
+		if err := renderHTMLSection(w, "api_keys", "API Keys / Tokens", apiKeysHTML(meta.APIKeyValidations)); err != nil {
 			return err
 		}
 	}
@@ -261,21 +260,7 @@ func (e *Exporter) streamFindingsHTML(ctx context.Context, w io.Writer, opts Opt
 	if limit > 0 && total > limit {
 		statusText = fmt.Sprintf("Showing first %d of %d findings", limit, total)
 	}
-	filterControls := `<div class="filter-controls">
-		<input type="text" id="vulnSearch" placeholder="🔍 Search findings by title, endpoint, parameter, or vulnerability class..." oninput="applyFilters()">
-		<span id="filterStatus" class="filter-status">` + statusText + `</span>
-		<div class="filter-buttons">
-			<button class="filter-btn active" onclick="setSeverityFilter('all', this)">All</button>
-			<button class="filter-btn" data-sev="critical" onclick="setSeverityFilter('critical', this)">Critical</button>
-			<button class="filter-btn" data-sev="high" onclick="setSeverityFilter('high', this)">High</button>
-			<button class="filter-btn" data-sev="medium" onclick="setSeverityFilter('medium', this)">Medium</button>
-			<button class="filter-btn" data-sev="low" onclick="setSeverityFilter('low', this)">Low</button>
-			<button class="filter-btn" data-sev="info" onclick="setSeverityFilter('info', this)">Info</button>
-			<button class="filter-btn" onclick="toggleAllDetails(true)">📂 Expand All</button>
-			<button class="filter-btn" onclick="toggleAllDetails(false)">📁 Collapse All</button>
-		</div>
-	</div>`
-	if _, err := io.WriteString(w, `<section id="findings" class="report-section"><h2>Findings</h2>`+filterControls+`<div class="findings-list">`); err != nil {
+	if _, err := io.WriteString(w, `<section id="findings" class="report-section"><h2>Findings</h2>`+findingFilterControlsHTML(statusText)+`<div class="findings-list">`); err != nil {
 		return err
 	}
 	written := 0
@@ -311,11 +296,28 @@ func (e *Exporter) streamFindingsHTML(ctx context.Context, w io.Writer, opts Opt
 	return err
 }
 
+func findingFilterControlsHTML(statusText string) string {
+	return `<div class="filter-controls">
+		<input type="search" id="vulnSearch" aria-label="Search findings" placeholder="Search title, endpoint or parameter" oninput="applyFilters()">
+		<span id="filterStatus" class="filter-status">` + template.HTMLEscapeString(statusText) + `</span>
+		<div class="filter-buttons">
+			<button class="filter-btn active" data-sev="all" aria-pressed="true" onclick="setSeverityFilter('all', this)">All</button>
+			<button class="filter-btn" data-sev="critical" onclick="setSeverityFilter('critical', this)">Critical</button>
+			<button class="filter-btn" data-sev="high" onclick="setSeverityFilter('high', this)">High</button>
+			<button class="filter-btn" data-sev="medium" onclick="setSeverityFilter('medium', this)">Medium</button>
+			<button class="filter-btn" data-sev="low" onclick="setSeverityFilter('low', this)">Low</button>
+			<button class="filter-btn" data-sev="info" onclick="setSeverityFilter('info', this)">Info</button>
+			<button class="filter-btn" onclick="toggleAllDetails(true)">Expand details</button>
+			<button class="filter-btn" onclick="toggleAllDetails(false)">Collapse details</button>
+		</div>
+	</div>`
+}
+
 func (e *Exporter) streamExecutiveFindingsHTML(ctx context.Context, w io.Writer, opts Options) error {
 	filter := e.builder.Filter(opts)
 	limit := reportFindingLimit(opts)
 	written := 0
-	if _, err := io.WriteString(w, `<section class="report-section"><h2>Executive Findings Overview</h2><div class="card"><table class="data"><thead><tr><th>Severity</th><th>Title</th><th>Endpoint</th></tr></thead><tbody>`); err != nil {
+	if _, err := io.WriteString(w, `<section id="findings" class="report-section"><h2>Findings overview</h2><div class="card"><div class="table-scroll"><table class="data"><thead><tr><th>Severity</th><th>Title</th><th>Endpoint</th></tr></thead><tbody>`); err != nil {
 		return err
 	}
 	err := e.builder.db.IterateFindingsFiltered(filter, func(rec storage.FindingRecord) error {
@@ -342,7 +344,7 @@ func (e *Exporter) streamExecutiveFindingsHTML(ctx context.Context, w io.Writer,
 	if err != nil && !errors.Is(err, errFindingLimitReached) {
 		return err
 	}
-	_, err = io.WriteString(w, `</tbody></table></div></section>`)
+	_, err = io.WriteString(w, `</tbody></table></div></div></section>`)
 	return err
 }
 

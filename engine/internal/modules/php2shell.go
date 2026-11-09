@@ -62,7 +62,7 @@ func (r *Runner) runPHP2Shell(ctx context.Context, target ScanTarget) []ModuleFi
 		// Mirror the reference flow's harmless control request. A server-side
 		// 5xx here is a stop condition: do not continue with larger bodies.
 		controlBody := []byte("--x\r\nContent-Disposition:name=a;filename=\r\n\r\n")
-		control, err := httpDoer.Do(ctx, http.MethodPost, target.EndpointURL, controlBody, map[string]string{
+		control, err := httpDoer.Do(httpclient.WithoutRedirects(ctx), http.MethodPost, target.EndpointURL, controlBody, map[string]string{
 			"Content-Type": "multipart/form-data; boundary=x",
 			"Connection":   "close",
 		})
@@ -84,7 +84,11 @@ func (r *Runner) runPHP2Shell(ctx context.Context, target ScanTarget) []ModuleFi
 		r.emitSkip("php2shell", target, a.Reason)
 	}
 	if r.cfg.PHP2ShellActive && observed && controlStatus > 0 && controlStatus < 500 {
-		r.runPHP2ShellActive(ctx, target, &a)
+		if probe, signaled := r.runPHP2ShellActive(ctx, target, &a); signaled {
+			// Report the exchange that actually carried the memory-exhaustion
+			// signature, rather than attributing it to the harmless baseline GET.
+			rr = probe
+		}
 	} else if r.cfg.PHP2ShellActive {
 		stopReason := "control response unavailable"
 		if controlStatus >= 500 {
@@ -97,10 +101,17 @@ func (r *Runner) runPHP2Shell(ctx context.Context, target ScanTarget) []ModuleFi
 			"stop_reason":        stopReason,
 		})
 	}
+	if observed && (a.Status == "unknown" || a.Status == "blocked") {
+		if state, ok := ctx.Value(targetRunKey{}).(*targetRun); ok {
+			state.inconclusive.Store(true)
+			state.skipped(a.Reason)
+		}
+	}
 	data := map[string]interface{}{
 		"scan_id": r.scanID, "module": "php2shell", "endpoint": target.EndpointURL,
 		"status": a.Status, "reason": a.Reason, "assessment": a,
-		"exploit_verified": false,
+		"exploit_verified":        false,
+		"active_checks_performed": r.cfg.PHP2ShellActive,
 	}
 	if r.db != nil {
 		raw, err := json.Marshal(a)
@@ -149,9 +160,9 @@ func (r *Runner) runPHP2Shell(ctx context.Context, target ScanTarget) []ModuleFi
 	return out
 }
 
-// php2ShellFullScanTargets selects one passive assessment per explicit scan
-// origin. A crawled root/index GET can supply metadata without another
-// request; otherwise the module will issue one direct GET to /index.php.
+// php2ShellFullScanTargets selects one assessment per explicit scan origin. A
+// crawled root/index GET can supply metadata without another baseline request;
+// otherwise the module issues one direct GET to /index.php before active checks.
 func (r *Runner) php2ShellFullScanTargets(discovered []ScanTarget) []ScanTarget {
 	selected := make([]ScanTarget, 0, len(r.cfg.Targets))
 	positions := make(map[string]int, len(r.cfg.Targets))
@@ -174,7 +185,7 @@ func (r *Runner) php2ShellFullScanTargets(discovered []ScanTarget) []ScanTarget 
 	}
 	for _, candidate := range discovered {
 		origin, ok := php2ShellExplicitRootOrigin(r.cfg.Targets, candidate)
-		if !ok || candidate.ObservedResponse == nil || candidate.ObservedResponse.Response.StatusCode <= 0 {
+		if !ok || candidate.ObservedResponse == nil || candidate.ObservedResponse.Response.StatusCode < 200 || candidate.ObservedResponse.Response.StatusCode >= 400 {
 			continue
 		}
 		position, exists := positions[origin]
@@ -184,6 +195,10 @@ func (r *Runner) php2ShellFullScanTargets(discovered []ScanTarget) []ScanTarget 
 		score := 1
 		if parsed, err := url.Parse(candidate.EndpointURL); err == nil && parsed.Path == "/index.php" {
 			score = 2
+		}
+		assessment := php2shell.Inspect(candidate.EndpointURL, candidate.ObservedResponse.Response.StatusCode, candidate.ObservedResponse.Response.Headers)
+		if len(assessment.Versions) > 0 {
+			score += 4
 		}
 		if score <= scores[origin] {
 			continue
@@ -222,19 +237,19 @@ func php2ShellExplicitRootOrigin(configured []string, target ScanTarget) (string
 
 // runPHP2ShellActive mirrors the supplied Nuclei flow's bounded 1/8/20 MiB
 // multipart probes. It is reachable only for a validated explicit target and
-// never passes the body through WAF/payload mutation. Operators must restrict
-// its use to authorized isolated test systems.
-func (r *Runner) runPHP2ShellActive(ctx context.Context, target ScanTarget, assessment *php2shell.Assessment) {
+// never passes the body through WAF/payload mutation. It can exhaust a PHP
+// worker's memory, so it is restricted to explicitly configured scan origins.
+func (r *Runner) runPHP2ShellActive(ctx context.Context, target ScanTarget, assessment *php2shell.Assessment) (httpclient.RequestResponse, bool) {
 	for _, probe := range []struct{ sizeMiB, parts int }{{1, 4000}, {8, 1020}, {20, 1020}} {
 		if ctx.Err() != nil {
 			r.emitPHP2ShellExchange("probe", target, httpclient.RequestResponse{}, ctx.Err(), map[string]interface{}{
 				"size_mib": probe.sizeMiB, "parts": probe.parts, "continue": false,
 				"stop_reason": "context cancelled", "request_attempted": false,
 			})
-			return
+			return httpclient.RequestResponse{}, false
 		}
 		body := php2ShellProbeBody(probe.sizeMiB, probe.parts)
-		rr, err := observedHTTP{r.client}.Do(ctx, "POST", target.EndpointURL, body, map[string]string{
+		rr, err := observedHTTP{r.client}.Do(httpclient.WithoutRedirects(ctx), "POST", target.EndpointURL, body, map[string]string{
 			"Content-Type": "multipart/form-data; boundary=",
 			"Connection":   "close",
 		})
@@ -244,7 +259,7 @@ func (r *Runner) runPHP2ShellActive(ctx context.Context, target ScanTarget, asse
 				"request_body_bytes": len(body), "continue": false,
 				"stop_reason": "transport error", "request_attempted": true,
 			})
-			return
+			return httpclient.RequestResponse{}, false
 		}
 		lower := strings.ToLower(rr.Response.Body)
 		memoryError := strings.Contains(lower, "allowed memory size of") &&
@@ -266,9 +281,20 @@ func (r *Runner) runPHP2ShellActive(ctx context.Context, target ScanTarget, asse
 			"stop_reason":       php2ShellProbeStopReason(rr.Response.StatusCode, memoryError),
 		})
 		if stop {
-			return
+			if memoryError {
+				return php2ShellCompactEvidence(probe, rr), true
+			}
+			return httpclient.RequestResponse{}, false
 		}
 	}
+	return httpclient.RequestResponse{}, false
+}
+
+func php2ShellCompactEvidence(probe struct{ sizeMiB, parts int }, rr httpclient.RequestResponse) httpclient.RequestResponse {
+	// Multipart bodies can reach 20 MiB. The response is the proof; retain the
+	// request identity and size without duplicating the full probe in reports.
+	rr.Request.Body = fmt.Sprintf("[PHP2Shell multipart probe omitted: %d MiB, %d bytes]", probe.sizeMiB, len(rr.Request.Body))
+	return rr
 }
 
 func php2ShellProbeStopReason(status int, memoryError bool) string {

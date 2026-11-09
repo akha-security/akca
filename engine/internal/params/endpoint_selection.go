@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/akha-security/akca/engine/internal/storage"
+	"github.com/akha-security/akca/engine/internal/targeting"
 )
 
 type endpointSelectionStats struct {
@@ -22,13 +23,23 @@ type endpointSelectionStats struct {
 // crawler may observe /page?id=1 and /page?id=2 as separate URLs, but probing the
 // same hidden-name wordlist against both adds little coverage and multiplies the
 // scan time.
-func selectDiscoveryEndpoints(all []storage.DiscoveryEndpoint, limit int) ([]storage.DiscoveryEndpoint, endpointSelectionStats) {
+func selectDiscoveryEndpoints(all []storage.DiscoveryEndpoint, limit int, overrides ...[]string) ([]storage.DiscoveryEndpoint, endpointSelectionStats) {
+	var force []string
+	if len(overrides) > 0 {
+		force = overrides[0]
+	}
 	stats := endpointSelectionStats{Inventory: len(all)}
+	// Visible input hints affect order, not eligibility: a queryless PHP/HTML
+	// handler can accept hidden names even when its URL gives no indication.
+	all = append([]storage.DiscoveryEndpoint(nil), all...)
+	sort.SliceStable(all, func(i, j int) bool {
+		return likelyParameterEndpoint(all[i]) && !likelyParameterEndpoint(all[j])
+	})
 	selected := make([]storage.DiscoveryEndpoint, 0, len(all))
 	seenFamilies := make(map[string]struct{}, len(all))
 
 	for _, endpoint := range all {
-		if !ShouldDiscoverEndpoint(endpoint.URL, endpoint.Method) || !likelyParameterEndpoint(endpoint) {
+		if !discoverableResource(endpoint.URL, endpoint.Method, endpoint.RequestTemplate) && !targeting.ForcedURL(endpoint.URL, force) {
 			stats.SkippedLowValue++
 			continue
 		}
@@ -61,8 +72,11 @@ func likelyParameterEndpoint(endpoint storage.DiscoveryEndpoint) bool {
 	if err != nil {
 		return false
 	}
-	if u.RawQuery != "" || u.Path == "" || u.Path == "/" {
+	if u.RawQuery != "" {
 		return true
+	}
+	if u.Path == "" || u.Path == "/" {
+		return responseLooksStructured(endpoint.RequestTemplate.ResponseHeaders)
 	}
 	if responseLooksStructured(endpoint.RequestTemplate.ResponseHeaders) {
 		return true

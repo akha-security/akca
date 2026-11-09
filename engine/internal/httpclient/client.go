@@ -69,23 +69,29 @@ func StampExchange(rr *RequestResponse) {
 }
 
 type Client struct {
-	httpClient      *http.Client
-	scope           *scope.Engine
-	limiter         *ratelimit.Limiter
-	cfg             config.ScanConfig
-	sessionMu       sync.RWMutex
-	browserDomainMu sync.RWMutex
-	browserDomains  map[string]struct{}
-	uaMu            sync.Mutex
-	uaIndex         int
-	blockMu         sync.Mutex
-	hostBlocks      map[string]int
-	hostHealthy     map[string]int
-	blockedUntil    map[string]time.Time
-	OnRequest       func(err bool)
-	requestCount    atomic.Int64
-	logicalProbes   atomic.Int64
-	networkAttempts atomic.Int64
+	healthyProbe                       map[string]string
+	recoveryAttempted                  map[string]bool
+	httpClient                         *http.Client
+	scope                              *scope.Engine
+	limiter                            *ratelimit.Limiter
+	cfg                                config.ScanConfig
+	sessionMu                          sync.RWMutex
+	browserDomainMu                    sync.RWMutex
+	browserDomains                     map[string]struct{}
+	uaMu                               sync.Mutex
+	uaIndex                            int
+	blockMu                            sync.Mutex
+	hostBlocks                         map[string]int
+	hostHealthy                        map[string]int
+	blockedUntil                       map[string]time.Time
+	trafficMu                          sync.Mutex
+	globalLimit, hostLimit, activeHTTP int
+	activeHosts                        map[string]int
+	trafficChanged                     chan struct{}
+	OnRequest                          func(err bool)
+	requestCount                       atomic.Int64
+	logicalProbes                      atomic.Int64
+	networkAttempts                    atomic.Int64
 }
 
 func (c *Client) HTTPClient() *http.Client {
@@ -169,6 +175,7 @@ func New(cfg config.ScanConfig, scopeEngine *scope.Engine, limiter *ratelimit.Li
 		hostHealthy:    make(map[string]int),
 		blockedUntil:   make(map[string]time.Time),
 		browserDomains: make(map[string]struct{}),
+		globalLimit:    cfg.MaxConcurrency, hostLimit: cfg.PerHostConcurrency,
 	}
 	for _, domain := range cfg.BrowserResourceDomains {
 		if domain = strings.ToLower(strings.TrimSpace(domain)); domain != "" {
@@ -177,6 +184,7 @@ func New(cfg config.ScanConfig, scopeEngine *scope.Engine, limiter *ratelimit.Li
 	}
 	wireTransport := NewWireTransport(transport, limiter, &c.networkAttempts, cfg.RequestBudget)
 	wireTransport.hostGate = c.waitForHostCircuit
+	wireTransport.admit = c.acquireHTTP
 	c.httpClient = &http.Client{
 		Timeout:   30 * time.Second,
 		Transport: wireTransport,
@@ -350,7 +358,7 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 		}
 
 		if err != nil {
-			if strings.Contains(err.Error(), "request budget exhausted") || isTimeoutErr(err) || !isSafeMethod(method) || attempt == 2 {
+			if errors.Is(err, ErrHostDeferred) || strings.Contains(err.Error(), "request budget exhausted") || isTimeoutErr(err) || !isSafeMethod(method) || attempt == 2 {
 				return RequestResponse{}, c.proxyError(err)
 			}
 			time.Sleep(500 * time.Millisecond)
@@ -417,9 +425,10 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 			cooldown = 30 * time.Second
 		}
 		c.recordHostBlock(u.Hostname(), cooldown)
-	} else if resp.StatusCode < 500 {
-		c.recordHostSuccess(u.Hostname())
-		c.limiter.DecayWAFSlowDown(0.10)
+	} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if c.recordSuccessfulRequest(u.Hostname(), method, rawURL) {
+			c.limiter.DecayWAFSlowDown(0.10)
+		}
 	}
 
 	redirected := false
@@ -544,6 +553,9 @@ func (c *Client) circuitOpen(host string) (time.Time, bool) {
 func (c *Client) waitForHostCircuit(ctx context.Context, host string) error {
 	const recheckInterval = 250 * time.Millisecond
 	for {
+		if c.discoveryDeferred(ctx, host) {
+			return ErrHostDeferred
+		}
 		until, blocked := c.circuitOpen(host)
 		if !blocked {
 			return nil
@@ -614,6 +626,7 @@ func (c *Client) recordHostSuccess(host string) {
 	delete(c.hostBlocks, host)
 	delete(c.hostHealthy, host)
 	delete(c.blockedUntil, host)
+	delete(c.recoveryAttempted, host)
 }
 
 func (c *Client) clearHostBlocks(host string) {
@@ -621,6 +634,7 @@ func (c *Client) clearHostBlocks(host string) {
 	delete(c.hostBlocks, host)
 	delete(c.hostHealthy, host)
 	delete(c.blockedUntil, host)
+	delete(c.recoveryAttempted, host)
 	c.blockMu.Unlock()
 }
 

@@ -108,6 +108,27 @@ func TestSupplyChainRequiresActualURLReference(t *testing.T) {
 	if !responseReferencesDomain(`<script src="//cdn.polyfill.io/v3/polyfill.js"></script>`, "polyfill.io") {
 		t.Fatal("a protocol-relative script reference should be detected")
 	}
+	for _, body := range []string{
+		`<!-- <script src="https://polyfill.io/v3/polyfill.js"></script> -->`,
+		`<script data-src="https://polyfill.io/v3/polyfill.js"></script>`,
+		`<script data-note="src=https://polyfill.io/v3/polyfill.js"></script>`,
+		`<a href="https://polyfill.io/v3/polyfill.js">documentation</a>`,
+	} {
+		if responseReferencesDomain(body, "polyfill.io") {
+			t.Fatalf("non-loaded script reference was reported: %s", body)
+		}
+	}
+}
+
+func TestScriptReferencesUseRealHTMLAttributes(t *testing.T) {
+	refs := scriptReferences(`<!-- <script src="https://bad.test/comment.js"></script> -->` +
+		`<script data-src="https://bad.test/lazy.js"></script>` +
+		`<script src="https://cdn.test/app.js" data-integrity="placeholder"></script>` +
+		`<script src="https://cdn.test/safe.js" integrity="sha384-example"></script>`)
+	if len(refs) != 2 || refs[0].src != "https://cdn.test/app.js" || refs[0].hasIntegrity ||
+		refs[1].src != "https://cdn.test/safe.js" || !refs[1].hasIntegrity {
+		t.Fatalf("unexpected loaded script references: %+v", refs)
+	}
 }
 
 func TestPassiveThirdPartyScriptRequiresSRI(t *testing.T) {

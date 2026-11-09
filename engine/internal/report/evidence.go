@@ -1,7 +1,10 @@
 package report
 
 import (
+	"encoding/json"
+	"github.com/akha-security/akca/engine/internal/evidencemarkers"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/akha-security/akca/engine/internal/storage"
 )
@@ -92,10 +95,39 @@ func httpEvidenceFromRecord(rec storage.FindingRecord) HTTPEvidence {
 			out.ExternalProof = append(out.ExternalProof, record)
 		}
 	}
+	if body.Module == "route_auth_bypass" {
+		var extra struct {
+			Reference  json.RawMessage `json:"private_resource_reference"`
+			ReplayPlan []struct {
+				Role    string          `json:"role"`
+				Request json.RawMessage `json:"request"`
+			} `json:"replay_plan"`
+		}
+		if json.Unmarshal([]byte(raw), &extra) == nil {
+			if len(extra.Reference) > 0 && string(extra.Reference) != "null" {
+				referenceJSON, _ := json.Marshal(map[string]json.RawMessage{"response": extra.Reference})
+				out.ResourceReference = storage.ParseEvidenceBody(string(referenceJSON)).RawResponse
+			}
+			for _, step := range extra.ReplayPlan {
+				if step.Role != "negative_control" || len(step.Request) == 0 || len(out.ControlRequests) >= 8 {
+					continue
+				}
+				requestJSON, _ := json.Marshal(map[string]json.RawMessage{"request": step.Request})
+				out.ControlRequests = append(out.ControlRequests, storage.ParseEvidenceBody(string(requestJSON)).RawRequest)
+			}
+		}
+	}
 	return compactHTTPEvidence(out)
 }
 
 func compactHTTPEvidence(ev HTTPEvidence) HTTPEvidence {
+	if ev.MatchedExcerpt == "" && (len(ev.RawResponse) > reportResponseEvidenceLimit || len(ev.RespBody) > reportResponseEvidenceLimit) {
+		body := ev.RespBody
+		if len(ev.RawResponse) > len(body) {
+			body = ev.RawResponse
+		}
+		ev.MatchedExcerpt = matchedReportExcerpt(body, evidencemarkers.ForReport(ev.Payload, ev.Signal, body, ev.ResponseMarkers))
+	}
 	var truncated bool
 	ev.RawRequest, truncated = compactReportString(ev.RawRequest, reportRequestEvidenceLimit)
 	ev.ReportTruncated = ev.ReportTruncated || truncated
@@ -103,7 +135,53 @@ func compactHTTPEvidence(ev HTTPEvidence) HTTPEvidence {
 	ev.ReportTruncated = ev.ReportTruncated || truncated
 	ev.RespBody, truncated = compactReportString(ev.RespBody, reportResponseEvidenceLimit)
 	ev.ReportTruncated = ev.ReportTruncated || truncated
+	ev.ResourceReference, truncated = compactReportString(ev.ResourceReference, reportResponseEvidenceLimit)
+	ev.ReportTruncated = ev.ReportTruncated || truncated
+	ev.ControlRequests = append([]string(nil), ev.ControlRequests...)
+	for i := range ev.ControlRequests {
+		ev.ControlRequests[i], truncated = compactReportString(ev.ControlRequests[i], reportRequestEvidenceLimit)
+		ev.ReportTruncated = ev.ReportTruncated || truncated
+	}
 	return ev
+}
+
+// A head/tail excerpt can omit the actual proof in a large response. Preserve
+// small windows around exact evidence markers without expanding the full body.
+func matchedReportExcerpt(body string, markers []string) string {
+	var excerpts []string
+	var ranges [][2]int
+	for _, marker := range markers {
+		if len(marker) < 2 || len(marker) > 512 {
+			continue
+		}
+		index := strings.Index(body, marker)
+		if index < 0 {
+			continue
+		}
+		covered := false
+		for _, window := range ranges {
+			if index >= window[0] && index < window[1] {
+				covered = true
+				break
+			}
+		}
+		if covered {
+			continue
+		}
+		start, end := max(0, index-160), min(len(body), index+len(marker)+160)
+		for start > 0 && !utf8.RuneStart(body[start]) {
+			start--
+		}
+		for end < len(body) && !utf8.RuneStart(body[end]) {
+			end++
+		}
+		excerpts = append(excerpts, body[start:end])
+		ranges = append(ranges, [2]int{start, end})
+		if len(excerpts) == 3 {
+			break
+		}
+	}
+	return strings.Join(excerpts, "\n\n…\n\n")
 }
 
 // compactReportString keeps both the beginning (status line/headers and common
@@ -122,5 +200,12 @@ func compactReportString(value string, limit int) (string, bool) {
 	if tail < 0 {
 		tail = 0
 	}
-	return value[:head] + marker + value[len(value)-tail:], true
+	for head > 0 && !utf8.RuneStart(value[head]) {
+		head--
+	}
+	tailStart := len(value) - tail
+	for tailStart < len(value) && !utf8.RuneStart(value[tailStart]) {
+		tailStart++
+	}
+	return value[:head] + marker + value[tailStart:], true
 }

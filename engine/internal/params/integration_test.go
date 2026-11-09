@@ -115,6 +115,7 @@ func TestDiscovererDifferentialAndPersistence(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+	endpointURL := srv.URL + "/api/search"
 
 	cfg := config.DefaultScanConfig()
 	cfg.IncludeDomains = []string{"127.0.0.1"}
@@ -133,11 +134,11 @@ func TestDiscovererDifferentialAndPersistence(t *testing.T) {
 	_ = db.EnsureScan("scan-p")
 
 	if err := db.SaveDiscoveredEndpoint("scan-p", map[string]interface{}{
-		"url": srv.URL, "method": "GET", "normalized_url": srv.URL, "source": "seed",
+		"url": endpointURL, "method": "GET", "normalized_url": endpointURL, "source": "seed",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	endpointID, err := db.GetEndpointID("scan-p", srv.URL, "GET")
+	endpointID, err := db.GetEndpointID("scan-p", endpointURL, "GET")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +154,7 @@ func TestDiscovererDifferentialAndPersistence(t *testing.T) {
 	})
 	d.SetMaxProbes(40)
 
-	found, err := d.DiscoverEndpoint(context.Background(), endpointID, srv.URL, "GET")
+	found, err := d.DiscoverEndpoint(context.Background(), endpointID, endpointURL, "GET")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,6 +307,73 @@ func TestDiscovererFindsHiddenPOSTParamInBodyNotQuery(t *testing.T) {
 		}
 	}
 	t.Fatalf("debug parameter was not discovered in POST body: %+v", found)
+}
+
+type hiddenJSONPOSTClient struct {
+	sawQueryProbe atomic.Bool
+	sawJSONProbe  atomic.Bool
+}
+
+func (c *hiddenJSONPOSTClient) Do(_ context.Context, method, rawURL string, requestBody []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	if strings.Contains(rawURL, "?") {
+		c.sawQueryProbe.Store(true)
+	}
+	status, body := http.StatusOK, `{"result":"baseline"}`
+	if method == http.MethodPost {
+		var fields map[string]interface{}
+		if strings.Contains(headerValue(headers, "Content-Type"), "application/json") && json.Unmarshal(requestBody, &fields) == nil {
+			c.sawJSONProbe.Store(true)
+		}
+		if fields["debug"] == "akca_probe" {
+			status, body = http.StatusAccepted, `{"result":"debug accepted"}`
+		}
+	}
+	return httpclient.RequestResponse{
+		Request:  httpclient.RequestRecord{URL: rawURL, Method: method, Headers: headers},
+		Response: httpclient.ResponseRecord{StatusCode: status, Body: body, Headers: map[string]string{"Content-Type": "application/json"}},
+	}, nil
+}
+
+func TestDiscovererFindsHiddenJSONPOSTWithoutCapturedBody(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"example.test"}
+	scopeEngine := scope.NewEngine(cfg)
+	client := &hiddenJSONPOSTClient{}
+	db, err := storage.Open(t.TempDir() + "/json-post-without-template.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	const scanID = "json-post-without-template"
+	endpointURL := "https://example.test/api/action"
+	if err := db.SaveDiscoveredEndpoint(scanID, map[string]interface{}{
+		"url": endpointURL, "method": http.MethodPost, "normalized_url": endpointURL, "source": "browser_xhr",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	endpointID, err := db.GetEndpointID(scanID, endpointURL, http.MethodPost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := NewDiscoverer(scanID, client, scopeEngine, db, nil)
+	d.SetWordlistCap(16)
+	d.SetMaxProbes(40)
+	found, err := d.DiscoverEndpoint(context.Background(), endpointID, endpointURL, http.MethodPost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.sawQueryProbe.Load() || !client.sawJSONProbe.Load() {
+		t.Fatalf("native JSON POST probing failed: query=%t json=%t", client.sawQueryProbe.Load(), client.sawJSONProbe.Load())
+	}
+	for _, p := range found {
+		if p.Name == "debug" && p.EndpointMethod == http.MethodPost && p.Location == LocationJSON {
+			return
+		}
+	}
+	t.Fatalf("JSON POST parameter was not discovered: %+v", found)
 }
 
 func TestCrossEndpointTransferUsesPOSTBodyNotQuery(t *testing.T) {

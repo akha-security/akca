@@ -66,6 +66,12 @@ func (p *pipeline) labModuleTargets(runner *modules.Runner) []modules.ScanTarget
 		add(modules.ScanTarget{EndpointURL: fmt.Sprintf("%s/parity/safe/download/%02d", base, i), Method: "GET", Parameter: "file", Location: "query"})
 	}
 
+	// The short quality corpus has explicit surfaces and a fixed request
+	// budget. Extra discovered parameter variants are exercised by the full
+	// pipeline; adding them here can starve the later identity/state fixtures.
+	if p.short {
+		return out
+	}
 	if fromDB, err := runner.LoadTargetsFromDB(40); err == nil {
 		want := []string{"/search", "/api/users", "/redirect", "/graphql", "/api/fetch", "/download", "/coupon", "/actuator", "/profile", "/waf-probe", "/static/"}
 		for _, t := range fromDB {

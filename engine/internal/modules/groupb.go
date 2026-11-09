@@ -589,12 +589,29 @@ func nativeTargetValue(target ScanTarget) string {
 			}
 		}
 	}
-	if strings.EqualFold(target.Location, "path") && target.Parameter != "" {
+	location := strings.ToLower(strings.TrimSpace(target.Location))
+	if location == "" {
+		location = strings.ToLower(strings.TrimSpace(target.Profile.ParameterLocation))
+	}
+	if location == "path" && target.Parameter != "" {
 		if u, err := url.Parse(target.EndpointURL); err == nil {
-			segs := strings.Split(strings.Trim(u.Path, "/"), "/")
-			for _, seg := range segs {
-				if seg != "" && seg != target.Parameter {
-					return seg
+			segments := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")
+			if strings.HasPrefix(target.Parameter, "path_segment_") {
+				index, parseErr := strconv.Atoi(strings.TrimPrefix(target.Parameter, "path_segment_"))
+				if parseErr == nil && index >= 0 && index < len(segments) {
+					if value, unescapeErr := url.PathUnescape(segments[index]); unescapeErr == nil {
+						return value
+					}
+				}
+				return ""
+			}
+			for _, segment := range segments {
+				value, unescapeErr := url.PathUnescape(segment)
+				if unescapeErr != nil {
+					continue
+				}
+				if value == "{"+target.Parameter+"}" || value == ":"+target.Parameter || value == "["+target.Parameter+"]" {
+					return value
 				}
 			}
 		}

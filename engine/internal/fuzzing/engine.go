@@ -2,6 +2,7 @@ package fuzzing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -9,9 +10,11 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/scope"
 	"github.com/akha-security/akca/engine/internal/sensitivedata"
 	"github.com/akha-security/akca/engine/internal/storage"
+	"github.com/akha-security/akca/engine/internal/targeting"
 )
 
 type Engine struct {
@@ -32,6 +35,7 @@ type Engine struct {
 	archives       atomic.Int64
 	directoryLists atomic.Int64
 	failures       atomic.Int64
+	deferred       atomic.Int64
 }
 
 const prefixMissThreshold = 3
@@ -147,6 +151,10 @@ func (e *Engine) RunTasks(ctx context.Context, tasks []FuzzTask) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	if e.deferred.Load() > 0 {
+		_ = e.emit("coverage_gap", "path discovery deferred after WAF/rate-limit response", map[string]interface{}{"scan_id": e.scanID, "module": "fuzzing", "deferred": e.deferred.Load()})
+		return httpclient.ErrHostDeferred
+	}
 	if failed := e.failures.Load(); failed > 0 {
 		_ = e.emit("log", fmt.Sprintf("fuzzing completed with %d network/request errors out of %d probes", failed, e.probed.Load()), map[string]interface{}{
 			"scan_id": e.scanID, "phase": "fuzzing", "failures": failed, "probed": e.probed.Load(),
@@ -227,6 +235,9 @@ func (e *Engine) fuzzOne(ctx context.Context, task FuzzTask) []FuzzTask {
 		_ = e.emit("log", "fuzzing request failed: "+err.Error(), map[string]interface{}{
 			"scan_id": e.scanID, "url": task.URL, "method": task.Method,
 		})
+		if errors.Is(err, httpclient.ErrHostDeferred) {
+			e.deferred.Add(1)
+		}
 		return nil
 	}
 
@@ -280,19 +291,20 @@ func (e *Engine) fuzzOne(ctx context.Context, task FuzzTask) []FuzzTask {
 	if shouldPromoteFuzzResult(status, isSoft404) {
 		e.reachable.Add(1)
 		if err := e.db.SaveDiscoveredEndpoint(e.scanID, map[string]interface{}{
-			"url":              task.URL,
-			"method":           strings.ToUpper(strings.TrimSpace(task.Method)),
-			"normalized_url":   task.URL,
-			"source":           "path_fuzzing",
-			"confidence":       fuzzDiscoveryConfidence(status, isArchive),
-			"why_discovered":   fmt.Sprintf("Directory & Path Fuzzing returned HTTP %d (%s)", status, signal),
-			"status_code":      status,
-			"category":         string(task.Category),
-			"signal":           signal,
-			"content_type":     contentType,
-			"body_length":      len(body),
-			"is_archive":       isArchive,
-			"request_template": map[string]interface{}{"method": task.Method, "url": task.URL},
+			"url":            task.URL,
+			"method":         strings.ToUpper(strings.TrimSpace(task.Method)),
+			"normalized_url": task.URL,
+			"source":         "path_fuzzing",
+			"confidence":     fuzzDiscoveryConfidence(status, isArchive),
+			"why_discovered": fmt.Sprintf("Directory & Path Fuzzing returned HTTP %d (%s)", status, signal),
+			"status_code":    status,
+			"category":       string(task.Category),
+			"signal":         signal,
+			"content_type":   contentType,
+			"body_length":    len(body),
+			"is_archive":     isArchive,
+			"request_template": map[string]interface{}{"method": task.Method, "url": task.URL,
+				"response_status": status, "response_headers": rr.Response.Headers, "response_body": body},
 		}); err != nil {
 			e.failures.Add(1)
 			_ = e.emit("scan_error", "fuzz-discovered endpoint could not be persisted: "+err.Error(), map[string]interface{}{
@@ -301,7 +313,7 @@ func (e *Engine) fuzzOne(ctx context.Context, task FuzzTask) []FuzzTask {
 		}
 	}
 
-	if status == http.StatusForbidden {
+	if status == http.StatusForbidden && !targeting.IsChallenge(status, body) {
 		e.authRestricted.Add(1)
 		e.queue403.Enqueue(task.URL, task.Method)
 		_ = e.emit("four_oh_three_observed", "403 observed", map[string]interface{}{

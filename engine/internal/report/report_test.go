@@ -48,7 +48,7 @@ func setupReportDB(t *testing.T, findingCount int) (*storage.DB, string) {
 	for i := 0; i < findingCount; i++ {
 		sev := severities[i%len(severities)]
 		desc := "Test finding with Bearer secret-token-abc123 for validation"
-		evidence := `{"module":"xss","verification":{"proof_type":"content_evidence","proof_policy_version":"3.0","proof_satisfied":true}}`
+		evidence := `{"module":"xss","verification":{"proof_type":"dom_execution","proof_policy_version":"3.2","proof_satisfied":true,"observations":[{"id":"browser-proof","role":"dom_execution","attempt":1}]}}`
 		if _, err := db.SaveFinding(scanID, "Finding "+string(rune('A'+i%26)), sev, "xss", desc, "https://example.com/p", "", 0.95, evidence); err != nil {
 			t.Fatal(err)
 		}
@@ -129,12 +129,12 @@ func TestExportFormatsSampleData(t *testing.T) {
 	}
 }
 
-func TestHTMLUsesComprehensiveScannerLayout(t *testing.T) {
+func TestHTMLUsesProfessionalReportLayout(t *testing.T) {
 	db, scanID := setupReportDB(t, 0)
 	defer db.Close()
 	evidence := `{
 	  "module":"sqli","signal":"database_error","proof_satisfied":true,
-	  "verification":{"proof_type":"content_evidence","proof_policy_version":"3.0","proof_satisfied":true},
+	  "verification":{"proof_type":"boolean_pair","proof_policy_version":"3.2","proof_satisfied":true,"observations":[{"id":"paired-proof","role":"positive_probe","attempt":1}]},
 	  "request":{"method":"GET","url":"https://example.com/item?id=1","raw":"GET /item?id=1 HTTP/1.1\r\nHost: example.com\r\n\r\n"},
 	  "response":{"status_code":200,"raw":"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nSQLSTATE[42000]"}
 	}`
@@ -151,7 +151,7 @@ func TestHTMLUsesComprehensiveScannerLayout(t *testing.T) {
 	}
 	html := buf.String()
 	for _, want := range []string{
-		"AKCA threat assessment", "Scan details", "Severity distribution", "Vulnerability statistics",
+		"Security assessment", "Assessment overview", "Assessment details", "Finding categories", `aria-label="Findings by severity"`,
 		"Vulnerability Description", "Recommendation", `data-evidence-tab="request"`,
 		`data-evidence-tab="response"`, "OUTBOUND", "INBOUND", "Captured transaction", "Print / PDF",
 		"SQLSTATE[42000]", "Content-Type: text/plain", "HTTP/1.1 200 OK",
@@ -159,7 +159,7 @@ func TestHTMLUsesComprehensiveScannerLayout(t *testing.T) {
 		"Coverage diagnostics", "Browser dependency blocked", "resource_policy",
 	} {
 		if !strings.Contains(html, want) {
-			t.Fatalf("comprehensive scanner layout omitted %q", want)
+			t.Fatalf("professional report layout omitted %q", want)
 		}
 	}
 	if strings.Contains(html, "fonts.googleapis.com") || strings.Contains(html, "%!") {
@@ -167,6 +167,9 @@ func TestHTMLUsesComprehensiveScannerLayout(t *testing.T) {
 	}
 	if strings.Contains(html, "Coverage &amp; Readiness") || strings.Contains(html, ">HTTP Request<") {
 		t.Fatalf("removed report labels leaked into the redesigned layout")
+	}
+	if strings.Index(html, `id="findings"`) > strings.Index(html, `id="scope"`) {
+		t.Fatal("findings should appear before secondary scope information")
 	}
 }
 
@@ -338,7 +341,7 @@ func TestDistinctTemplates(t *testing.T) {
 				t.Fatal("bugcrowd missing PoC section")
 			}
 		case TemplateExecutive:
-			if !strings.Contains(body, "Executive Findings Overview") {
+			if !strings.Contains(body, "Findings overview") {
 				t.Fatal("executive missing overview table")
 			}
 		case TemplateAppendix:
@@ -417,6 +420,35 @@ func TestFastPartialReportLimitsFindings(t *testing.T) {
 	}
 }
 
+func TestFastPartialHTMLRetainsUnverifiedSQLiLeads(t *testing.T) {
+	db, scanID := setupReportDB(t, 0)
+	defer db.Close()
+	for _, item := range []struct{ confidence, endpoint string }{
+		{"NeedsManualReview", "https://example.test/page?id=39"},
+		{"Potential", "https://example.test/news?id=2"},
+	} {
+		if err := db.SeedFindingForTest(scanID, "SQL Injection", "medium", item.confidence,
+			"sqli", "Paired timing controls passed", item.endpoint); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var buf bytes.Buffer
+	err := NewExporter(NewBuilder(evidencestore.New(db), db), nil).Export(&buf, Options{
+		ScanID: scanID, Template: TemplateInternal, Format: FormatHTML,
+		Partial: true, FastPartial: true, MaxFindings: 250,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := buf.String()
+	for _, want := range []string{`id="manual-leads"`, `href="#manual-leads"`,
+		"NeedsManualReview", "Potential", "page?id=39", "news?id=2"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("interrupted report omitted %q", want)
+		}
+	}
+}
+
 func TestRedactionRemovesCredentials(t *testing.T) {
 	in := "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.x and api_key=supersecretvalue"
 	out := RedactString(in)
@@ -458,10 +490,10 @@ func TestHTTPEvidenceResponseHighlightsOnlyTypedProof(t *testing.T) {
 		},
 	}
 	html := httpEvidenceHTML(ev)
-	// One highlight belongs to the payload box and one to the independently
-	// computed response canary. No document or asset marker may be highlighted.
-	if strings.Count(html, `class="vuln-hit"`) != 2 {
-		t.Fatalf("expected payload plus one response proof highlight, got: %s", html)
+	// The independently computed response canary appears in the response and
+	// in the request's compact proof excerpt. No asset noise is highlighted.
+	if strings.Count(html, `class="vuln-hit"`) != 3 {
+		t.Fatalf("expected payload and two response proof highlights, got: %s", html)
 	}
 	if !strings.Contains(html, `<span class="vuln-hit">AKCA_CMD_7320</span>`) {
 		t.Fatalf("expected command canary to be highlighted: %s", html)

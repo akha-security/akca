@@ -11,13 +11,16 @@ import (
 )
 
 type ParameterTarget struct {
-	EndpointURL  string
-	Method       string
-	Parameter    string
-	Location     string
-	BodyTemplate string
-	ContentType  string
-	Headers      map[string]string
+	EndpointURL     string
+	Method          string
+	Parameter       string
+	Location        string
+	BodyTemplate    string
+	ContentType     string
+	Headers         map[string]string
+	ResponseStatus  int
+	ResponseHeaders map[string]string
+	ResponseBody    string
 }
 
 func (db *DB) ListParameterTargets(scanID string, limit int) ([]ParameterTarget, error) {
@@ -25,11 +28,15 @@ func (db *DB) ListParameterTargets(scanID string, limit int) ([]ParameterTarget,
 SELECT e.url, e.method, p.name, p.location,
        COALESCE(json_extract(e.discovery_trail_json, '$.request_template.body'), ''),
        COALESCE(json_extract(e.discovery_trail_json, '$.request_template.content_type'), ''),
-       COALESCE(json_extract(e.discovery_trail_json, '$.request_template.headers'), '{}')
+       COALESCE(json_extract(e.discovery_trail_json, '$.request_template.headers'), '{}'),
+       COALESCE(json_extract(e.discovery_trail_json, '$.request_template.response_status'), 0),
+       COALESCE(json_extract(e.discovery_trail_json, '$.request_template.response_headers'), '{}'),
+       COALESCE(json_extract(e.discovery_trail_json, '$.request_template.response_body'), '')
 FROM parameters p
 JOIN endpoints e ON e.id = p.endpoint_id
 WHERE e.scan_id = ?
-  AND COALESCE(json_extract(e.discovery_trail_json, '$.request_template.response_status'), 0) NOT IN (404, 410)
+  AND COALESCE(json_extract(e.discovery_trail_json, '$.request_template.response_status'), 0) NOT IN (404, 410, 429)
+  AND COALESCE(json_extract(e.discovery_trail_json, '$.request_template.response_status'), 0) < 500
 ORDER BY p.priority DESC, p.id ASC`
 	var rows *sql.Rows
 	var err error
@@ -46,10 +53,12 @@ ORDER BY p.priority DESC, p.id ASC`
 	for rows.Next() {
 		var t ParameterTarget
 		var headersJSON string
-		if err := rows.Scan(&t.EndpointURL, &t.Method, &t.Parameter, &t.Location, &t.BodyTemplate, &t.ContentType, &headersJSON); err != nil {
+		var responseHeadersJSON string
+		if err := rows.Scan(&t.EndpointURL, &t.Method, &t.Parameter, &t.Location, &t.BodyTemplate, &t.ContentType, &headersJSON, &t.ResponseStatus, &responseHeadersJSON, &t.ResponseBody); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(headersJSON), &t.Headers)
+		_ = json.Unmarshal([]byte(responseHeadersJSON), &t.ResponseHeaders)
 		out = append(out, t)
 	}
 	return out, rows.Err()

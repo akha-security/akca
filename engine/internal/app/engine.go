@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -31,32 +30,33 @@ import (
 )
 
 type Engine struct {
-	mu            sync.Mutex
-	activeScanID  atomic.Pointer[string]
-	writer        events.Writer
-	batcher       *events.Batcher
-	db            *storage.DB
-	session       *session.ScanSession
-	scope         *scope.Engine
-	limiter       *ratelimit.Limiter
-	client        *httpclient.Client
-	reqQueue      *queue.RequestQueue
-	queue403      *fuzzing.Queue403
-	oast          *oast.Listener
-	verifier      *verification.Engine
-	platform      *Platform
-	stopCh        chan struct{}
-	oastCtx       context.Context
-	oastCancel    context.CancelFunc
-	scanning      bool
-	scanCancel    context.CancelFunc
-	scanDone      chan struct{}
-	scanErr       error
-	metricsCancel context.CancelFunc
-	jobs          *distributed.Coordinator
-	moduleRunner  *modules.Runner
-	closeOnce     sync.Once
-	closeErr      error
+	mu                   sync.Mutex
+	activeScanID         atomic.Pointer[string]
+	writer               events.Writer
+	batcher              *events.Batcher
+	db                   *storage.DB
+	session              *session.ScanSession
+	scope                *scope.Engine
+	limiter              *ratelimit.Limiter
+	client               *httpclient.Client
+	reqQueue             *queue.RequestQueue
+	queue403             *fuzzing.Queue403
+	oast                 *oast.Listener
+	verifier             *verification.Engine
+	platform             *Platform
+	stopCh               chan struct{}
+	oastCtx              context.Context
+	oastCancel           context.CancelFunc
+	scanning             bool
+	scanCancel           context.CancelFunc
+	scanDone             chan struct{}
+	scanErr              error
+	metricsCancel        context.CancelFunc
+	jobs                 *distributed.Coordinator
+	moduleRunner         *modules.Runner
+	initialCrawlRequests int
+	closeOnce            sync.Once
+	closeErr             error
 }
 
 func New(writer events.Writer) (*Engine, error) {
@@ -573,8 +573,8 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 		// ── Phase 2: WAF learning / calibration ────────────────────────────────
 		if !done("learning_waf") {
 			if cfg.EnableWAFDetection {
-				timeout := 90 * time.Second
-				opts := wafintel.CalibrationOptions{MaxStrategies: 3}
+				timeout := 12 * time.Second
+				opts := wafintel.CalibrationOptions{MaxStrategies: 1}
 				if cfg.ScanIntensity == "fast" {
 					timeout = 12 * time.Second
 					opts.MaxStrategies = 1
@@ -630,7 +630,7 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 			_ = e.Emit("scan_progress", "crawling in-scope targets", map[string]interface{}{
 				"scan_id": cfg.ScanID, "phase": "crawling", "targets": len(crawlerTargets),
 			})
-			if err := e.runCrawlerPhase(ctx, crawlerTargets); err != nil {
+			if err := e.runCrawlerStage(ctx, crawlerTargets, true); err != nil {
 				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "crawling"})
 				markFailed("crawling")
 			} else {
@@ -712,43 +712,6 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 			return
 		}
 
-		// ── Phase 7: Fuzzing (exposed paths, actuator, archives) ────────────────
-		if !done("fuzzing") && cfg.EnableFuzzing {
-			if err := e.runFuzzingPhase(ctx, crawlerTargets); err != nil {
-				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "fuzzing"})
-				markFailed("fuzzing")
-			} else {
-				markSuccess("fuzzing")
-			}
-		} else if !done("fuzzing") {
-			_ = e.Emit("phase_started", "fuzzing", map[string]interface{}{"phase": "fuzzing", "skipped": true})
-			_ = e.Emit("log", "fuzzing phase disabled by config", map[string]interface{}{"scan_id": cfg.ScanID})
-			_ = e.Emit("phase_finished", "fuzzing", map[string]interface{}{"phase": "fuzzing", "skipped": true})
-			markSkipped("fuzzing")
-		}
-		if stopped() {
-			return
-		}
-
-		// ── Phase 8: 403 bypass attempts ────────────────────────────────────────
-		if !done("bypass403") && cfg.Enable403BypassChecks {
-			e.ingestAuthBlockedFromCrawl(cfg.ScanID)
-			if e.queue403 == nil {
-				e.hydrateQueue403FromDB(cfg.ScanID)
-			}
-			if err := e.runBypass403Phase(ctx); err != nil {
-				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "bypass403"})
-				markFailed("bypass403")
-			} else {
-				markSuccess("bypass403")
-			}
-		} else if !done("bypass403") {
-			markSkipped("bypass403")
-		}
-		if stopped() {
-			return
-		}
-
 		// ── Phase 9: Reflection analysis + context-aware payload generation ─────
 		if !done("reflection") && !cfg.DiscoveryMetadataOnly() {
 			if err := e.runReflectionPayloadPhase(ctx); err != nil {
@@ -768,7 +731,7 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 
 	}
 
-	// ── Phase 10: Vulnerability modules (SQLi, XSS, SSRF, etc.) ───────────────
+	// Input-specific checks precede broad discovery and proxy bypass traffic.
 	if loginSessionGuardEnabled(cfg) {
 		if err := e.ensureAuthenticatedSession(ctx); err != nil {
 			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "session_guard_modules"})
@@ -778,14 +741,87 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 		}
 		markSuccess("session_guard_modules")
 	}
-	if !done("vuln_modules") {
-		if err := e.runVulnModulesSequential(ctx); err != nil {
-			if !errors.Is(err, errVulnModuleCoverageIncomplete) {
-				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "vuln_modules"})
+
+	if !done("vuln_modules_priority") {
+		if err := e.runVulnModulesStage(ctx, "priority"); err != nil {
+			markFailed("vuln_modules_priority")
+		} else {
+			markSuccess("vuln_modules_priority")
+		}
+	}
+	if stopped() {
+		return
+	}
+	if !cfg.OnlyPHP2Shell() {
+		// Crawling and configured hidden-name discovery already ran before the
+		// priority modules. Fuzzing can add native inputs for the follow-up pass.
+		// ── Phase 7: Fuzzing (exposed paths, actuator, archives) ────────────────
+		if !done("fuzzing") && cfg.EnableFuzzing {
+			if err := e.runFuzzingPhase(ctx, uniqueURLSeeds(cfg.Targets)); err != nil {
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "fuzzing"})
+				markFailed("fuzzing")
+			} else {
+				markSuccess("fuzzing")
 			}
+		} else if !done("fuzzing") {
+			_ = e.Emit("phase_started", "fuzzing", map[string]interface{}{"phase": "fuzzing", "skipped": true})
+			_ = e.Emit("log", "fuzzing phase disabled by config", map[string]interface{}{"scan_id": cfg.ScanID})
+			_ = e.Emit("phase_finished", "fuzzing", map[string]interface{}{"phase": "fuzzing", "skipped": true})
+			markSkipped("fuzzing")
+		}
+		if stopped() {
+			return
+		}
+
+		if !done("reflection_extended") && !cfg.DiscoveryMetadataOnly() {
+			if err := e.runReflectionPayloadStage(ctx, true); err != nil {
+				markFailed("reflection_extended")
+			} else {
+				markSuccess("reflection_extended")
+			}
+		} else if !done("reflection_extended") {
+			markSkipped("reflection_extended")
+		}
+		if stopped() {
+			return
+		}
+	}
+	if !done("vuln_modules") {
+		if err := e.runVulnModulesStage(ctx, "followup"); err != nil {
 			markFailed("vuln_modules")
 		} else {
 			markSuccess("vuln_modules")
+		}
+	}
+	if stopped() {
+		return
+	}
+	if !cfg.OnlyPHP2Shell() {
+		// ── Phase 8: 403 bypass attempts ────────────────────────────────────────
+		if !done("bypass403") && cfg.Enable403BypassChecks {
+			e.ingestAuthBlockedFromCrawl(cfg.ScanID)
+			if e.queue403 == nil {
+				e.hydrateQueue403FromDB(cfg.ScanID)
+			}
+			if err := e.runBypass403Phase(ctx); err != nil {
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "bypass403"})
+				markFailed("bypass403")
+			} else {
+				markSuccess("bypass403")
+			}
+		} else if !done("bypass403") {
+			markSkipped("bypass403")
+		}
+		if stopped() {
+			return
+		}
+
+	}
+	if !done("vuln_modules_session") {
+		if err := e.runVulnModulesStage(ctx, "session"); err != nil {
+			markFailed("vuln_modules_session")
+		} else {
+			markSuccess("vuln_modules_session")
 		}
 	}
 	if stopped() {

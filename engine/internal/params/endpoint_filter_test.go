@@ -57,7 +57,7 @@ func TestPassiveEnoughForSkip(t *testing.T) {
 	}
 }
 
-func TestSelectDiscoveryEndpointsSkipsContentPagesAndDeduplicatesURLShapes(t *testing.T) {
+func TestSelectDiscoveryEndpointsKeepsQuerylessHandlersAndDeduplicatesURLShapes(t *testing.T) {
 	all := []storage.DiscoveryEndpoint{
 		{ID: 1, URL: "https://example.com/about", Method: http.MethodGet},
 		{ID: 2, URL: "https://example.com/page?id=1", Method: http.MethodGet},
@@ -69,14 +69,14 @@ func TestSelectDiscoveryEndpointsSkipsContentPagesAndDeduplicatesURLShapes(t *te
 	}
 
 	got, stats := selectDiscoveryEndpoints(all, 20)
-	if len(got) != 4 {
-		t.Fatalf("selected=%d want 4: %+v", len(got), got)
+	if len(got) != 5 {
+		t.Fatalf("selected=%d want 5: %+v", len(got), got)
 	}
-	if stats.SkippedLowValue != 1 || stats.SkippedDuplicate != 2 || stats.SkippedByLimit != 0 {
+	if stats.SkippedLowValue != 0 || stats.SkippedDuplicate != 2 || stats.SkippedByLimit != 0 {
 		t.Fatalf("unexpected selection stats: %+v", stats)
 	}
 	for _, endpoint := range got {
-		if endpoint.URL == "https://example.com/about" || endpoint.URL == "https://example.com/page?id=2" ||
+		if endpoint.URL == "https://example.com/page?id=2" ||
 			endpoint.URL == "https://example.com/api/users/456" {
 			t.Fatalf("redundant or low-value endpoint selected: %+v", endpoint)
 		}

@@ -19,6 +19,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/reflection"
 	"github.com/akha-security/akca/engine/internal/scope"
 	"github.com/akha-security/akca/engine/internal/storage"
+	"github.com/akha-security/akca/engine/internal/targeting"
 	"github.com/akha-security/akca/engine/internal/urlutil"
 )
 
@@ -65,6 +66,8 @@ type Discoverer struct {
 	maxTransferProbes int
 	parallelism       int
 	probeSlots        chan struct{}
+	forceURLs         []string
+	deferred          atomic.Bool
 	eventBatch        []map[string]interface{}
 	mu                sync.Mutex
 }
@@ -81,7 +84,9 @@ func NewDiscoverer(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db
 }
 
 func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, endpointURL, method string, templates ...storage.DiscoveryRequestTemplate) ([]DiscoveredParameter, error) {
-	if !urlutil.IsPlausibleEndpointURL(endpointURL) || !d.scope.IsInScope(endpointURL) || !ShouldDiscoverEndpoint(endpointURL, method) {
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	if !urlutil.IsPlausibleEndpointURL(endpointURL) || !d.scope.IsInScope(endpointURL) {
 		return nil, nil
 	}
 	method = strings.ToUpper(method)
@@ -92,16 +97,40 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 	if len(templates) > 0 {
 		template = templates[0]
 	}
+	if !discoverableResource(endpointURL, method, template) && !targeting.ForcedURL(endpointURL, d.forceURLs) {
+		return nil, nil
+	}
 	requestURL, requestBody, requestHeaders := nativeRequest(endpointURL, method, template)
+	if (method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch) &&
+		strings.TrimSpace(template.Body) == "" &&
+		(nativeBodyLocation(headerValue(requestHeaders, "Content-Type"), "") == LocationJSON ||
+			(headerValue(requestHeaders, "Content-Type") == "" && isAPIShapedPath(requestURL))) {
+		// An API POST without a captured body needs a method-matched JSON baseline.
+		// Otherwise the empty request is compared with form probes or no body
+		// probe is sent at all when the observed content type was unhelpful.
+		template.Body = "{}"
+		template.ContentType = "application/json"
+		requestBody = []byte(template.Body)
+		requestHeaders = bodyProbeHeaders(requestHeaders, LocationJSON)
+	}
 
 	baselineRR, err := d.do(ctx, method, requestURL, requestBody, requestHeaders)
 	if err != nil {
 		return nil, err
 	}
-	if baselineRR.Response.StatusCode == http.StatusNotFound || baselineRR.Response.StatusCode == http.StatusGone {
+	if baselineRR.Response.StatusCode == http.StatusNotFound || baselineRR.Response.StatusCode == http.StatusGone ||
+		baselineRR.Response.StatusCode == http.StatusTooManyRequests || baselineRR.Response.StatusCode >= 500 {
+		if err := d.db.SaveEndpointResponseStatus(endpointID, baselineRR.Response.StatusCode); err != nil {
+			return nil, fmt.Errorf("record rejected endpoint status: %w", err)
+		}
 		return nil, nil
 	}
 	contentType := headerValue(baselineRR.Response.Headers, "Content-Type")
+	if reason := targeting.InactiveReason(targeting.Resource{URL: requestURL, Method: method, Status: baselineRR.Response.StatusCode,
+		ContentType: contentType, Body: baselineRR.Response.Body, DynamicInput: template.Body != "", ForceActive: targeting.ForcedURL(requestURL, d.forceURLs)}); reason != "" {
+		_ = d.emit("plugin_skipped", reason, map[string]interface{}{"module": "hidden_parameters", "endpoint": requestURL})
+		return nil, nil
+	}
 	passive := ExtractPassive(requestURL, method, contentType, baselineRR.Response.Body, baselineRR.Request.Headers)
 
 	var templateParams []DiscoveredParameter
@@ -155,7 +184,7 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 	// Method-matched baselines map to prevent comparing GET probes against POST baselines
 	baselines := map[string]ResponseFingerprint{}
 	baselineBodies := map[string]string{}
-	d.getBaseline(ctx, requestURL, method, requestHeaders, baselineRR, baselines, baselineBodies)
+	d.getBaseline(method, baselineRR, baselines, baselineBodies)
 
 	// Calibrate baseline stability: check if the page naturally fluctuates on every request
 	isDynamic := false
@@ -203,9 +232,8 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 		// wordlist pass even though it was not a JSON input surface.
 		if d.scope.IsInScope(requestURL) && shouldAttemptJSONPivot(requestURL, baselineRR) {
 			if pRR, perr := d.do(ctx, http.MethodPost, requestURL, []byte("{}"), jsonHeaders); perr == nil {
-				if pRR.Response.StatusCode != http.StatusMethodNotAllowed &&
-					pRR.Response.StatusCode != http.StatusNotFound &&
-					pRR.Response.StatusCode != http.StatusNotImplemented {
+				if (pRR.Response.StatusCode >= 200 && pRR.Response.StatusCode < 300) ||
+					pRR.Response.StatusCode == http.StatusBadRequest || pRR.Response.StatusCode == http.StatusUnprocessableEntity {
 					postSupported = true
 					postBaselineFP = Fingerprint(pRR.Response.StatusCode, pRR.Response.Body, pRR.Response.Duration.Milliseconds(), pRR.Response.Headers)
 					postBaselineBody = pRR.Response.Body
@@ -277,12 +305,14 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 			}
 		}
 	}
-	wordlist := DifferentialCandidates(endpointURL, passiveHints, learned, knownNames, d.wordlistCap)
+	wordlist := DifferentialCandidates(endpointURL, passiveHints, learned, knownNames,
+		d.wordlistCap)
 	// Baseline/calibration requests are separate from the active probe budget.
 	// Reserve active attempts atomically, including failed sends and replays.
 	ctx = context.WithValue(ctx, parameterBudgetKey{}, &parameterProbeBudget{limit: int64(d.maxProbes)})
 	queryCandidates := wordlist
 	postCandidates := wordlist
+	nativeCandidates := wordlist
 	canPrefilter := d.maxProbes == 0 || d.maxProbes >= 4
 	if canPrefilter && (method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions) {
 		baseFP := baselines["GET"]
@@ -319,8 +349,19 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 			}
 		}
 	}
+	if canPrefilter && (method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch) {
+		prefilterBudget := d.maxProbes / 4
+		if d.maxProbes > 0 && prefilterBudget < 1 {
+			prefilterBudget = 1
+		}
+		var used int
+		nativeCandidates, used = d.prefilterNativeCandidates(ctx, method, requestURL, requestHeaders, template, wordlist,
+			baselines[method+"_native"], randCtrlFP, isDynamic, prefilterBudget)
+		probes += used
+	}
 	querySet := stringSet(queryCandidates)
 	postSet := stringSet(postCandidates)
+	nativeSet := stringSet(nativeCandidates)
 
 	// Phase 1: Fast single-probe pass across all candidates so all wordlist items (url, category, webhook, etc.) get tested
 	// Run probes concurrently using a worker pool to avoid sequential HTTP latency bottleneck.
@@ -443,6 +484,9 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 				// Mutate the captured native body while preserving the original method,
 				// headers and sibling fields. This keeps authenticated/API requests valid.
 				if method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch {
+					if _, shouldProbe := nativeSet[cand]; !shouldProbe {
+						continue
+					}
 					if body, location, ok := mutateNativeBody(template, cand, "akca_probe"); ok && d.scope.IsInScope(requestURL) {
 						headers := bodyProbeHeaders(requestHeaders, location)
 						if rr, perr := d.do(ctx, method, requestURL, body, headers); perr == nil {
@@ -574,7 +618,7 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 
 	all := append(confirmedPassive, differential...)
 	all = append(all, templateParams...)
-	return all, nil
+	return all, ctx.Err()
 }
 
 // do applies one discovery-wide concurrency limit. DiscoverEndpoint already
@@ -596,7 +640,13 @@ func (d *Discoverer) do(ctx context.Context, method, rawURL string, body []byte,
 	if budget, ok := ctx.Value(parameterBudgetKey{}).(*parameterProbeBudget); ok && !budget.reserve() {
 		return httpclient.RequestResponse{}, errParameterProbeBudget
 	}
-	return d.client.Do(ctx, method, rawURL, body, headers)
+	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	rr, err := d.client.Do(requestCtx, method, rawURL, body, headers)
+	if errors.Is(err, httpclient.ErrHostDeferred) {
+		d.deferred.Store(true)
+	}
+	return rr, err
 }
 
 var errParameterProbeBudget = errors.New("parameter probe budget exhausted")
@@ -627,6 +677,10 @@ func shouldAttemptJSONPivot(rawURL string, baseline httpclient.RequestResponse) 
 	if strings.Contains(contentType, "json") || strings.Contains(contentType, "graphql") {
 		return true
 	}
+	return isAPIShapedPath(rawURL)
+}
+
+func isAPIShapedPath(rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return false
@@ -675,8 +729,7 @@ func (d *Discoverer) prefilterQueryCandidates(ctx context.Context, requestURL st
 		}
 		requests++
 		fp := Fingerprint(rr.Response.StatusCode, rr.Response.Body, rr.Response.Duration.Milliseconds(), rr.Response.Headers)
-		if isParameterHitWithControl(baseFP, fp, controlFP, baseBody, rr.Response.Body, controlBody,
-			"", controlName, "akca_probe", false, 128) {
+		if !fingerprintsEquivalent(baseFP, fp) {
 			kept = append(kept, group...)
 		}
 	}
@@ -711,8 +764,58 @@ func (d *Discoverer) prefilterJSONCandidates(ctx context.Context, requestURL str
 		}
 		requests++
 		fp := Fingerprint(rr.Response.StatusCode, rr.Response.Body, rr.Response.Duration.Milliseconds(), rr.Response.Headers)
-		if isParameterHitWithControl(baseFP, fp, controlFP, baseBody, rr.Response.Body, controlBody,
-			"", controlName, "akca_probe", false, 128) {
+		if !fingerprintsEquivalent(baseFP, fp) {
+			kept = append(kept, group...)
+		}
+	}
+	return kept, requests
+}
+
+// Only unchanged groups can be ruled out. Changed, rejected or failed groups
+// retain every name for the existing single-parameter and replay verification.
+func (d *Discoverer) prefilterNativeCandidates(ctx context.Context, method, requestURL string, headers map[string]string,
+	template storage.DiscoveryRequestTemplate, candidates []string, baseFP, controlFP ResponseFingerprint,
+	isDynamic bool, maxRequests int,
+) ([]string, int) {
+	ct := template.ContentType
+	if ct == "" {
+		ct = headerValue(template.Headers, "Content-Type")
+	}
+	location := nativeBodyLocation(ct, template.Body)
+	if (location != LocationJSON && location != LocationForm) || isDynamic ||
+		!fingerprintsEquivalent(baseFP, controlFP) || len(candidates) < parameterPrefilterBatchSize {
+		return candidates, 0
+	}
+	kept := make([]string, 0, len(candidates))
+	requests := 0
+	for start := 0; start < len(candidates); start += parameterPrefilterBatchSize {
+		if ctx.Err() != nil || (maxRequests > 0 && requests >= maxRequests) {
+			kept = append(kept, candidates[start:]...)
+			break
+		}
+		group := candidates[start:min(start+parameterPrefilterBatchSize, len(candidates))]
+		batchTemplate := template
+		ok := true
+		for _, name := range group {
+			body, loc, mutated := mutateNativeBody(batchTemplate, name, "akca_probe")
+			if !mutated || loc != location {
+				ok = false
+				break
+			}
+			batchTemplate.Body = string(body)
+		}
+		if !ok {
+			kept = append(kept, group...)
+			continue
+		}
+		requests++
+		rr, err := d.do(ctx, method, requestURL, []byte(batchTemplate.Body), bodyProbeHeaders(headers, location))
+		if err != nil {
+			kept = append(kept, group...)
+			continue
+		}
+		fp := Fingerprint(rr.Response.StatusCode, rr.Response.Body, rr.Response.Duration.Milliseconds(), rr.Response.Headers)
+		if !fingerprintsEquivalent(baseFP, fp) {
 			kept = append(kept, group...)
 		}
 	}
@@ -756,17 +859,11 @@ func parameterProbeObject(params []string, value string) map[string]string {
 	return out
 }
 
-func (d *Discoverer) getBaseline(ctx context.Context, endpointURL, method string, headers map[string]string, defaultRR httpclient.RequestResponse, baselines map[string]ResponseFingerprint, baselineBodies map[string]string) {
+func (d *Discoverer) getBaseline(method string, defaultRR httpclient.RequestResponse, baselines map[string]ResponseFingerprint, baselineBodies map[string]string) {
 	if strings.ToUpper(method) == http.MethodGet {
 		fp := Fingerprint(defaultRR.Response.StatusCode, defaultRR.Response.Body, defaultRR.Response.Duration.Milliseconds(), defaultRR.Response.Headers)
 		baselines["GET"] = fp
 		baselineBodies["GET"] = defaultRR.Response.Body
-	} else {
-		if getRR, err := d.do(ctx, http.MethodGet, endpointURL, nil, headers); err == nil {
-			fp := Fingerprint(getRR.Response.StatusCode, getRR.Response.Body, getRR.Response.Duration.Milliseconds(), getRR.Response.Headers)
-			baselines["GET"] = fp
-			baselineBodies["GET"] = getRR.Response.Body
-		}
 	}
 	m := strings.ToUpper(method)
 	if m == http.MethodPost || m == http.MethodPut || m == http.MethodPatch {
@@ -785,6 +882,22 @@ func (d *Discoverer) Run(ctx context.Context, limit int) error {
 	// them for every concrete endpoint variant without sending any request. This
 	// also means an existing ?id=1 is excluded from the active candidate list.
 	for _, endpoint := range allEndpoints {
+		// Captured native bodies/forms are available without active guessing.
+		for _, p := range ExtractFromTemplateBody(endpoint.URL, endpoint.Method, endpoint.RequestTemplate.ContentType, endpoint.RequestTemplate.Body) {
+			if err := d.persist(endpoint.ID, p); err != nil {
+				return err
+			}
+		}
+		if endpoint.RequestTemplate.ResponseBody != "" {
+			ct := headerValue(endpoint.RequestTemplate.ResponseHeaders, "Content-Type")
+			for _, p := range ExtractPassive(endpoint.URL, endpoint.Method, ct, endpoint.RequestTemplate.ResponseBody, endpoint.RequestTemplate.Headers) {
+				if confirmedPassiveParameter(p) {
+					if err := d.persist(endpoint.ID, p); err != nil {
+						return err
+					}
+				}
+			}
+		}
 		requestURL, _, _ := nativeRequest(endpoint.URL, endpoint.Method, endpoint.RequestTemplate)
 		for name := range parseQueryParams(requestURL) {
 			if err := d.db.SaveParameter(endpoint.ID, name, string(LocationQuery), 96); err != nil {
@@ -792,7 +905,7 @@ func (d *Discoverer) Run(ctx context.Context, limit int) error {
 			}
 		}
 	}
-	endpoints, selection := selectDiscoveryEndpoints(allEndpoints, limit)
+	endpoints, selection := selectDiscoveryEndpoints(allEndpoints, limit, d.forceURLs)
 	_ = d.emit("parameter_discovery_started", "parameter discovery started", map[string]interface{}{
 		"scan_id": d.scanID, "inventory_endpoints": selection.Inventory,
 		"endpoints": len(endpoints), "skipped_low_value": selection.SkippedLowValue,
@@ -908,6 +1021,10 @@ feedLoop:
 	}
 	if persistenceFailure != nil {
 		return persistenceFailure
+	}
+	if d.deferred.Load() {
+		_ = d.emit("coverage_gap", "hidden parameter discovery deferred after WAF/rate-limit response", map[string]interface{}{"scan_id": d.scanID, "module": "parameter_discovery"})
+		return httpclient.ErrHostDeferred
 	}
 	// Ordinary endpoint-level transport failures are a coverage gap, not a
 	// phase failure. A phase error is reserved for an implementation panic or

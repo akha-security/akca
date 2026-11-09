@@ -30,6 +30,10 @@ func (r *Runner) runLFI(ctx context.Context, target ScanTarget) []ModuleFinding 
 	if strings.TrimSpace(target.Parameter) == "" {
 		return nil
 	}
+	if isStaticLFITarget(target) {
+		r.emitSkip("lfi", target, "static asset routes are not file retrieval inputs")
+		return nil
+	}
 	if !r.cfg.FullModuleCoverage() && !isLikelyLFIParam(target.Parameter) {
 		r.emitSkip("lfi", target, "parameter is not a file/path candidate")
 		return nil
@@ -39,14 +43,10 @@ func (r *Runner) runLFI(ctx context.Context, target ScanTarget) []ModuleFinding 
 		return nil
 	}
 	var out []ModuleFinding
-	var err error
 	baseline, ok, baselineReason := r.stableNativeBaselineForModule(ctx, "lfi", target)
 	if !ok {
-		baseline, err = r.cachedEmptyProbe(ctx, target)
-		if err != nil {
-			r.emitSkip("lfi", target, "baseline failed: "+baselineReason)
-			return nil
-		}
+		r.emitSkip("lfi", target, "native baseline failed: "+baselineReason)
+		return nil
 	}
 	oast := ""
 	if r.cfg.EnableOAST && r.oast != nil {
@@ -96,8 +96,7 @@ func (r *Runner) runLFI(ctx context.Context, target ScanTarget) []ModuleFinding 
 			}
 			continue
 		}
-		if !deeptraversal.DetectSignal(rr.Response.Body, baseline.Response.Body, p.ExpectedSignal) &&
-			!lfiSignal(rr.Response.Body, baseline.Response.Body, p.ExpectedSignal) {
+		if !lfiResponseSignal(rr.Response.StatusCode, rr.Response.Body, baseline.Response.Body, p.ExpectedSignal) {
 			continue
 		}
 		coreHadSignal = true
@@ -127,7 +126,7 @@ func (r *Runner) runLFI(ctx context.Context, target ScanTarget) []ModuleFinding 
 		} else if len(familyProofs) == 1 {
 			first := familyProofs[0]
 			reprobe, repErr := r.probeForModule(ctx, "lfi", target, first.payload.Value)
-			if repErr == nil && (deeptraversal.DetectSignal(reprobe.Response.Body, baseline.Response.Body, first.payload.ExpectedSignal) || lfiSignal(reprobe.Response.Body, baseline.Response.Body, first.payload.ExpectedSignal)) {
+			if repErr == nil && lfiResponseSignal(reprobe.Response.StatusCode, reprobe.Response.Body, baseline.Response.Body, first.payload.ExpectedSignal) {
 				f := r.verifyAndBuild(ctx, "lfi", target, first.payload, baseline, reprobe, first.payload.ExpectedSignal, false, false, "", "")
 				if f != nil {
 					f.Title = "Local File Inclusion (" + family + ")"
@@ -137,6 +136,33 @@ func (r *Runner) runLFI(ctx context.Context, target ScanTarget) []ModuleFinding 
 		}
 	}
 	return out
+}
+
+func isStaticLFITarget(target ScanTarget) bool {
+	if isStaticAssetURL(target.EndpointURL) {
+		return true
+	}
+	location := strings.ToLower(strings.TrimSpace(target.Location))
+	if location == "" {
+		location = strings.ToLower(strings.TrimSpace(target.Profile.ParameterLocation))
+	}
+	if !strings.HasPrefix(location, "path") && !strings.HasPrefix(strings.ToLower(target.Parameter), "path_segment_") {
+		return false
+	}
+	lowerURL := strings.ToLower(target.EndpointURL)
+	for _, staticRoute := range []string{"/s/sfsites/c/resource/", "/s/sfsites/l/", "/s/sfsites/aurafw/"} {
+		if strings.Contains(lowerURL, staticRoute) {
+			return true
+		}
+	}
+	return false
+}
+
+func lfiResponseSignal(status int, body, baseline, signal string) bool {
+	if status < 200 || status >= 300 || signal == "rfi_oast" {
+		return false
+	}
+	return deeptraversal.DetectSignal(body, baseline, signal)
 }
 
 func lfiSignalFamily(signal string) string {
@@ -166,13 +192,6 @@ func mergeLFIProbes(parts ...[]payloadgen.Payload) []payloadgen.Payload {
 		}
 	}
 	return out
-}
-
-func lfiSignal(body, baseline, signal string) bool {
-	if signal == "rfi_oast" {
-		return false
-	}
-	return deeptraversal.DetectSignal(body, baseline, signal)
 }
 
 func isLikelyLFIParam(param string) bool {

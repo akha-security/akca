@@ -6,9 +6,11 @@ import (
 	"time"
 
 	"github.com/akha-security/akca/engine/internal/bypass403"
+	"github.com/akha-security/akca/engine/internal/httpclient"
 )
 
 func (e *Engine) runBypass403Phase(ctx context.Context) error {
+	ctx = httpclient.WithBackgroundDiscovery(ctx)
 	if !e.session.Config.Enable403BypassChecks || e.queue403 == nil {
 		return nil
 	}

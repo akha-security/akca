@@ -190,15 +190,12 @@ func runPipeline(ctx context.Context, db *storage.DB, opts Options, collector *E
 	}, nil
 }
 
-// realBrowserCapabilityAllowed keeps the observed benchmark hermetic on CI.
+// realBrowserCapabilityAllowed keeps the observed benchmark hermetic by default.
 // A runner's incidental Chrome installation must not change findings or request
 // counts between the primary and deterministic replay scans. Browser-backed
 // coverage remains available through an explicit integration-test opt-in.
 func realBrowserCapabilityAllowed(requested bool) bool {
-	if !requested {
-		return false
-	}
-	return os.Getenv("CI") != "true" || os.Getenv("AKCA_RUN_REAL_BROWSER_TESTS") == "1"
+	return requested && os.Getenv("AKCA_RUN_REAL_BROWSER_TESTS") == "1"
 }
 
 func (p *pipeline) run(ctx context.Context) error {

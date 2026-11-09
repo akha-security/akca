@@ -38,8 +38,12 @@ func TestPolicyUsesProofGateAndPersistsTrend(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.Conn().Exec(`
-UPDATE findings SET evidence_json =
-  '{"verification":{"proof_satisfied":true,"proof_type":"differential"}}'
+UPDATE findings SET evidence_json = CASE
+  WHEN vuln_class = 'xss' THEN
+    '{"verification":{"proof_satisfied":true,"proof_type":"dom_execution","proof_policy_version":"3.2","observations":[{"id":"browser-proof","role":"dom_execution","attempt":1}]}}'
+  ELSE
+    '{"verification":{"proof_satisfied":true,"proof_type":"boolean_pair","proof_policy_version":"3.2","observations":[{"id":"paired-proof","role":"positive_probe","attempt":1}]}}'
+  END
 WHERE title IN ('Existing XSS','New SQLi')`); err != nil {
 		t.Fatal(err)
 	}

@@ -7,7 +7,7 @@ import (
 )
 
 var staticExtensions = []string{
-	".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico",
+	".js", ".mjs", ".cjs", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico",
 	".woff", ".woff2", ".ttf", ".eot", ".map", ".pdf", ".zip", ".mp4", ".mp3",
 }
 
@@ -30,6 +30,11 @@ func ShouldDiscoverEndpoint(endpointURL, method string) bool {
 		if base == "robots.txt" || strings.HasPrefix(base, "sitemap") ||
 			path == "/.well-known" || strings.HasPrefix(path, "/.well-known/") {
 			return false
+		}
+		for _, document := range []string{"openapi.json", "swagger.json", "asyncapi.json", "api-docs", "swagger-ui.html"} {
+			if base == document {
+				return false
+			}
 		}
 	}
 	lower := strings.ToLower(endpointURL)

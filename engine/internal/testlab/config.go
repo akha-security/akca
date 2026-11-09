@@ -35,7 +35,10 @@ func labScanConfig(short bool) config.ScanConfig {
 		cfg.MaxDepth = 2
 		cfg.RequestBudget = 600
 		cfg.TimeBudget = 180 * time.Second
-		cfg.MaxConcurrency = 2
+		// The short quality corpus has a tight crawl page cap. Serializing
+		// its crawler keeps the sampled routes and physical request count
+		// stable across primary and replay runs under parallel CI load.
+		cfg.MaxConcurrency = 1
 		return cfg
 	}
 

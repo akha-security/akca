@@ -17,6 +17,14 @@ import (
 )
 
 func (r *Runner) runSQLi(ctx context.Context, target ScanTarget) []ModuleFinding {
+	if strings.EqualFold(target.Location, "header") && isBrowserControlHeader(target.Parameter) {
+		r.emitSkip("sqli", target, "browser control header is not an application input")
+		return nil
+	}
+	if reason := r.activeTargetReason("sqli", target); reason != "" {
+		r.emitSkip("sqli", target, reason)
+		return nil
+	}
 	if strings.TrimSpace(target.Parameter) == "" {
 		return nil
 	}

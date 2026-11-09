@@ -894,13 +894,19 @@ func mutableObservedHeaders(headers map[string]string) []string {
 	var out []string
 	for name := range headers {
 		name = strings.TrimSpace(name)
-		if name == "" || standard[strings.ToLower(name)] || strings.HasPrefix(strings.ToLower(name), "sec-ch-") {
+		if name == "" || standard[strings.ToLower(name)] || isBrowserControlHeader(name) {
 			continue
 		}
 		out = append(out, name)
 	}
 	sort.Strings(out)
 	return out
+}
+
+func isBrowserControlHeader(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	return name == "upgrade-insecure-requests" || name == "dnt" || name == "priority" ||
+		strings.HasPrefix(name, "sec-ch-") || strings.HasPrefix(name, "sec-fetch-")
 }
 
 func deduplicateStrings(items []string) []string {

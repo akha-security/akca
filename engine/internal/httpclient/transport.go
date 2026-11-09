@@ -26,6 +26,9 @@ func (c *Client) ReserveBrowserResource(ctx context.Context, rawURL, transport s
 	_, allowed := c.browserDomains[host]
 	c.browserDomainMu.RUnlock()
 	if allowed {
+		if err := c.waitForHostCircuit(ctx, u.Hostname()); err != nil {
+			return err
+		}
 		return reserveNetwork(ctx, u, c.limiter, &c.networkAttempts, c.cfg.RequestBudget)
 	}
 	return ErrOutsideScope
@@ -80,6 +83,7 @@ type WireTransport struct {
 	networkAttempts *atomic.Int64
 	maxBudget       int
 	hostGate        func(context.Context, string) error
+	admit           func(context.Context, string) (func(), error)
 }
 
 func NewWireTransport(base http.RoundTripper, limiter *ratelimit.Limiter, counter *atomic.Int64, maxBudget int) *WireTransport {
@@ -95,6 +99,20 @@ func NewWireTransport(base http.RoundTripper, limiter *ratelimit.Limiter, counte
 }
 
 func (w *WireTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	release := func() {}
+	if w.admit != nil {
+		var err error
+		release, err = w.admit(req.Context(), req.URL.Hostname())
+		if err != nil {
+			return nil, err
+		}
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
 	if w.hostGate != nil {
 		if err := w.hostGate(req.Context(), req.URL.Hostname()); err != nil {
 			return nil, err
@@ -111,7 +129,12 @@ func (w *WireTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 	}
-	return w.base.RoundTrip(req)
+	response, err := w.base.RoundTrip(req)
+	if err == nil && response != nil && response.Body != nil {
+		response.Body = &admissionBody{ReadCloser: response.Body, release: release}
+		transferred = true
+	}
+	return response, err
 }
 
 func reserveNetwork(ctx context.Context, u *url.URL, limiter *ratelimit.Limiter, counter *atomic.Int64, maxBudget int) error {
@@ -161,6 +184,9 @@ func (c *Client) ReserveExternal(ctx context.Context, rawURL, transport string) 
 	}
 	if c.scope != nil && !c.scope.IsInScope(u.String()) {
 		return fmt.Errorf("%s: %w", transport, ErrOutsideScope)
+	}
+	if err := c.waitForHostCircuit(ctx, u.Hostname()); err != nil {
+		return err
 	}
 	return reserveNetwork(ctx, u, c.limiter, &c.networkAttempts, c.cfg.RequestBudget)
 }

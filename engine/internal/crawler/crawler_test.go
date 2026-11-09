@@ -147,6 +147,19 @@ func TestPriorityScoring(t *testing.T) {
 	}
 }
 
+func TestObservedLinksOutrankSpeculativeAPIDocPaths(t *testing.T) {
+	speculative := ScoreEndpoint(DiscoveredEndpoint{
+		URL: "https://example.com/openapi.json", Source: SourceAPIDoc, Confidence: 0.6,
+		WhyDiscovered: "common API/OIDC/AsyncAPI discovery path",
+	})
+	observed := ScoreEndpoint(DiscoveredEndpoint{
+		URL: "https://example.com/search", Source: SourceLink, Confidence: 0.9,
+	})
+	if observed <= speculative {
+		t.Fatalf("observed link priority=%d speculative documentation priority=%d", observed, speculative)
+	}
+}
+
 func TestPriorityScoringPenalizesDeepRoutes(t *testing.T) {
 	shallow := ScoreEndpoint(DiscoveredEndpoint{URL: "https://example.com/products", Source: SourceLink, Confidence: 0.8, Depth: 1})
 	deep := ScoreEndpoint(DiscoveredEndpoint{URL: "https://example.com/products/archive/2024/05/page/9", Source: SourceLink, Confidence: 0.8, Depth: 6})

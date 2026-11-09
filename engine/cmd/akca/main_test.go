@@ -18,8 +18,8 @@ import (
 )
 
 func TestVersionIsStableReleaseString(t *testing.T) {
-	if version != "0.3.0" {
-		t.Fatalf("version=%q, want 0.3.0", version)
+	if version != "0.3.1" {
+		t.Fatalf("version=%q, want 0.3.1", version)
 	}
 }
 
@@ -48,7 +48,7 @@ func TestUsageHelpAndVersionPrintBrandBanner(t *testing.T) {
 			if !strings.Contains(combined, akcaASCII[0]) {
 				t.Fatalf("ASCII wordmark missing for %s: %q", tc.name, combined)
 			}
-			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.3.0") {
+			if !strings.Contains(combined, "AKCA ADVANCED WEB SECURITY SCANNER v0.3.1") {
 				t.Fatalf("brand/version line missing for %s: %q", tc.name, combined)
 			}
 		})
@@ -453,9 +453,28 @@ func TestCrawlerFinishedSeparatesPagesEndpointsAndRequests(t *testing.T) {
 	}
 }
 
-func TestPHP2ShellProbeRequestsAreVisibleAndCounted(t *testing.T) {
+func TestInconclusivePHP2ShellPhaseIsNotDisplayedAsCompleted(t *testing.T) {
+	for _, interactive := range []bool{false, true} {
+		var output bytes.Buffer
+		cw := NewConsoleWriter()
+		cw.out, cw.interactive = &output, interactive
+		for _, event := range []events.Event{
+			{Type: "phase_started", Payload: map[string]interface{}{"phase": "vuln_module_php2shell"}},
+			{Type: "phase_finished", Payload: map[string]interface{}{"phase": "vuln_module_php2shell", "status": "inconclusive"}},
+		} {
+			if err := cw.WriteEvent(event); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !strings.Contains(output.String(), "INCONCLUSIVE") || strings.Contains(output.String(), "COMPLETED") {
+			t.Fatalf("inconclusive assessment rendered as successful: %q", output.String())
+		}
+	}
+}
+
+func TestPHP2ShellProbeRequestsAreVisibleInVerboseModeAndCounted(t *testing.T) {
 	var output bytes.Buffer
-	cw := NewConsoleWriter()
+	cw := NewConsoleWriterMode("verbose")
 	cw.out = &output
 	cw.interactive = false
 	for _, event := range []events.Event{
@@ -917,6 +936,15 @@ func TestPhaseLabelVulnModuleFriendlyNames(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("phaseLabel(%q) = %q, want %q", tt.phase, got, tt.want)
 		}
+	}
+}
+
+func TestFollowupPhaseIdentifiesNewInputs(t *testing.T) {
+	if got := phaseEventLabel("vuln_module_sqli", map[string]interface{}{"new_inputs": true}); got != "SQL Injection (new inputs)" {
+		t.Fatalf("follow-up label = %q", got)
+	}
+	if got := phaseEventLabel("vuln_module_sqli", nil); got != "SQL Injection" {
+		t.Fatalf("initial label = %q", got)
 	}
 }
 

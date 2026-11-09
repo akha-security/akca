@@ -244,10 +244,21 @@ func TestBooleanPairProofRequiresBaselineControlAndIdenticalSecondBranches(t *te
 		BaselineHash: "base", FirstTrueHash: "base", FirstFalseHash: "false",
 		ReplayTrueHash: "base", ReplayFalseHash: "false",
 		SecondTrueHash: "base", SecondFalseHash: "false",
-		SyntaxControlHash: "base", Orientation: 1, SameSurface: true, SyntaxControlOK: true,
+		ComplementTrueHash: "base", ComplementFalseHash: "false",
+		NativeControlHash: "base", Orientation: 1, SameSurface: true, NativeControlOK: true,
 	}
 	if !validBooleanPairProof(proof) {
 		t.Fatal("complete boolean proof should be valid")
+	}
+	missingComplement := *proof
+	missingComplement.ComplementTrueHash = ""
+	if validBooleanPairProof(&missingComplement) {
+		t.Fatal("equality-only proof must not establish SQL execution")
+	}
+	wrongComplement := *proof
+	wrongComplement.ComplementFalseHash = "base"
+	if validBooleanPairProof(&wrongComplement) {
+		t.Fatal("contradictory comparison proof was accepted")
 	}
 	changedSecondPair := *proof
 	changedSecondPair.SecondFalseHash = "different-router-page"
@@ -255,7 +266,7 @@ func TestBooleanPairProofRequiresBaselineControlAndIdenticalSecondBranches(t *te
 		t.Fatal("same-orientation but value-specific second branch must not prove SQL execution")
 	}
 	mismatchedControl := *proof
-	mismatchedControl.SyntaxControlHash = "parser-specific-page"
+	mismatchedControl.NativeControlHash = "parser-specific-page"
 	if validBooleanPairProof(&mismatchedControl) {
 		t.Fatal("syntax control must match the normalized native baseline")
 	}
