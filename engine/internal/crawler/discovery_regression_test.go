@@ -2,10 +2,12 @@ package crawler
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/akha-security/akca/engine/internal/config"
 	"github.com/akha-security/akca/engine/internal/httpclient"
@@ -23,6 +25,57 @@ type discoveryClient struct {
 type documentBrowser struct {
 	HTTPBrowserStub
 	status int
+}
+
+type pausingBrowser struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *pausingBrowser) Fetch(context.Context, string) (string, []DiscoveredEndpoint, error) {
+	return "", nil, nil
+}
+
+func (b *pausingBrowser) FetchInstrumented(ctx context.Context, rawURL string) (BrowserSnapshot, error) {
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-b.release:
+		return BrowserSnapshot{URL: rawURL, DocumentStatus: 200, DOM: "<html>rendered</html>"}, nil
+	case <-ctx.Done():
+		return BrowserSnapshot{}, ctx.Err()
+	}
+}
+
+type seedErrorClient struct {
+	*discoveryClient
+	err error
+}
+
+type cooldownObservationClient struct {
+	*discoveryClient
+	cooldown time.Duration
+	deadline time.Duration
+}
+
+func (c *cooldownObservationClient) HostCooldownRemaining(string) time.Duration { return c.cooldown }
+
+func (c *cooldownObservationClient) Do(ctx context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	if rawURL == "https://example.test/" {
+		if deadline, ok := ctx.Deadline(); ok {
+			c.deadline = time.Until(deadline)
+		}
+	}
+	return c.discoveryClient.Do(ctx, method, rawURL, body, headers)
+}
+
+func (c *seedErrorClient) Do(ctx context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error) {
+	if rawURL == "https://example.test/" {
+		return httpclient.RequestResponse{}, c.err
+	}
+	return c.discoveryClient.Do(ctx, method, rawURL, body, headers)
 }
 
 func (b *documentBrowser) FetchInstrumented(_ context.Context, rawURL string) (BrowserSnapshot, error) {
@@ -108,6 +161,184 @@ func TestDeniedDocumentBrowserRecovery(t *testing.T) {
 			t.Fatalf("rejected/unverified browser document accepted: status=%d err=%v", status, err)
 		}
 		db.Close()
+	}
+}
+
+func TestBlockedEntryStillDiscoversSitemapPages(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"example.test"}
+	db, err := storage.Open(t.TempDir() + "/sitemap-recovery.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	client := &discoveryClient{responses: map[string]httpclient.ResponseRecord{
+		"https://example.test/":            {StatusCode: 403},
+		"https://example.test/sitemap.xml": {StatusCode: 200, Headers: map[string]string{"Content-Type": "application/xml"}, Body: `<urlset><url><loc>https://example.test/public</loc></url></urlset>`},
+		"https://example.test/public":      {StatusCode: 200, Headers: map[string]string{"Content-Type": "text/html"}, Body: `<html><a href="/child">child</a></html>`},
+		"https://example.test/child":       {StatusCode: 200, Headers: map[string]string{"Content-Type": "text/html"}, Body: `<html>child</html>`},
+	}, visited: map[string]bool{}}
+	c := New("sitemap-recovery", cfg, client, scope.NewEngine(cfg), db, nil)
+	c.SetBrowser(&documentBrowser{status: 0})
+	if err := c.Crawl(context.Background(), []string{"https://example.test/"}); err != nil {
+		t.Fatal(err)
+	}
+	if !client.visited["https://example.test/public"] || !client.visited["https://example.test/child"] {
+		t.Fatalf("sitemap pages were not crawled: %v", client.visited)
+	}
+}
+
+func TestStaticLinksPersistBeforeBrowserNavigationFinishes(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"example.test"}
+	db, err := storage.Open(t.TempDir() + "/early-links.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	client := &discoveryClient{responses: map[string]httpclient.ResponseRecord{
+		"https://example.test/":      {StatusCode: 200, Headers: map[string]string{"Content-Type": "text/html"}, Body: `<html><script src="/app.js"></script><a href="/child">child</a></html>`},
+		"https://example.test/child": {StatusCode: 200, Headers: map[string]string{"Content-Type": "text/html"}, Body: "<html>child</html>"},
+	}, visited: map[string]bool{}}
+	browser := &pausingBrowser{entered: make(chan struct{}, 1), release: make(chan struct{}, 1)}
+	c := New("early-links", cfg, client, scope.NewEngine(cfg), db, nil)
+	c.SetBrowser(browser)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() { finished <- c.Crawl(ctx, []string{"https://example.test/"}) }()
+	select {
+	case <-browser.entered:
+	case <-ctx.Done():
+		t.Fatal("browser navigation did not start")
+	}
+	if _, err := db.GetEndpointID("early-links", "https://example.test/child", "GET"); err != nil {
+		t.Fatalf("observed link was not saved before browser navigation finished: %v", err)
+	}
+	browser.release <- struct{}{}
+	if err := <-finished; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCrawlVisitsHTMLPagesBeforeScriptChunks(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"example.test"}
+	cfg.EnableHeadlessCrawler = false
+	cfg.MaxPages = 5
+	cfg.CrawlerRequestBudget = 5
+	db, err := storage.Open(t.TempDir() + "/page-priority.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	var html strings.Builder
+	html.WriteString("<html>")
+	for i := 0; i < 20; i++ {
+		fmt.Fprintf(&html, `<script src="/_next/static/chunks/%d.js"></script>`, i)
+	}
+	for _, path := range []string{"uyelik", "iletisim", "kullanim-kosullari", "sifre-yenileme"} {
+		fmt.Fprintf(&html, `<a href="/%s">page</a>`, path)
+	}
+	html.WriteString("</html>")
+	client := &discoveryClient{responses: map[string]httpclient.ResponseRecord{
+		"https://example.test/": {StatusCode: 200, Headers: map[string]string{"Content-Type": "text/html"}, Body: html.String()},
+	}, visited: map[string]bool{}}
+	c := New("page-priority", cfg, client, scope.NewEngine(cfg), db, nil)
+	_ = c.Crawl(context.Background(), []string{"https://example.test/"})
+	for _, path := range []string{"uyelik", "iletisim", "kullanim-kosullari", "sifre-yenileme"} {
+		if !client.visited["https://example.test/"+path] {
+			t.Fatalf("HTML page /%s lost to script chunks: %v", path, client.visited)
+		}
+	}
+	for url := range client.visited {
+		if strings.Contains(url, "/_next/static/chunks/") {
+			t.Fatalf("script chunk consumed limited crawl budget before pages: %s", url)
+		}
+	}
+}
+
+func TestCrawlerDeadlineIncludesHostCooldown(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"example.test"}
+	cfg.MaxPages = 1
+	cfg.CrawlerRequestBudget = 1
+	db, err := storage.Open(t.TempDir() + "/cooldown.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	client := &cooldownObservationClient{discoveryClient: &discoveryClient{
+		responses: map[string]httpclient.ResponseRecord{
+			"https://example.test/": {StatusCode: 200, Headers: map[string]string{"Content-Type": "text/html"}, Body: "<html>ok</html>"},
+		}, visited: map[string]bool{},
+	}, cooldown: 30 * time.Second}
+	c := New("cooldown", cfg, client, scope.NewEngine(cfg), db, nil)
+	if err := c.Crawl(context.Background(), []string{"https://example.test/"}); err != nil {
+		t.Fatal(err)
+	}
+	if client.deadline < 45*time.Second {
+		t.Fatalf("crawler deadline ignored host cooldown: %s", client.deadline)
+	}
+}
+
+func TestSeedTransportErrorBrowserRecovery(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"example.test"}
+	db, err := storage.Open(t.TempDir() + "/transport-browser.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	client := &seedErrorClient{discoveryClient: &discoveryClient{
+		responses: map[string]httpclient.ResponseRecord{
+			"https://example.test/browser-child": {StatusCode: 200, Body: "ok"},
+		}, visited: map[string]bool{},
+	}, err: context.DeadlineExceeded}
+	c := New("transport-browser", cfg, client, scope.NewEngine(cfg), db, nil)
+	c.SetBrowser(&documentBrowser{status: 200})
+	if err := c.Crawl(context.Background(), []string{"https://example.test/"}); err != nil {
+		t.Fatal(err)
+	}
+	if c.browserAttemptCount() != 1 || c.browserRecoveryCount() != 1 || !client.visited["https://example.test/browser-child"] {
+		t.Fatalf("browser recovery did not discover child: attempts=%d recovered=%d visited=%v", c.browserAttemptCount(), c.browserRecoveryCount(), client.visited)
+	}
+}
+
+func TestSeedHostPressureDoesNotLaunchBrowser(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"example.test"}
+	db, err := storage.Open(t.TempDir() + "/pressure-browser.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	client := &seedErrorClient{discoveryClient: &discoveryClient{responses: map[string]httpclient.ResponseRecord{}, visited: map[string]bool{}}, err: httpclient.ErrHostDeferred}
+	c := New("pressure-browser", cfg, client, scope.NewEngine(cfg), db, nil)
+	c.SetBrowser(&documentBrowser{status: 200})
+	if err := c.Crawl(context.Background(), []string{"https://example.test/"}); err == nil {
+		t.Fatalf("host pressure should leave crawl incomplete: %v", err)
+	}
+	if c.browserAttemptCount() != 0 {
+		t.Fatalf("browser launched under host pressure: %d", c.browserAttemptCount())
 	}
 }
 

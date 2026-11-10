@@ -267,6 +267,14 @@ func (c *Crawler) Crawl(ctx context.Context, seeds []string) error {
 	}
 	c.runWorkers(ctx, bootstrapBudget)
 	if ctx.Err() == nil && !c.budgetExceeded(budget) {
+		// Follow observed links and redirect landings before guessing paths.
+		// This also lets a redirected entry page establish usable coverage.
+		c.runWorkers(ctx, budget)
+	}
+	if ctx.Err() == nil && !c.budgetExceeded(budget) {
+		// A blocked entry page does not prove other in-scope paths are blocked.
+		// Keep bounded API and sitemap discovery available even when the entry
+		// document cannot be fetched.
 		c.fetchSpecialPaths(ctx, seeds, budget)
 		c.runWorkers(ctx, budget)
 	}
@@ -418,6 +426,26 @@ func crawlerWorkerCount(cfg config.ScanConfig) int {
 	if workers > 48 {
 		workers = 48
 	}
+	// A single origin should not start all scan-wide workers at once. On
+	// guarded sites that turned otherwise quick HTML pages into a wave of
+	// timeouts. Keep up to four workers per explicit target host while still
+	// allowing different hosts to progress in parallel.
+	hosts := make(map[string]struct{})
+	for _, target := range cfg.Targets {
+		if parsed, err := url.Parse(target); err == nil && parsed.Hostname() != "" {
+			hosts[strings.ToLower(parsed.Hostname())] = struct{}{}
+		}
+	}
+	if len(hosts) == 0 {
+		hosts[""] = struct{}{}
+	}
+	perHost := cfg.PerHostConcurrency
+	if perHost <= 0 || perHost > 4 {
+		perHost = 4
+	}
+	if cap := perHost * len(hosts); workers > cap {
+		workers = cap
+	}
 	return workers
 }
 
@@ -487,19 +515,71 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget, req
 		// already-crawled login/root page does not download that page again.
 		ctx = httpclient.WithoutRedirects(ctx)
 	}
-	requestCtx, requestCancel := context.WithTimeout(ctx, 15*time.Second)
+	requestTimeout := 15 * time.Second
+	if cooldownClient, ok := c.client.(interface{ HostCooldownRemaining(string) time.Duration }); ok {
+		if remaining := cooldownClient.HostCooldownRemaining(visitURL); remaining > 0 {
+			// The HTTP client waits for a WAF/Retry-After circuit before dialing.
+			// That polite wait must not consume the crawler's network timeout.
+			requestTimeout += remaining + 2*time.Second
+		}
+	}
+	requestCtx, requestCancel := context.WithTimeout(ctx, requestTimeout)
 	rr, err := c.client.Do(requestCtx, method, visitURL, reqBody, reqHeaders)
 	requestCancel()
+	var recoveredSnapshot *BrowserSnapshot
 	if err != nil {
 		c.mu.Lock()
 		c.networkErrors++
 		c.mu.Unlock()
-		return err
+		// Entry pages can fail in the HTTP client before a status code exists
+		// (TLS, proxy, or a slow challenge). Give only an explicit GET seed one
+		// bounded browser navigation; speculative paths must not multiply the
+		// same failure or keep probing a host already under pressure.
+		if method != http.MethodGet || (source != SourceSeed && source != SourceSeedIngest) ||
+			!c.cfg.EnableHeadlessCrawler || c.browser == nil || ctx.Err() != nil ||
+			errors.Is(err, httpclient.ErrHostDeferred) ||
+			strings.Contains(strings.ToLower(err.Error()), "request budget exhausted") ||
+			strings.Contains(strings.ToLower(err.Error()), "out of scope") {
+			return err
+		}
+		instrumented, ok := c.browser.(InstrumentedBrowserFetcher)
+		if !ok {
+			return err
+		}
+		c.mu.Lock()
+		c.browserAttempts++
+		c.mu.Unlock()
+		browserCtx, browserCancel := context.WithTimeout(ctx, 25*time.Second)
+		snapshot, browserErr := instrumented.FetchInstrumented(browserCtx, rawURL)
+		browserCancel()
+		c.recordBrowserBlocked(snapshot.BlockedResources)
+		if browserErr != nil || snapshot.DocumentStatus < 200 || snapshot.DocumentStatus >= 300 ||
+			strings.TrimSpace(snapshot.DOM) == "" || !c.scope.IsInScope(snapshot.URL) {
+			_ = c.emit("coverage_gap", "Crawler entry page unavailable through HTTP and browser navigation", map[string]interface{}{
+				"phase": "crawling", "url": rawURL, "reason": "entry_transport_and_browser_failed",
+			})
+			return err
+		}
+		c.mu.Lock()
+		c.browserRecovered++
+		c.mu.Unlock()
+		recoveredSnapshot = &snapshot
+		// The document status and body are from Chromium. This synthetic
+		// exchange is used only by the discovery pipeline, never raw traffic.
+		rr = httpclient.RequestResponse{
+			Request: httpclient.RequestRecord{Method: method, URL: rawURL},
+			Response: httpclient.ResponseRecord{StatusCode: snapshot.DocumentStatus,
+				Headers: map[string]string{"Content-Type": "text/html"}, Body: snapshot.DOM, FinalURL: snapshot.URL},
+		}
+		_ = c.emit("log", "Crawler recovered entry page through browser navigation after HTTP transport failure", map[string]interface{}{
+			"phase": "crawling", "url": rawURL,
+		})
 	}
 
 	c.mu.Lock()
 	c.pagesVisited++
-	if rr.Response.StatusCode >= 200 && rr.Response.StatusCode < 300 && strings.TrimSpace(rr.Response.Body) != "" && usableApplicationSource(source) {
+	if rr.Response.StatusCode >= 200 && rr.Response.StatusCode < 300 && strings.TrimSpace(rr.Response.Body) != "" &&
+		(usableApplicationSource(source) || isHTMLDocumentResponse(rr.Response.Headers, rr.Response.Body)) {
 		c.contentPages++
 	}
 	if rr.Response.StatusCode >= 400 {
@@ -515,7 +595,7 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget, req
 	if id, idErr := c.db.GetEndpointID(c.scanID, rawURL, method); idErr == nil {
 		endpointID = &id
 	}
-	if c.cfg.EnableRawTrafficStorage {
+	if c.cfg.EnableRawTrafficStorage && recoveredSnapshot == nil {
 		if _, saveErr := c.db.SaveRequestResponse(c.scanID, endpointID, rr); saveErr != nil {
 			c.recordFailure()
 			_ = c.emit("scan_error", "crawler traffic could not be persisted: "+saveErr.Error(), map[string]interface{}{
@@ -638,8 +718,20 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget, req
 	if strings.Contains(strings.ToLower(rawURL), "sitemap") {
 		discovered = append(discovered, ExtractFromSitemap(body)...)
 	}
+	// Publish links from the received response before Chromium navigation.
+	// Browser rendering can take tens of seconds; delaying these observed URLs
+	// made a running scan appear empty and left no inventory if it was stopped.
+	staticDiscoveryCount := len(discovered)
+	for _, ep := range discovered {
+		c.enqueueCandidate(ep.URL, ep.Method, depth+1, ep.Source, ep.Confidence, ep.WhyDiscovered, budget, ep.RequestTemplate, rawURL)
+	}
 
 	var browserState *BrowserSnapshot
+	if recoveredSnapshot != nil {
+		c.adoptBrowserCookies(recoveredSnapshot.Cookies)
+		browserState = recoveredSnapshot
+		discovered = append(discovered, recoveredSnapshot.NetworkCalls...)
+	}
 	// Retry browser-only authentication and anti-bot responses once through the
 	// configured browser. Do not launch browsers for speculative API-doc probes.
 	deniedDocument := browserRecoverableDocumentStatus(rr.Response.StatusCode) && method == http.MethodGet &&
@@ -651,7 +743,7 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget, req
 	// render scripted entry pages, but render linked pages only when their HTML
 	// has an application-shell/runtime signal.
 	needsRuntimeRender := isHTML && shouldRenderWithBrowser(body, source, method, rr.Response.StatusCode)
-	if (needsRuntimeRender || deniedDocument) && c.cfg.EnableHeadlessCrawler && c.browser != nil {
+	if recoveredSnapshot == nil && (needsRuntimeRender || deniedDocument) && c.cfg.EnableHeadlessCrawler && c.browser != nil {
 		c.mu.Lock()
 		c.browserAttempts++
 		c.mu.Unlock()
@@ -737,7 +829,7 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget, req
 			nil, nil, method == http.MethodGet || method == http.MethodHead)
 	}
 
-	for _, ep := range discovered {
+	for _, ep := range discovered[staticDiscoveryCount:] {
 		c.enqueueCandidate(ep.URL, ep.Method, depth+1, ep.Source, ep.Confidence, ep.WhyDiscovered, budget, ep.RequestTemplate, rawURL)
 	}
 	return nil
@@ -1522,6 +1614,20 @@ func (c *Crawler) reserveRequest(budget Budget) bool {
 
 func usableApplicationSource(source DiscoverySource) bool {
 	return source != SourceRobots && source != SourceSitemap && source != SourceScript && source != SourceAPIDoc
+}
+
+func isHTMLDocumentResponse(headers map[string]string, body string) bool {
+	for name, value := range headers {
+		if strings.EqualFold(name, "Content-Type") && strings.Contains(strings.ToLower(value), "text/html") {
+			return true
+		}
+	}
+	preview := strings.ToLower(strings.TrimSpace(body))
+	if len(preview) > 1024 {
+		preview = preview[:1024]
+	}
+	return strings.Contains(preview, "<!doctype html") || strings.Contains(preview, "<html") ||
+		strings.Contains(preview, "<head") || strings.Contains(preview, "<body")
 }
 
 func (c *Crawler) Stats() (pages, requests, discovered int) {

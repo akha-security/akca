@@ -93,3 +93,18 @@ func (c *Client) HostUnderPressure(rawURL string) bool {
 	defer c.blockMu.Unlock()
 	return c.hostBlocks[u.Hostname()] > 0
 }
+
+// HostCooldownRemaining reports the current server/WAF wait for a URL. The
+// crawler uses it to keep its per-request deadline from expiring before the
+// HTTP client is allowed to send the request.
+func (c *Client) HostCooldownRemaining(rawURL string) time.Duration {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" {
+		return 0
+	}
+	until, blocked := c.circuitOpen(u.Hostname())
+	if !blocked {
+		return 0
+	}
+	return time.Until(until)
+}

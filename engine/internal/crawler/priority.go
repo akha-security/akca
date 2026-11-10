@@ -49,6 +49,8 @@ func sourceBonus(src DiscoverySource) int {
 	switch src {
 	case SourceSeed, SourceSeedIngest:
 		return 30
+	case SourceLink:
+		return 18
 	case SourceGraphQL, SourceAPIDoc, SourceBrowserXHR, SourceWebSocket:
 		return 35
 	case SourceForm:
@@ -200,6 +202,9 @@ func staticAssetPenalty(path string) int {
 	clean := path
 	if i := strings.IndexAny(clean, "?#"); i >= 0 {
 		clean = clean[:i]
+	}
+	if strings.HasSuffix(clean, ".js") || strings.HasSuffix(clean, ".mjs") {
+		return 24
 	}
 	for _, ext := range staticNoiseExtensions {
 		if strings.HasSuffix(clean, ext) {

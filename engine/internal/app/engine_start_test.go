@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -107,5 +109,63 @@ func TestStartScanDoesNotDeadlockWhenOASTRegistrationFails(t *testing.T) {
 	defer cancel()
 	if err := engine.WaitScanDone(ctx); err != nil && err != context.Canceled {
 		t.Fatalf("scan did not stop: %v", err)
+	}
+}
+
+func TestNormalScanCrawlsLinksBeforeFingerprintRequests(t *testing.T) {
+	storage.SetDataDirOverride(t.TempDir())
+	engine, err := New(noopWriter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	cfg := config.DefaultScanConfig()
+	cfg.ScanID = "crawl-before-fingerprint"
+	cfg.Targets = []string{"https://example.test/"}
+	cfg.IncludeDomains = []string{"example.test"}
+	cfg.EnableOAST = false
+	cfg.EnableWAFDetection = false
+	cfg.EnableJSAnalysis = false
+	cfg.EnableHeadlessCrawler = false
+	cfg.EnableBrowserWorkerPool = false
+	cfg.EnableRuntimeSensor = false
+	cfg.EnableFuzzing = false
+	cfg.Enable403BypassChecks = false
+	cfg.SkipAutoReport = true
+	cfg.MaxPages = 2
+	cfg.CrawlerRequestBudget = 2
+	cfg.GlobalRateLimit, cfg.PerHostRateLimit = 10000, 10000
+	requests := make(chan string, 100)
+	cfg.TestRoundTripper = php2ShellTransportFunc(func(req *http.Request) (*http.Response, error) {
+		requests <- req.URL.Path
+		body := "<html>child</html>"
+		if req.URL.Path == "/" {
+			body = `<html><a href="/child">child</a></html>`
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/html"}}, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})
+	if err := engine.StartScan(cfg); err != nil {
+		t.Fatal(err)
+	}
+	childSeen := false
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case path := <-requests:
+			if path == "/child" {
+				childSeen = true
+			} else if path == "/" && childSeen {
+				if err := engine.StopScan(); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = engine.WaitScanDone(ctx)
+				return
+			}
+		case <-deadline:
+			t.Fatalf("crawler did not visit child before fingerprint request (child_seen=%v)", childSeen)
+		}
 	}
 }

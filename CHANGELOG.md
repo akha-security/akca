@@ -7,6 +7,13 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Start normal-scan crawling before slower technology fingerprinting and WAF calibration so discovered URLs appear early.
+- Visit observed HTML pages before JavaScript chunks, keep static link discoveries when browser rendering is slow, and limit crawler workers per target host.
+- Preserve sitemap discovery when an entry page is unavailable and allow one bounded browser recovery attempt for an entry-page transport failure.
+- Include an active host cooldown in crawler request deadlines so a WAF wait does not expire before the request is sent.
+
 ## [v0.3.1] - 2026-11-09
 
 ### Changed

@@ -436,7 +436,7 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 	done := func(phase string) bool { return completed != nil && completed[phase] }
 	completedList := []string{"bootstrap"}
 	for _, p := range []string{
-		"preflight", "fingerprint", "learning_waf", "api_import", "crawling", "sensor_discovery", "js_analysis", "shadow_api",
+		"preflight", "api_import", "crawling", "fingerprint", "learning_waf", "sensor_discovery", "js_analysis", "shadow_api",
 		"parameter_discovery", "fuzzing", "bypass403", "reflection", "vuln_modules", "oast_drain",
 	} {
 		if done(p) {
@@ -524,7 +524,7 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 		// A dedicated check runs on explicit URLs, without discovery or its
 		// preflight/fingerprint requests. Keep reporting and scan finalization.
 		for _, phase := range []string{
-			"preflight", "fingerprint", "learning_waf", "api_import", "crawling",
+			"preflight", "api_import", "crawling", "fingerprint", "learning_waf",
 			"sensor_discovery", "js_analysis", "shadow_api", "parameter_discovery",
 			"fuzzing", "bypass403", "reflection",
 		} {
@@ -548,7 +548,52 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 			markSuccess("preflight")
 		}
 
-		// ── Phase 1: Technology + WAF fingerprinting ──────────────────────────
+		crawlerTargets := uniqueURLSeeds(targets)
+
+		// API definitions are imported before crawling so their typed request
+		// templates participate in parameter discovery and module scheduling.
+		if !done("api_import") && len(cfg.APIImportFiles) > 0 {
+			if err := e.runAPIImportPhase(ctx, cfg.APIImportFiles, targets[0]); err != nil {
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "api_import"})
+				markFailed("api_import")
+			} else {
+				markSuccess("api_import")
+			}
+		} else if !done("api_import") {
+			markSkipped("api_import")
+		}
+		if stopped() {
+			return
+		}
+
+		// ── Phase 1: Deep crawl (authenticated) ─────────────────────────────────
+		if loginSessionGuardEnabled(cfg) {
+			if err := e.ensureAuthenticatedSession(ctx); err != nil {
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "session_guard_crawl"})
+				markFailed("session_guard_crawl")
+				e.session.Stop()
+				return
+			}
+			markSuccess("session_guard_crawl")
+		}
+		if !done("crawling") {
+			_ = e.Emit("scan_progress", "crawling in-scope targets", map[string]interface{}{
+				"scan_id": cfg.ScanID, "phase": "crawling", "targets": len(crawlerTargets),
+			})
+			if err := e.runCrawlerStage(ctx, crawlerTargets, true); err != nil {
+				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "crawling"})
+				markFailed("crawling")
+			} else {
+				markSuccess("crawling")
+			}
+		}
+		if stopped() {
+			return
+		}
+
+		// Fingerprinting and WAF calibration may spend several consecutive
+		// request deadlines on a guarded host. Crawl the entry pages first so
+		// a normal scan discovers URLs before those optional probes begin.
 		if !done("fingerprint") {
 			hasError := false
 			for _, target := range targets {
@@ -570,7 +615,6 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 			return
 		}
 
-		// ── Phase 2: WAF learning / calibration ────────────────────────────────
 		if !done("learning_waf") {
 			if cfg.EnableWAFDetection {
 				timeout := 12 * time.Second
@@ -592,49 +636,6 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 				_ = e.Emit("log", "WAF learning skipped; fingerprint profile used", map[string]interface{}{"scan_id": cfg.ScanID})
 				_ = e.Emit("phase_finished", "learning_waf", map[string]interface{}{"phase": "learning_waf", "skipped": true})
 				markSkipped("learning_waf")
-			}
-		}
-		if stopped() {
-			return
-		}
-
-		crawlerTargets := uniqueURLSeeds(targets)
-
-		// API definitions are imported before crawling so their typed request
-		// templates participate in parameter discovery and module scheduling.
-		if !done("api_import") && len(cfg.APIImportFiles) > 0 {
-			if err := e.runAPIImportPhase(ctx, cfg.APIImportFiles, targets[0]); err != nil {
-				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "api_import"})
-				markFailed("api_import")
-			} else {
-				markSuccess("api_import")
-			}
-		} else if !done("api_import") {
-			markSkipped("api_import")
-		}
-		if stopped() {
-			return
-		}
-
-		// ── Phase 3: Deep crawl (authenticated) ─────────────────────────────────
-		if loginSessionGuardEnabled(cfg) {
-			if err := e.ensureAuthenticatedSession(ctx); err != nil {
-				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "session_guard_crawl"})
-				markFailed("session_guard_crawl")
-				e.session.Stop()
-				return
-			}
-			markSuccess("session_guard_crawl")
-		}
-		if !done("crawling") {
-			_ = e.Emit("scan_progress", "crawling in-scope targets", map[string]interface{}{
-				"scan_id": cfg.ScanID, "phase": "crawling", "targets": len(crawlerTargets),
-			})
-			if err := e.runCrawlerStage(ctx, crawlerTargets, true); err != nil {
-				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": "crawling"})
-				markFailed("crawling")
-			} else {
-				markSuccess("crawling")
 			}
 		}
 		if stopped() {
