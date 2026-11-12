@@ -537,11 +537,10 @@ func (r *Runner) runImproperAuthentication(ctx context.Context, target ScanTarge
 				p := defaultPayload("improper_auth", "missing_authentication", target.EndpointURL, "unauthenticated_sensitive_api")
 				f := r.verifyAndBuildWithCandidate(ctx, "improper_auth", target, p, baseline, baseline,
 					"unauthenticated_sensitive_api", false, false, "", "", func(candidate *verification.Candidate) {
-						candidate.RequestedProofType = verification.ProofAnonymousAccess
+						// The same response is passed as both baseline and probe:
+						// there is no unauthenticated/authenticated pair to diff here,
+						// the evidence is the single response's content itself.
 						candidate.ExpectedEquivalent = true
-						candidate.Observations = append(candidate.Observations,
-							r.identityObservation("improper_auth", target, verification.RoleAnonymousProbe, 1, "anonymous", baseline),
-						)
 					})
 				if f != nil {
 					f.Title = "Improper Authentication: Sensitive Endpoint Accessible Without Auth"
@@ -580,13 +579,7 @@ func (r *Runner) runImproperAuthentication(ctx context.Context, target ScanTarge
 		}
 		if strings.Contains(respBody, "admin") || strings.Contains(respBody, "success") || strings.Contains(respBody, "user") {
 			p := defaultPayload("improper_auth", b.variantName, b.headerVal, b.variantName)
-			f := r.verifyAndBuildWithCandidate(ctx, "improper_auth", target, p, baseline, rr,
-				b.variantName, false, false, "", "", func(candidate *verification.Candidate) {
-					candidate.RequestedProofType = verification.ProofAnonymousAccess
-					candidate.Observations = append(candidate.Observations,
-						r.identityObservation("improper_auth", target, verification.RoleAnonymousProbe, 1, b.variantName, rr),
-					)
-				})
+			f := r.verifyAndBuild(ctx, "improper_auth", target, p, baseline, rr, b.variantName, false, false, "", "")
 			if f != nil {
 				f.Title = "Improper Authentication Bypass via " + b.headerKey
 				f.Severity = "critical"
@@ -598,4 +591,27 @@ func (r *Runner) runImproperAuthentication(ctx context.Context, target ScanTarge
 	}
 
 	return out
+}
+
+// improperAuthSignalConfirmed re-checks the same evidence runImproperAuthentication
+// already required before treating a candidate as a finding. Without this case,
+// moduleSignalConfirmed's default fell through to false for "improper_auth" and
+// every candidate was discarded before verification ever ran.
+func improperAuthSignalConfirmed(signal string, status int, body string) bool {
+	if status != 200 {
+		return false
+	}
+	lower := strings.ToLower(body)
+	switch signal {
+	case "unauthenticated_sensitive_api":
+		return strings.Contains(lower, `"users"`) || strings.Contains(lower, `"admin":true`) ||
+			strings.Contains(lower, `"api_key"`) || strings.Contains(lower, `"db_password"`)
+	case "basic_default_credentials", "bearer_null_bypass", "custom_header_admin_bypass", "custom_header_bypass_auth":
+		if authDeniedBody(lower) {
+			return false
+		}
+		return strings.Contains(lower, "admin") || strings.Contains(lower, "success") || strings.Contains(lower, "user")
+	default:
+		return false
+	}
 }
