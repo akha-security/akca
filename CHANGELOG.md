@@ -13,6 +13,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - Visit observed HTML pages before JavaScript chunks, keep static link discoveries when browser rendering is slow, and limit crawler workers per target host.
 - Preserve sitemap discovery when an entry page is unavailable and allow one bounded browser recovery attempt for an entry-page transport failure.
 - Include an active host cooldown in crawler request deadlines so a WAF wait does not expire before the request is sent.
+- Keep the crawler request guard wider than the HTTP client's 30-second transaction limit so valid slow responses, redirects, and retries are not cut off at 15 seconds.
+- Report grouped crawler transport causes (DNS, TLS, proxy, timeout, refused/reset connection, host deferral, and request budget) in completion events and incomplete-crawl errors.
 
 ## [v0.3.1] - 2026-11-09
 

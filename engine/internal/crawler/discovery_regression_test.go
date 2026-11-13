@@ -289,8 +289,8 @@ func TestCrawlerDeadlineIncludesHostCooldown(t *testing.T) {
 	if err := c.Crawl(context.Background(), []string{"https://example.test/"}); err != nil {
 		t.Fatal(err)
 	}
-	if client.deadline < 45*time.Second {
-		t.Fatalf("crawler deadline ignored host cooldown: %s", client.deadline)
+	if client.deadline < 65*time.Second {
+		t.Fatalf("crawler deadline shortened the HTTP client timeout or ignored host cooldown: %s", client.deadline)
 	}
 }
 

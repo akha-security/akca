@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	pathpkg "path"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/akha-security/akca/engine/internal/config"
@@ -25,9 +27,16 @@ import (
 	"golang.org/x/net/html"
 )
 
-// maxSecretScanBytes caps how much of a response body is scanned for secrets to
-// avoid pathological CPU usage on very large assets.
-const maxSecretScanBytes = 3 * 1024 * 1024
+const (
+	// maxSecretScanBytes caps how much of a response body is scanned for secrets to
+	// avoid pathological CPU usage on very large assets.
+	maxSecretScanBytes = 3 * 1024 * 1024
+
+	// The live HTTP client bounds a complete request at 30 seconds. The crawler's
+	// guard must be wider so it does not truncate valid slow responses, redirects,
+	// or retries while still bounding custom HTTPDoer implementations.
+	crawlerRequestTimeout = 35 * time.Second
+)
 
 var ErrIncomplete = errors.New("crawl incomplete")
 
@@ -36,38 +45,39 @@ type HTTPDoer interface {
 }
 
 type Crawler struct {
-	mu               sync.Mutex
-	scanID           string
-	cfg              config.ScanConfig
-	client           HTTPDoer
-	scope            *scope.Engine
-	db               *storage.DB
-	q                *queue.RequestQueue
-	seen             map[string]struct{}
-	recorded         map[string]struct{}
-	runtimeSeen      map[string]struct{}
-	secretsSeen      map[string]struct{}
-	queryVariants    map[string]map[string]struct{}
-	linkedHostsSeen  map[string]struct{}
-	browserBlocked   map[string]struct{}
-	seeds            []string
-	emit             EventSink
-	browser          BrowserFetcher
-	pagesVisited     int
-	contentPages     int
-	rejectedPages    int
-	networkErrors    int
-	requestsMade     int
-	discovered       int
-	runtimeFound     int
-	browserAttempts  int
-	browserRecovered int
-	failures         int
-	startedAt        time.Time
-	eventBatch       []map[string]interface{}
-	stateGraph       *stategraph.Graph
-	seedRequestsOnly bool
-	progressPhase    string
+	mu                sync.Mutex
+	scanID            string
+	cfg               config.ScanConfig
+	client            HTTPDoer
+	scope             *scope.Engine
+	db                *storage.DB
+	q                 *queue.RequestQueue
+	seen              map[string]struct{}
+	recorded          map[string]struct{}
+	runtimeSeen       map[string]struct{}
+	secretsSeen       map[string]struct{}
+	queryVariants     map[string]map[string]struct{}
+	linkedHostsSeen   map[string]struct{}
+	browserBlocked    map[string]struct{}
+	seeds             []string
+	emit              EventSink
+	browser           BrowserFetcher
+	pagesVisited      int
+	contentPages      int
+	rejectedPages     int
+	networkErrors     int
+	networkErrorKinds map[string]int
+	requestsMade      int
+	discovered        int
+	runtimeFound      int
+	browserAttempts   int
+	browserRecovered  int
+	failures          int
+	startedAt         time.Time
+	eventBatch        []map[string]interface{}
+	stateGraph        *stategraph.Graph
+	seedRequestsOnly  bool
+	progressPhase     string
 }
 
 func New(scanID string, cfg config.ScanConfig, client HTTPDoer, scopeEngine *scope.Engine, db *storage.DB, emit EventSink) *Crawler {
@@ -86,22 +96,23 @@ func New(scanID string, cfg config.ScanConfig, client HTTPDoer, scopeEngine *sco
 		}
 	}
 	return &Crawler{
-		scanID:          scanID,
-		cfg:             cfg,
-		client:          client,
-		scope:           scopeEngine,
-		db:              db,
-		q:               queue.NewRequestQueue(),
-		seen:            make(map[string]struct{}),
-		recorded:        make(map[string]struct{}),
-		runtimeSeen:     make(map[string]struct{}),
-		secretsSeen:     make(map[string]struct{}),
-		queryVariants:   make(map[string]map[string]struct{}),
-		linkedHostsSeen: linked,
-		browserBlocked:  make(map[string]struct{}),
-		emit:            emit,
-		stateGraph:      stategraph.New(db),
-		progressPhase:   "crawling",
+		scanID:            scanID,
+		cfg:               cfg,
+		client:            client,
+		scope:             scopeEngine,
+		db:                db,
+		q:                 queue.NewRequestQueue(),
+		seen:              make(map[string]struct{}),
+		recorded:          make(map[string]struct{}),
+		runtimeSeen:       make(map[string]struct{}),
+		secretsSeen:       make(map[string]struct{}),
+		queryVariants:     make(map[string]map[string]struct{}),
+		linkedHostsSeen:   linked,
+		browserBlocked:    make(map[string]struct{}),
+		networkErrorKinds: make(map[string]int),
+		emit:              emit,
+		stateGraph:        stategraph.New(db),
+		progressPhase:     "crawling",
 	}
 }
 
@@ -206,6 +217,7 @@ func (c *Crawler) Crawl(ctx context.Context, seeds []string) error {
 	c.contentPages = 0
 	c.rejectedPages = 0
 	c.networkErrors = 0
+	c.networkErrorKinds = make(map[string]int)
 	c.requestsMade = 0
 	c.discovered = 0
 	c.runtimeFound = 0
@@ -281,6 +293,7 @@ func (c *Crawler) Crawl(ctx context.Context, seeds []string) error {
 	c.emitBrowserBlockedSummary()
 	c.mu.Lock()
 	contentPages, rejectedPages, networkErrors := c.contentPages, c.rejectedPages, c.networkErrors
+	networkErrorKinds := cloneCountMap(c.networkErrorKinds)
 	c.mu.Unlock()
 
 	_ = c.flushEndpointEvents()
@@ -291,7 +304,8 @@ func (c *Crawler) Crawl(ctx context.Context, seeds []string) error {
 		"scan_id": c.scanID, "pages": c.pagesVisited, "requests": c.requestsMade, "discovered": c.discovered,
 		"errors":        c.failureCount(),
 		"content_pages": contentPages, "rejected_pages": rejectedPages, "network_errors": networkErrors,
-		"browser_attempts": c.browserAttemptCount(), "browser_recovered_pages": c.browserRecoveryCount(),
+		"network_error_kinds": networkErrorKinds,
+		"browser_attempts":    c.browserAttemptCount(), "browser_recovered_pages": c.browserRecoveryCount(),
 		"has_usable_content": contentPages > 0,
 	})
 	if ctx.Err() != nil {
@@ -303,12 +317,117 @@ func (c *Crawler) Crawl(ctx context.Context, seeds []string) error {
 		return fmt.Errorf("%w: %d queued URLs remain (%s)", ErrIncomplete, c.q.Len(), reason)
 	}
 	if contentPages == 0 {
-		return fmt.Errorf("crawl incomplete: no usable page content received (%d rejected responses, %d network errors); check target access, authentication and HTTP responses", rejectedPages, networkErrors)
+		detail := formatNetworkErrorKinds(networkErrorKinds)
+		message := fmt.Sprintf("crawl incomplete: no usable page content received (%d rejected responses, %d network errors", rejectedPages, networkErrors)
+		if detail != "" {
+			message += ": " + detail
+		}
+		message += "); check target access, authentication and HTTP responses"
+		_ = c.emit("coverage_gap", message, map[string]interface{}{
+			"scan_id": c.scanID, "phase": "crawling", "reason": "no_usable_content",
+			"rejected_pages": rejectedPages, "network_errors": networkErrors,
+			"network_error_kinds": networkErrorKinds,
+		})
+		return errors.New(message)
 	}
 	if failed := c.failureCount(); failed > 0 {
 		return fmt.Errorf("crawler completed with %d persistence errors", failed)
 	}
 	return nil
+}
+
+func (c *Crawler) recordNetworkError(err error) {
+	kind := classifyNetworkError(err)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.networkErrors++
+	if c.networkErrorKinds == nil {
+		c.networkErrorKinds = make(map[string]int)
+	}
+	c.networkErrorKinds[kind]++
+}
+
+func classifyNetworkError(err error) string {
+	if err == nil {
+		return "transport"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, httpclient.ErrHostDeferred) {
+		return "host_deferred"
+	}
+
+	lower := strings.ToLower(err.Error())
+	if strings.Contains(lower, "request budget exhausted") {
+		return "request_budget"
+	}
+	if strings.Contains(lower, "proxy request") || strings.Contains(lower, "proxyconnect") ||
+		strings.Contains(lower, "proxy error") {
+		return "proxy"
+	}
+
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "dns"
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) && networkErr.Timeout() {
+		return "timeout"
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return "connection_refused"
+	}
+	if errors.Is(err, syscall.ECONNRESET) {
+		return "connection_reset"
+	}
+	if errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) {
+		return "network_unreachable"
+	}
+	if strings.Contains(lower, "x509:") || strings.Contains(lower, "tls handshake") ||
+		strings.Contains(lower, "first record does not look like a tls handshake") ||
+		strings.Contains(lower, "server gave http response to https client") {
+		return "tls"
+	}
+	if strings.Contains(lower, "no such host") || strings.Contains(lower, "name resolution") {
+		return "dns"
+	}
+	return "transport"
+}
+
+func cloneCountMap(input map[string]int) map[string]int {
+	out := make(map[string]int, len(input))
+	for key, value := range input {
+		out[key] = value
+	}
+	return out
+}
+
+func formatNetworkErrorKinds(kinds map[string]int) string {
+	type entry struct {
+		kind  string
+		count int
+	}
+	entries := make([]entry, 0, len(kinds))
+	for kind, count := range kinds {
+		if count > 0 {
+			entries = append(entries, entry{kind: kind, count: count})
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].count == entries[j].count {
+			return entries[i].kind < entries[j].kind
+		}
+		return entries[i].count > entries[j].count
+	})
+	parts := make([]string, 0, len(entries))
+	for _, item := range entries {
+		parts = append(parts, fmt.Sprintf("%s=%d", item.kind, item.count))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // runWorkers drains the priority queue with a bounded pool of concurrent
@@ -515,7 +634,7 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget, req
 		// already-crawled login/root page does not download that page again.
 		ctx = httpclient.WithoutRedirects(ctx)
 	}
-	requestTimeout := 15 * time.Second
+	requestTimeout := crawlerRequestTimeout
 	if cooldownClient, ok := c.client.(interface{ HostCooldownRemaining(string) time.Duration }); ok {
 		if remaining := cooldownClient.HostCooldownRemaining(visitURL); remaining > 0 {
 			// The HTTP client waits for a WAF/Retry-After circuit before dialing.
@@ -528,9 +647,7 @@ func (c *Crawler) visit(ctx context.Context, item queue.Item, budget Budget, req
 	requestCancel()
 	var recoveredSnapshot *BrowserSnapshot
 	if err != nil {
-		c.mu.Lock()
-		c.networkErrors++
-		c.mu.Unlock()
+		c.recordNetworkError(err)
 		// Entry pages can fail in the HTTP client before a status code exists
 		// (TLS, proxy, or a slow challenge). Give only an explicit GET seed one
 		// bounded browser navigation; speculative paths must not multiply the
