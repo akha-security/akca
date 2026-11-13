@@ -9,7 +9,7 @@ on:
       release_tag:
         description: 'Existing release whose binaries will be rebuilt from the selected workflow ref'
         required: true
-        default: 'v0.3.1'
+        default: 'v0.3.2'
         type: string
 
 env:

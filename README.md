@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/akha-security/akca/actions/workflows/ci.yml"><img src="https://github.com/akha-security/akca/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/akha-security/akca/releases/tag/v0.3.1"><img src="https://img.shields.io/badge/version-v0.3.1-8b5cf6" alt="Version v0.3.1"></a>
+  <a href="https://github.com/akha-security/akca/releases/tag/v0.3.2"><img src="https://img.shields.io/badge/version-v0.3.2-8b5cf6" alt="Version v0.3.2"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25 or newer"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache License 2.0"></a>
 </p>
@@ -441,12 +441,11 @@ Discovered URLs are retained even when they cannot be visited. A crawl that exha
 
 Unconfigured rate-limit checks produce observations, not vulnerability findings. A configured threshold proof also requires `window_seconds`; if the requests do not fit inside that window, the check is inconclusive. SQLi does not treat a 400 response or arithmetic evaluation alone as proof. New vendor-specific SQL errors in 400/422 responses must pass the replay and control verification path.
 
-## What's new in v0.3.1
+## What's new in v0.3.2
 
-- Complete crawling and GET/POST hidden-parameter discovery before vulnerability checks, while bounding requests and filtering static or unavailable resources.
-- Keep PHP2Shell assessment on explicit origins and run its bounded active signature check in normal full scans. Unknown exposure remains inconclusive.
-- Tighten SQL injection, authentication-bypass, OAST, and report proof gates so incomplete or weak signals stay review leads.
-- Refresh the self-contained HTML report with a readable cover, centered logo, larger typography, and clearer findings and HTTP evidence.
+- Resume XSS, SQLi, and other active vulnerability probes after WAF/rate-limit cooldowns instead of leaving every eligible target as `PARTIAL`.
+- Keep slow but valid crawler transactions alive through the HTTP client's full timeout and report grouped DNS, TLS, proxy, timeout, connection, and host-deferral causes.
+- Preserve sitemap and static-link discovery when an entry page or browser rendering path is unavailable.
 
 See [CHANGELOG.md](CHANGELOG.md) for release details.
 

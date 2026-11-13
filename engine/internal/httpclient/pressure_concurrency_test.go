@@ -95,3 +95,34 @@ func TestWAFDeferralAndRecoveryUseKnownHealthyURL(t *testing.T) {
 		t.Fatal("known healthy recovery did not reopen discovery")
 	}
 }
+
+func TestActiveScanWaitsForWAFCooldownInsteadOfBeingDeferred(t *testing.T) {
+	requests := 0
+	c := pressureClient(t, pressureTransport(func(r *http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("payload delivered")), Request: r}, nil
+	}))
+
+	c.blockMu.Lock()
+	c.hostBlocks["example.test"] = 2
+	c.blockedUntil["example.test"] = time.Now().Add(40 * time.Millisecond)
+	c.blockMu.Unlock()
+
+	activeCtx := WithActiveScan(context.Background())
+	for i := 0; i < 1200; i++ {
+		if c.discoveryDeferred(activeCtx, "example.test") {
+			t.Fatalf("active target %d of 1200 was permanently deferred", i+1)
+		}
+	}
+
+	started := time.Now()
+	if _, err := c.Do(activeCtx, "GET", "https://example.test/?q=payload", nil, nil); err != nil {
+		t.Fatalf("active vulnerability request was deferred: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("active vulnerability request count=%d, want 1", requests)
+	}
+	if elapsed := time.Since(started); elapsed < 25*time.Millisecond {
+		t.Fatalf("active request ignored WAF cooldown: %s", elapsed)
+	}
+}

@@ -23,12 +23,21 @@ func WithBackgroundDiscovery(ctx context.Context) context.Context {
 func (c *Client) discoveryDeferred(ctx context.Context, host string) bool {
 	background, _ := ctx.Value(discoveryPressureKey{}).(bool)
 	active, _ := ctx.Value(activeScanKey{}).(bool)
-	if !background && !active {
+	switch {
+	case background:
+		c.blockMu.Lock()
+		deferred := c.hostBlocks[host] > 0
+		c.blockMu.Unlock()
+		return deferred
+	case active:
+		// Active vulnerability checks must honor the host circuit cooldown and
+		// resume afterwards. Deferring them from the cumulative block counter
+		// made the second WAF/rate-limit response permanently suppress every
+		// later XSS, SQLi and other payload request for that host.
+		return false
+	default:
 		return false
 	}
-	c.blockMu.Lock()
-	defer c.blockMu.Unlock()
-	return (background && c.hostBlocks[host] > 0) || (active && c.hostBlocks[host] >= 2)
 }
 
 func (c *Client) RecoverHost(ctx context.Context, rawURL string) error {

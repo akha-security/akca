@@ -7,6 +7,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [v0.3.2] - 2026-11-13
+
 ### Fixed
 
 - Start normal-scan crawling before slower technology fingerprinting and WAF calibration so discovered URLs appear early.
@@ -15,6 +17,7 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - Include an active host cooldown in crawler request deadlines so a WAF wait does not expire before the request is sent.
 - Keep the crawler request guard wider than the HTTP client's 30-second transaction limit so valid slow responses, redirects, and retries are not cut off at 15 seconds.
 - Report grouped crawler transport causes (DNS, TLS, proxy, timeout, refused/reset connection, host deferral, and request budget) in completion events and incomplete-crawl errors.
+- Resume active XSS, SQLi and other vulnerability probes after the WAF/rate-limit cooldown instead of permanently deferring every later payload request after two block responses.
 
 ## [v0.3.1] - 2026-11-09
 
@@ -488,7 +491,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - HTML, JSON, Markdown, CSV and SARIF reporting.
 - CWE and OWASP Top 10:2025 report classification.
 
-[Unreleased]: https://github.com/akha-security/akca/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/akha-security/akca/compare/v0.3.2...HEAD
+[v0.3.2]: https://github.com/akha-security/akca/compare/v0.3.1...v0.3.2
 [v0.3.1]: https://github.com/akha-security/akca/compare/v0.3.0...v0.3.1
 [v0.3.0]: https://github.com/akha-security/akca/compare/v0.2.9...v0.3.0
 [v0.2.9]: https://github.com/akha-security/akca/compare/v0.2.8...v0.2.9

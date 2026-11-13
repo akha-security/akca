@@ -4,7 +4,7 @@ import "strings"
 
 const (
 	ProductName  = "AKCA ADVANCED WEB SECURITY SCANNER"
-	Version      = "0.3.1"
+	Version      = "0.3.2"
 	VersionLabel = "v" + Version
 	UserAgent    = ProductName + "/" + Version
 )
