@@ -1268,14 +1268,23 @@ SELECT url, COUNT(*) FROM endpoints WHERE scan_id = ? GROUP BY url LIMIT 100`, s
 }
 
 func (db *DB) ListTimelineUI(scanID string, eventType string, limit int) ([]TimelineRow, error) {
+	if eventType == "" {
+		return db.ListTimelineByTypes(scanID, limit)
+	}
+	return db.ListTimelineByTypes(scanID, limit, eventType)
+}
+
+func (db *DB) ListTimelineByTypes(scanID string, limit int, eventTypes ...string) ([]TimelineRow, error) {
 	if limit <= 0 {
 		limit = 200
 	}
 	q := `SELECT id, event_type, summary, COALESCE(event_json,''), created_at FROM timeline_events WHERE scan_id = ?`
 	args := []interface{}{scanID}
-	if eventType != "" {
-		q += ` AND event_type = ?`
-		args = append(args, eventType)
+	if len(eventTypes) > 0 {
+		q += " AND event_type IN (" + strings.Repeat("?,", len(eventTypes)-1) + "?)"
+		for _, eventType := range eventTypes {
+			args = append(args, eventType)
+		}
 	}
 	q += ` ORDER BY id ASC LIMIT ?`
 	args = append(args, limit)

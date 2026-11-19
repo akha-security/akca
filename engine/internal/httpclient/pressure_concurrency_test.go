@@ -108,7 +108,7 @@ func TestActiveScanWaitsForWAFCooldownInsteadOfBeingDeferred(t *testing.T) {
 	c.blockedUntil["example.test"] = time.Now().Add(40 * time.Millisecond)
 	c.blockMu.Unlock()
 
-	activeCtx := WithActiveScan(context.Background())
+	activeCtx := WithActiveScan(WithBackgroundDiscovery(context.Background()))
 	for i := 0; i < 1200; i++ {
 		if c.discoveryDeferred(activeCtx, "example.test") {
 			t.Fatalf("active target %d of 1200 was permanently deferred", i+1)
@@ -124,5 +124,62 @@ func TestActiveScanWaitsForWAFCooldownInsteadOfBeingDeferred(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed < 25*time.Millisecond {
 		t.Fatalf("active request ignored WAF cooldown: %s", elapsed)
+	}
+}
+
+func TestQueuedRequestGetsFullWireTimeoutAfterCooldown(t *testing.T) {
+	var wireDeadline time.Duration
+	c := pressureClient(t, pressureTransport(func(r *http.Request) (*http.Response, error) {
+		deadline, ok := r.Context().Deadline()
+		if !ok {
+			t.Fatal("wire request did not have a deadline")
+		}
+		wireDeadline = time.Until(deadline)
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("ok")), Request: r}, nil
+	}))
+	// Simulate another worker opening the circuit while this request is
+	// waiting for admission, after Do has already checked the host once.
+	transport := c.httpClient.Transport.(*WireTransport)
+	admit := transport.admit
+	transport.admit = func(ctx context.Context, host string) (func(), error) {
+		c.blockMu.Lock()
+		c.blockedUntil[host] = time.Now().Add(65 * time.Millisecond)
+		c.blockMu.Unlock()
+		return admit(ctx, host)
+	}
+	c.httpClient.Timeout = 10 * time.Millisecond
+	rr, err := c.Do(context.Background(), http.MethodGet, "https://example.test/queued", nil, nil)
+	if err != nil {
+		t.Fatalf("cooldown expired the wire timeout before the request: %v", err)
+	}
+	if wireDeadline < wireRequestTimeout-time.Second {
+		t.Fatalf("remaining wire timeout = %s", wireDeadline)
+	}
+	if rr.Response.Duration >= 65*time.Millisecond {
+		t.Fatalf("cooldown was reported as response latency: %s", rr.Response.Duration)
+	}
+	if got := c.TotalRequests(); got != 1 {
+		t.Fatalf("wire requests = %d, want 1", got)
+	}
+}
+
+func TestDeferredQueuedRequestDoesNotSpendBudget(t *testing.T) {
+	c := pressureClient(t, pressureTransport(func(r *http.Request) (*http.Response, error) {
+		t.Fatal("deferred request reached the network")
+		return nil, nil
+	}))
+	transport := c.httpClient.Transport.(*WireTransport)
+	transport.admit = func(_ context.Context, host string) (func(), error) {
+		c.recordHostBlock(host, time.Minute)
+		return func() {}, nil
+	}
+	reservations := 0
+	ctx := WithRequestBudget(WithBackgroundDiscovery(context.Background()), func() error {
+		reservations++
+		return nil
+	})
+	_, err := c.Do(ctx, http.MethodGet, "https://example.test/queued", nil, nil)
+	if !errors.Is(err, ErrHostDeferred) || c.TotalRequests() != 0 || reservations != 0 {
+		t.Fatalf("defer error = %v, physical attempts = %d, reservations = %d", err, c.TotalRequests(), reservations)
 	}
 }

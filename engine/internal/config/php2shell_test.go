@@ -18,6 +18,31 @@ func TestPHP2ShellActiveAcceptsExplicitLabHost(t *testing.T) {
 	}
 }
 
+func TestPHP2ShellActiveCanBeEnabledAfterDedicatedModeResolution(t *testing.T) {
+	cfg := DefaultScanConfig()
+	cfg.Targets = []string{"http://127.0.0.1:8080/index.php"}
+	if err := ApplyScanModes(&cfg, "php2shell"); err != nil {
+		t.Fatal(err)
+	}
+
+	// This is the CLI ordering: resolve --mode first, then enable the bounded
+	// active assessment that is implicit in the dedicated mode.
+	cfg.SetPHP2ShellActive(true)
+
+	if cfg.PassiveMode {
+		t.Fatal("dedicated active PHP2Shell mode remained passive")
+	}
+	if !cfg.OnlyPHP2Shell() || !cfg.AllowsModule("php2shell") || cfg.AllowsModule("sqli") {
+		t.Fatalf("dedicated module selection widened: %v", cfg.AllowedVulnerabilityClasses)
+	}
+	if cfg.EnableFuzzing || cfg.EnableOAST || cfg.EnableWAFDetection || cfg.EnableHeadlessCrawler || cfg.FollowRedirects {
+		t.Fatal("dedicated PHP2Shell mode re-enabled discovery or unrelated active phases")
+	}
+	if err := cfg.ValidatePHP2ShellOptions(); err != nil {
+		t.Fatalf("CLI-ordered dedicated mode rejected: %v", err)
+	}
+}
+
 func TestPHP2ShellActiveSupportsNormalFullScan(t *testing.T) {
 	cfg := DefaultScanConfig()
 	cfg.PHP2ShellActive = true

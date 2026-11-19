@@ -37,11 +37,8 @@ func (r *Runner) runPHP2Shell(ctx context.Context, target ScanTarget) []ModuleFi
 		return nil
 	}
 	rr, observed := observedResponse(ctx, target, false)
-	// Requests made by the dedicated PHP2Shell path still need to flow through
-	// the observation wrapper.  Otherwise the target-run accounting never sees
-	// the request/response, which makes an otherwise completed active check
-	// appear as a failed/empty module result in the CLI summary.
-	httpDoer := observedHTTP{r.client}
+	// The runner's client already records requests and responses.
+	httpDoer := r.client
 	if !observed {
 		// A full scan uses a previously observed root/index response when
 		// available. Otherwise make one direct GET to the selected root/index

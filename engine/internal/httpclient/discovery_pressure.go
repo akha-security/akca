@@ -10,10 +10,9 @@ import (
 var ErrHostDeferred = errors.New("active discovery deferred after WAF/rate-limit response")
 
 type discoveryPressureKey struct{}
-type activeScanKey struct{}
 
 func WithActiveScan(ctx context.Context) context.Context {
-	return context.WithValue(ctx, activeScanKey{}, true)
+	return context.WithValue(ctx, discoveryPressureKey{}, false)
 }
 
 func WithBackgroundDiscovery(ctx context.Context) context.Context {
@@ -22,22 +21,12 @@ func WithBackgroundDiscovery(ctx context.Context) context.Context {
 
 func (c *Client) discoveryDeferred(ctx context.Context, host string) bool {
 	background, _ := ctx.Value(discoveryPressureKey{}).(bool)
-	active, _ := ctx.Value(activeScanKey{}).(bool)
-	switch {
-	case background:
-		c.blockMu.Lock()
-		deferred := c.hostBlocks[host] > 0
-		c.blockMu.Unlock()
-		return deferred
-	case active:
-		// Active vulnerability checks must honor the host circuit cooldown and
-		// resume afterwards. Deferring them from the cumulative block counter
-		// made the second WAF/rate-limit response permanently suppress every
-		// later XSS, SQLi and other payload request for that host.
-		return false
-	default:
+	if !background {
 		return false
 	}
+	c.blockMu.Lock()
+	defer c.blockMu.Unlock()
+	return c.hostBlocks[host] > 0
 }
 
 func (c *Client) RecoverHost(ctx context.Context, rawURL string) error {
@@ -61,9 +50,10 @@ func (c *Client) RecoverHost(ctx context.Context, rawURL string) error {
 	}
 	c.recoveryAttempted[host] = true
 	c.blockMu.Unlock()
-	ctx = context.WithValue(ctx, discoveryPressureKey{}, false)
-	ctx = context.WithValue(ctx, activeScanKey{}, false)
-	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
+	// Leave enough time for the existing server cooldown and the recovery
+	// exchanges. The parent context still imposes the scan's time budget.
+	wait := c.HostCooldownRemaining(rawURL)
+	ctx, cancel := context.WithTimeout(WithActiveScan(ctx), 35*time.Second+wait)
 	defer cancel()
 	for i := 0; i < 3; i++ {
 		rr, err := c.Do(ctx, "GET", probe, nil, nil)

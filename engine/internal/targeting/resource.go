@@ -3,10 +3,11 @@
 package targeting
 
 import (
-	"github.com/akha-security/akca/engine/internal/urlutil"
 	"net/url"
 	"path"
 	"strings"
+
+	"github.com/akha-security/akca/engine/internal/urlutil"
 )
 
 type Resource struct {
@@ -14,6 +15,7 @@ type Resource struct {
 	Status                         int
 	DynamicInput                   bool // observed reflection, a captured body, or an explicit API contract
 	ForceActive                    bool
+	ResolvePathTemplate            bool // module supplies concrete values from an explicit policy
 }
 
 func IsChallenge(status int, body string) bool {
@@ -25,6 +27,15 @@ func IsChallenge(status int, body string) bool {
 	}
 	return (status == 403 || status == 429 || status == 503) &&
 		(strings.Contains(lower, "request blocked") || strings.Contains(lower, "web application firewall"))
+}
+
+func IsCloudflareInfrastructure(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	return err == nil && cloudflareInfrastructurePath(strings.ToLower(strings.TrimRight(u.Path, "/")))
+}
+
+func cloudflareInfrastructurePath(p string) bool {
+	return p == "/cdn-cgi/rum" || p == "/cdn-cgi/challenge-platform" || strings.HasPrefix(p, "/cdn-cgi/challenge-platform/")
 }
 
 // InactiveReason is independent of the module's payload budget or full-coverage
@@ -47,11 +58,17 @@ func InactiveReason(r Resource) string {
 			return "invalid or code-derived endpoint path"
 		}
 	}
+	if !r.ResolvePathTemplate && urlutil.HasPathTemplate(r.URL) {
+		return "route template requires a concrete path"
+	}
 	if r.ForceActive {
 		return ""
 	}
 	p := strings.ToLower(strings.TrimRight(u.Path, "/"))
 	base := path.Base(p)
+	if cloudflareInfrastructurePath(p) {
+		return "Cloudflare telemetry or challenge endpoint; passive inventory retained"
+	}
 	if base == "robots.txt" || (strings.HasPrefix(base, "sitemap") && strings.HasSuffix(base, ".xml")) ||
 		base == "openapi.json" || base == "swagger.json" || base == "asyncapi.json" || base == "package.json" || base == "package-lock.json" ||
 		p == "/.well-known" || strings.HasPrefix(p, "/.well-known/") {

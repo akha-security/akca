@@ -27,6 +27,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/events"
 	"github.com/akha-security/akca/engine/internal/findingtext"
 	"github.com/akha-security/akca/engine/internal/report"
+	"github.com/akha-security/akca/engine/internal/session"
 	"github.com/akha-security/akca/engine/internal/storage"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -1407,6 +1408,7 @@ type ConsoleWriter struct {
 	phaseInterrupted   bool
 	oastSeen           map[string]struct{}
 	moduleRequests     map[string]int
+	inputCoverage      map[string]string
 }
 
 func NewConsoleWriter() *ConsoleWriter {
@@ -1947,17 +1949,24 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 			cSky, rst, bCloud, rst, cMint, phaseLabel(phase), rst)
 
 	case "scan_finished":
+		status, label, color := "COMPLETE", "Scan complete", bMint
+		if outcome, _ := e.Payload["status"].(string); outcome == "partial" {
+			status, label, color = "PARTIAL", "Scan partial", bAmber
+		}
 		cw.mu.Lock()
 		cw.progressPercent = 100
-		cw.scanStatus = "COMPLETE"
+		cw.scanStatus = status
+		if _, ok := e.Payload["requests_sent"]; ok {
+			cw.requests = payloadInt(e.Payload, "requests_sent")
+		}
 		cw.scanActive = false
 		cw.mu.Unlock()
 		if !cw.interactive {
-			fmt.Fprintf(cw.outputWriter(), "SCAN COMPLETE duration=%s\n", cw.elapsed())
+			fmt.Fprintf(cw.outputWriter(), "SCAN %s duration=%s\n", status, cw.elapsed())
 			return nil
 		}
-		fmt.Fprintf(cw.outputWriter(), "\n%s◉%s  %sScan complete%s  %s◷ %s%s\n",
-			cMint, rst, bMint, rst, cSlate, cw.elapsed(), rst)
+		fmt.Fprintf(cw.outputWriter(), "\n%s◉%s  %s%s%s  %s◷ %s%s\n",
+			color, rst, color, label, rst, cSlate, cw.elapsed(), rst)
 
 	case "scan_stopping":
 		cw.mu.Lock()
@@ -2065,6 +2074,8 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		started := cw.phaseStarted[phase]
 		phaseIndex := cw.phaseIndex
 		interrupted := cw.phaseInterrupted
+		coverage := cw.inputCoverage[phase]
+		delete(cw.inputCoverage, phase)
 		cw.mu.Unlock()
 
 		duration := ""
@@ -2077,14 +2088,23 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		if status == "" {
 			status = "completed"
 		}
+		reason, _ := e.Payload["reason"].(string)
+		if status == "partial" && reason != "" {
+			reason = "  " + safeTerminalText(reason)
+		} else {
+			reason = ""
+		}
+		if coverage != "" {
+			reason += "  " + coverage
+		}
 		if !cw.interactive {
-			fmt.Fprintf(cw.outputWriter(), "PHASE %s name=%s duration=%s\n", strings.ToUpper(status), safeTerminalText(phaseEventLabel(phase, e.Payload)), shortDuration(elapsed))
+			fmt.Fprintf(cw.outputWriter(), "PHASE %s name=%s duration=%s%s\n", strings.ToUpper(status), safeTerminalText(phaseEventLabel(phase, e.Payload)), shortDuration(elapsed), reason)
 			return nil
 		}
 		label := phaseEventLabel(phase, e.Payload)
 		if status == "partial" || status == "inconclusive" || status == "skipped" || status == "blocked" {
-			fmt.Fprintf(cw.outputWriter(), "\033[1A\r\033[2K%s%02d%s  %s!%s  %s%s%s  %s%s%s%s\n",
-				cGhost, phaseIndex, rst, cAmber, rst, bCloud, label, rst, bAmber, strings.ToUpper(status), rst, duration)
+			fmt.Fprintf(cw.outputWriter(), "\033[1A\r\033[2K%s%02d%s  %s!%s  %s%s%s  %s%s%s%s%s\n",
+				cGhost, phaseIndex, rst, cAmber, rst, bCloud, label, rst, bAmber, strings.ToUpper(status), rst, duration, reason)
 			return nil
 		}
 		if status == "failed" {
@@ -2093,11 +2113,11 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 			return nil
 		}
 		if !interrupted {
-			fmt.Fprintf(cw.outputWriter(), "\033[1A\r\033[2K%s%02d%s  %s✓%s  %s%s%s  %sCOMPLETED%s%s\n",
-				cGhost, phaseIndex, rst, cMint, rst, bCloud, label, rst, bMint, rst, duration)
+			fmt.Fprintf(cw.outputWriter(), "\033[1A\r\033[2K%s%02d%s  %s✓%s  %s%s%s  %sCOMPLETED%s%s%s\n",
+				cGhost, phaseIndex, rst, cMint, rst, bCloud, label, rst, bMint, rst, duration, reason)
 		} else {
-			fmt.Fprintf(cw.outputWriter(), "    %s╰─%s %s✓ COMPLETED%s%s\n",
-				cGhost, rst, bMint, rst, duration)
+			fmt.Fprintf(cw.outputWriter(), "    %s╰─%s %s✓ COMPLETED%s%s%s\n",
+				cGhost, rst, bMint, rst, duration, reason)
 		}
 
 	// ── Progress messages ───────────────────────────────────────────────
@@ -2298,6 +2318,23 @@ func (cw *ConsoleWriter) handleEvent(e events.Event) error {
 		// attempts into the final counter without double-counting retries or
 		// duplicate event delivery.
 		module := strings.TrimSpace(safeTerminalText(fmt.Sprint(e.Payload["module"])))
+		switch module {
+		case "xss", "blind_xss", "sqli", "nosql":
+			if _, ok := e.Payload["endpoints_eligible"]; ok {
+				eligible := payloadInt(e.Payload, "endpoints_eligible")
+				attempted := payloadInt(e.Payload, "endpoints_attempted")
+				coverage := "no applicable inputs"
+				if eligible > 0 {
+					coverage = fmt.Sprintf("%d/%d eligible endpoints attempted (%d inputs)", attempted, eligible, payloadInt(e.Payload, "targets_eligible"))
+				}
+				cw.mu.Lock()
+				if cw.inputCoverage == nil {
+					cw.inputCoverage = make(map[string]string)
+				}
+				cw.inputCoverage["vuln_module_"+module] = coverage
+				cw.mu.Unlock()
+			}
+		}
 		attempted := payloadInt(e.Payload, "requests_attempted")
 		if module != "" && attempted > 0 {
 			cw.mu.Lock()
@@ -2590,17 +2627,22 @@ func printSummary(cw *ConsoleWriter, outPath string) {
 	elapsed := cw.elapsed()
 	interactive := cw.interactive
 	mode := cw.mode
+	status := cw.scanStatus
 	cw.mu.Unlock()
 
 	if !interactive || mode == "quiet" {
-		fmt.Fprintf(os.Stderr, "RESULT duration=%s detected=%d confirmed=%d suppressed=%d skipped=%d requests=%d payload_probes=%d oast_hits=%d coverage_warnings=%d report=%s\n",
-			elapsed, det, ver, suppressed, skipped, requests, payloadProbes, oastCallbacks, coverageGaps, safeTerminalText(outPath))
+		fmt.Fprintf(os.Stderr, "RESULT duration=%s status=%s detected=%d confirmed=%d suppressed=%d skipped=%d requests=%d payload_probes=%d oast_hits=%d coverage_warnings=%d report=%s\n",
+			elapsed, strings.ToLower(status), det, ver, suppressed, skipped, requests, payloadProbes, oastCallbacks, coverageGaps, safeTerminalText(outPath))
 		return
 	}
 
 	w := currentUIWidth()
+	color := cAmber
+	if status == "COMPLETE" {
+		color = cMint
+	}
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, panelTitle("SCAN COMPLETE", elapsed, w, cMint))
+	fmt.Fprintln(os.Stderr, panelTitle("SCAN "+status, elapsed, w, color))
 	fmt.Fprintln(os.Stderr, boxText(fmt.Sprintf(" %sFindings%s   %s%d confirmed%s  %s•%s  %s%d detected%s  %s•%s  %s%d suppressed%s",
 		cSlate, rst, bMint, ver, rst, cGhost, rst, cSilver, det, rst, cGhost, rst, cSlate, suppressed, rst), w))
 	fmt.Fprintln(os.Stderr, boxText(fmt.Sprintf(" %sCoverage%s   %s%d requests%s  %s•%s  %s%d payload probes%s  %s•%s  %s%d/%d OAST hits%s",
@@ -3125,7 +3167,7 @@ func runScanCommand(args []string) int {
 	// Full scans include the bounded PHP2Shell memory-signature assessment on
 	// explicitly configured origins. Passive and narrowly scoped module scans
 	// remain unaffected; the dedicated mode retains its historical behavior.
-	cfg.PHP2ShellActive = php2shellActive || cfg.OnlyPHP2Shell() || cfg.SmartScanProfile == "Full Scan"
+	cfg.SetPHP2ShellActive(php2shellActive || cfg.OnlyPHP2Shell() || cfg.SmartScanProfile == "Full Scan")
 	cfg.SkipAutoReport = true
 
 	if proxyURL != "" {
@@ -3304,6 +3346,20 @@ func runScanCommand(args []string) int {
 
 	// ── Wait for scan completion ────────────────────────────────────────
 	scanErr := engine.WaitScanDone(context.Background())
+	cw.mu.Lock()
+	switch {
+	case scanErr == nil:
+		cw.scanStatus = "COMPLETE"
+	case errors.Is(scanErr, session.ErrPartialScan):
+		cw.scanStatus = "PARTIAL"
+	case errors.Is(scanErr, context.Canceled):
+		cw.scanStatus = "STOPPED"
+	case errors.Is(scanErr, context.DeadlineExceeded):
+		cw.scanStatus = "TIMEOUT"
+	default:
+		cw.scanStatus = "FAILED"
+	}
+	cw.mu.Unlock()
 	if scanErr != nil && scanErr != context.Canceled {
 		cw.closeProgressLine()
 		printCLIStatus("error", "Scan error: "+scanErr.Error())

@@ -10,6 +10,18 @@ func (c ScanConfig) OnlyPHP2Shell() bool {
 	return len(c.AllowedVulnerabilityClasses) == 1 && strings.EqualFold(strings.TrimSpace(c.AllowedVulnerabilityClasses[0]), "php2shell")
 }
 
+// SetPHP2ShellActive applies the active-check decision after scan-mode
+// resolution. The CLI resolves --mode before it enables the dedicated active
+// assessment, so keeping this transition here prevents the mode's passive
+// discovery safeguards from being mistaken for a passive-only scan.
+func (c *ScanConfig) SetPHP2ShellActive(enabled bool) {
+	c.PHP2ShellActive = enabled
+	if enabled && c.OnlyPHP2Shell() {
+		c.PassiveMode = false
+	}
+	restrictPHP2ShellDiscovery(c)
+}
+
 // DiscoveryMetadataOnly skips parameter mutations and reflection even when the
 // explicitly enabled, isolated PHP2Shell lab check will run later.
 func (c ScanConfig) DiscoveryMetadataOnly() bool {

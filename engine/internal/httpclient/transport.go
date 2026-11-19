@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/akha-security/akca/engine/internal/ratelimit"
 )
@@ -29,7 +30,7 @@ func (c *Client) ReserveBrowserResource(ctx context.Context, rawURL, transport s
 		if err := c.waitForHostCircuit(ctx, u.Hostname()); err != nil {
 			return err
 		}
-		return reserveNetwork(ctx, u, c.limiter, &c.networkAttempts, c.cfg.RequestBudget)
+		return reserveNetwork(ctx, u, c.limiter, &c.networkAttempts, c.cfg.RequestBudget, nil)
 	}
 	return ErrOutsideScope
 }
@@ -86,6 +87,12 @@ type WireTransport struct {
 	admit           func(context.Context, string) (func(), error)
 }
 
+type wireExchangeKey struct{}
+
+type wireExchange struct {
+	wait time.Duration
+}
+
 func NewWireTransport(base http.RoundTripper, limiter *ratelimit.Limiter, counter *atomic.Int64, maxBudget int) *WireTransport {
 	if base == nil {
 		base = http.DefaultTransport
@@ -99,10 +106,19 @@ func NewWireTransport(base http.RoundTripper, limiter *ratelimit.Limiter, counte
 }
 
 func (w *WireTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	start := time.Now()
+	ctx := req.Context()
+	var recheck func() error
+	if w.hostGate != nil {
+		recheck = func() error { return w.hostGate(ctx, req.URL.Hostname()) }
+		if err := recheck(); err != nil {
+			return nil, err
+		}
+	}
 	release := func() {}
 	if w.admit != nil {
 		var err error
-		release, err = w.admit(req.Context(), req.URL.Hostname())
+		release, err = w.admit(ctx, req.URL.Hostname())
 		if err != nil {
 			return nil, err
 		}
@@ -113,31 +129,31 @@ func (w *WireTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			release()
 		}
 	}()
-	if w.hostGate != nil {
-		if err := w.hostGate(req.Context(), req.URL.Hostname()); err != nil {
-			return nil, err
-		}
-	}
-	if err := reserveNetwork(req.Context(), req.URL, w.limiter, w.networkAttempts, w.maxBudget); err != nil {
+	if err := reserveNetwork(ctx, req.URL, w.limiter, w.networkAttempts, w.maxBudget, recheck); err != nil {
 		return nil, err
 	}
-	// Re-check after the rate-limiter wait. Another request may have received a
-	// 429 while this one was queued; without this gate the reserved queue would
-	// continue draining into an already blocking WAF.
-	if w.hostGate != nil {
-		if err := w.hostGate(req.Context(), req.URL.Hostname()); err != nil {
-			return nil, err
+	finish := release
+	if exchange, ok := ctx.Value(wireExchangeKey{}).(*wireExchange); ok {
+		exchange.wait += time.Since(start)
+		wireCtx, cancel := context.WithTimeout(ctx, wireRequestTimeout)
+		req = req.WithContext(wireCtx)
+		finish = func() {
+			cancel()
+			release()
 		}
 	}
 	response, err := w.base.RoundTrip(req)
 	if err == nil && response != nil && response.Body != nil {
-		response.Body = &admissionBody{ReadCloser: response.Body, release: release}
+		response.Body = &admissionBody{ReadCloser: response.Body, release: finish}
+		transferred = true
+	} else {
+		finish()
 		transferred = true
 	}
 	return response, err
 }
 
-func reserveNetwork(ctx context.Context, u *url.URL, limiter *ratelimit.Limiter, counter *atomic.Int64, maxBudget int) error {
+func reserveNetwork(ctx context.Context, u *url.URL, limiter *ratelimit.Limiter, counter *atomic.Int64, maxBudget int, beforeCharge func() error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -148,6 +164,16 @@ func reserveNetwork(ctx context.Context, u *url.URL, limiter *ratelimit.Limiter,
 		if err := limiter.WaitContext(ctx, u.Hostname()); err != nil {
 			return err
 		}
+	}
+	// Pressure can start while workers wait for admission or rate tokens.
+	// Recheck before charging budgets for a request that may never be sent.
+	if beforeCharge != nil {
+		if err := beforeCharge(); err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := ReserveRequestBudget(ctx); err != nil {
 		return err
@@ -188,5 +214,7 @@ func (c *Client) ReserveExternal(ctx context.Context, rawURL, transport string) 
 	if err := c.waitForHostCircuit(ctx, u.Hostname()); err != nil {
 		return err
 	}
-	return reserveNetwork(ctx, u, c.limiter, &c.networkAttempts, c.cfg.RequestBudget)
+	return reserveNetwork(ctx, u, c.limiter, &c.networkAttempts, c.cfg.RequestBudget, func() error {
+		return c.waitForHostCircuit(ctx, u.Hostname())
+	})
 }

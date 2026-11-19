@@ -95,26 +95,14 @@ func MutateRequest(template RequestTemplate, param, location, value string) (Mut
 		setHeaderCI(headers, "Content-Type", "application/x-www-form-urlencoded")
 		return materialized(method, endpointURL, []byte(form.Encode()), headers)
 	case "json", "graphql", "websocket":
-		var doc interface{}
-		if body != "" {
-			decoder := json.NewDecoder(strings.NewReader(body))
-			decoder.UseNumber()
-			if err := decoder.Decode(&doc); err != nil {
-				return MutatedRequest{}, fmt.Errorf("decode JSON template: %w", err)
-			}
-			if err := decoder.Decode(new(interface{})); err != io.EOF {
-				return MutatedRequest{}, fmt.Errorf("JSON template contains trailing data")
-			}
-		} else {
-			doc = make(map[string]interface{})
+		doc, err := decodeProbeJSON(body)
+		if err != nil {
+			return MutatedRequest{}, err
 		}
-		normParam := strings.ReplaceAll(param, "[", ".")
-		normParam = strings.ReplaceAll(normParam, "]", "")
-		normParam = strings.Trim(normParam, ".")
 		if template.WireEncoding != "" && template.WireEncoding != "json_unicode" {
 			return MutatedRequest{}, fmt.Errorf("unsupported JSON wire encoding: %s", template.WireEncoding)
 		}
-		if setJSONPath(doc, strings.Split(normParam, "."), value, template.WireEncoding) {
+		if setJSONPath(doc, probeJSONPath(param), value, template.WireEncoding) {
 			mutated, err := json.Marshal(doc)
 			if err == nil {
 				if headerValueCI(headers, "Content-Type") == "" {
@@ -166,6 +154,41 @@ func MutateRequest(template RequestTemplate, param, location, value string) (Mut
 	// A failed mutation must never be retried on a different surface or with a
 	// reconstructed body: that would drop CSRF tokens, siblings and envelopes.
 	return MutatedRequest{}, fmt.Errorf("cannot mutate %q on %s request template", param, loc)
+}
+
+func decodeProbeJSON(body string) (interface{}, error) {
+	if body == "" {
+		return make(map[string]interface{}), nil
+	}
+	var doc interface{}
+	decoder := json.NewDecoder(strings.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(&doc); err != nil {
+		return nil, fmt.Errorf("decode JSON template: %w", err)
+	}
+	if err := decoder.Decode(new(interface{})); err != io.EOF {
+		return nil, fmt.Errorf("JSON template contains trailing data")
+	}
+	return doc, nil
+}
+
+func probeJSONPath(param string) []string {
+	param = strings.NewReplacer("[", ".", "]", "").Replace(param)
+	return strings.Split(strings.Trim(param, "."), ".")
+}
+
+// UnusableJSONInput filters legacy targets that point at an entire JSON
+// object/array instead of a mutable value. Unknown names are allowed when the
+// existing mutation path can add them to an object.
+func UnusableJSONInput(body, param, location string) bool {
+	switch strings.ToLower(strings.TrimSpace(location)) {
+	case "json", "graphql", "websocket":
+		if body != "" {
+			doc, err := decodeProbeJSON(body)
+			return err == nil && !setJSONPath(doc, probeJSONPath(param), "akca-probe")
+		}
+	}
+	return false
 }
 
 func mutateXMLBody(body, param, value string) ([]byte, bool) {

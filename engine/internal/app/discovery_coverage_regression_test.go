@@ -47,6 +47,12 @@ func TestInitialDiscoveryKeepsHiddenInputsOnQuerylessHandlers(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := db.SaveDiscoveredEndpoint(cfg.ScanID, map[string]interface{}{
+		"url": cfg.Targets[0] + "/cdn-cgi/rum", "method": "POST", "source": "browser_xhr",
+		"request_template": map[string]string{"body": "{\"timing\":1}", "content_type": "application/json"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	sc := scope.NewEngine(cfg)
 	client, err := httpclient.New(cfg, sc, nil)
 	if err != nil {
@@ -57,6 +63,13 @@ func TestInitialDiscoveryKeepsHiddenInputsOnQuerylessHandlers(t *testing.T) {
 	e := &Engine{db: db, session: session.NewScanSession(cfg), client: client, scope: sc, batcher: batcher}
 	if err := e.runParameterDiscoveryPhase(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	telemetryID, err := db.GetEndpointID(cfg.ScanID, cfg.Targets[0]+"/cdn-cgi/rum", "POST")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := db.CountParameters(telemetryID); err != nil || n != 0 {
+		t.Fatalf("telemetry leaked into parameter discovery: count=%d, err=%v", n, err)
 	}
 	runner := e.vulnModuleRunner()
 	defer runner.Close()

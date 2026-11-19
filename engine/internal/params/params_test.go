@@ -24,7 +24,7 @@ func TestPassiveExtractionSources(t *testing.T) {
 }
 
 func TestExtractJSONKeysIncludesNestedPaths(t *testing.T) {
-	keys := extractJSONKeys(`{"user":{"profile":{"email":"a@example.test"}},"items":[{"id":1}]}`)
+	keys := extractJSONKeys(`{"user":{"profile":{"email":"a@example.test"}},"items":[{"id":1}]}`, true)
 	for _, want := range []string{"user", "user.profile", "user.profile.email", "items.0.id"} {
 		if _, ok := keys[want]; !ok {
 			t.Fatalf("missing nested JSON path %q: %#v", want, keys)

@@ -1003,11 +1003,50 @@ func TestPhaseLifecycleShowsPartialInsteadOfCompleted(t *testing.T) {
 		Type: "phase_finished",
 		Payload: map[string]interface{}{
 			"phase": "vuln_module_backup_archives", "status": "partial",
+			"reason": "1 target deferred after WAF/rate-limit response",
 		},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if got := output.String(); !strings.Contains(got, "PARTIAL") || strings.Contains(got, "COMPLETED") {
+	if got := output.String(); !strings.Contains(got, "PARTIAL") || strings.Contains(got, "COMPLETED") ||
+		!strings.Contains(got, "1 target deferred") {
 		t.Fatalf("partial module status was hidden: %q", got)
+	}
+}
+
+func TestScanFinishedShowsPartialAndActualRequestCount(t *testing.T) {
+	for _, interactive := range []bool{true, false} {
+		var output bytes.Buffer
+		cw := NewConsoleWriter()
+		cw.out, cw.interactive, cw.requests = &output, interactive, 10
+		if err := cw.WriteEvent(events.Event{
+			Type: "scan_finished", Payload: map[string]interface{}{"status": "partial", "requests_sent": int64(42)},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if cw.scanStatus != "PARTIAL" || cw.requests != 42 || !strings.Contains(strings.ToLower(output.String()), "scan partial") {
+			t.Fatalf("partial completion changed into %q, %d requests: %q", cw.scanStatus, cw.requests, output.String())
+		}
+	}
+}
+
+func TestXSSPhaseShowsDistinctEndpointCoverage(t *testing.T) {
+	const phase = "vuln_module_xss"
+	var output bytes.Buffer
+	cw := NewConsoleWriter()
+	cw.out, cw.interactive = &output, false
+	for _, event := range []events.Event{
+		{Type: "phase_started", Payload: map[string]interface{}{"phase": phase}},
+		{Type: "vuln_module_finished", Payload: map[string]interface{}{
+			"module": "xss", "endpoints_eligible": 3, "endpoints_attempted": 2, "targets_eligible": 5,
+		}},
+		{Type: "phase_finished", Payload: map[string]interface{}{"phase": phase, "status": "completed"}},
+	} {
+		if err := cw.WriteEvent(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !strings.Contains(output.String(), "2/3 eligible endpoints attempted (5 inputs)") {
+		t.Fatalf("endpoint coverage missing from phase output: %s", output.String())
 	}
 }

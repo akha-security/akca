@@ -378,7 +378,7 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 			resultErr = ctx.Err()
 		} else if len(failedPhases) > 0 {
 			finalStatus = "partial"
-			resultErr = fmt.Errorf("scan completed with failed phases: %s", strings.Join(failedPhases, ", "))
+			resultErr = fmt.Errorf("%w: %s", session.ErrPartialScan, strings.Join(failedPhases, ", "))
 		}
 		var totalRequests int64
 		if e.client != nil {
@@ -844,7 +844,7 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 
 	if !cfg.SkipAutoReport {
 		e.checkpointPhase(cfg.ScanID, "report_generation", append([]string{}, completedList...), phaseStatus)
-		if err := e.runReportPhase(ctx, cfg.ScanID, false); err != nil {
+		if err := e.runReportPhase(ctx, cfg.ScanID, len(failedPhases) > 0); err != nil {
 			_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"scan_id": cfg.ScanID, "phase": "report_generation"})
 			markFailed("report_generation")
 		} else {
@@ -858,6 +858,7 @@ func (e *Engine) runScanPipeline(ctx context.Context, cfg config.ScanConfig, com
 	}
 	_ = e.Emit("scan_finished", "scan finished", map[string]interface{}{
 		"scan_id": cfg.ScanID, "status": status, "failed_phases": append([]string(nil), failedPhases...),
+		"requests_sent": e.client.TotalRequests(),
 	})
 	e.session.Stop()
 }

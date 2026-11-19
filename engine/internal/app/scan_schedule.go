@@ -1,17 +1,5 @@
 package app
 
-// Priority includes content already captured and input-specific checks. Broad
-// path discovery, proxy bypass and high-impact/stateful checks run afterwards.
-func priorityModule(name string) bool {
-	switch name {
-	case "security_headers", "cookie_security", "tls_misconfig", "sensitive_data", "secret_exposure", "vulnerable_components", "script_source",
-		"xss", "blind_xss", "sqli", "nosql", "ssti", "command_injection", "ssrf", "xxe", "lfi", "ldap", "xpath", "ldap_xpath_injection",
-		"idor", "bfla", "broken_auth", "improper_auth", "jwt", "oauth", "tenant_isolation", "csrf", "open_redirect", "hpp", "client_ssti":
-		return true
-	}
-	return false
-}
-
 func capturedContentModule(name string) bool {
 	switch name {
 	case "security_headers", "cookie_security", "sensitive_data", "secret_exposure", "script_source", "vulnerable_components":

@@ -41,16 +41,18 @@ func (e *Engine) runFuzzingPhase(ctx context.Context, targets []string) (phaseEr
 	}
 
 	hintsByHost := e.fuzzTechHints(fuzzBases)
-	if err := fe.RunWithHints(ctx, fuzzBases, hintsByHost); err != nil {
-		if ctx.Err() != nil {
-			return err
+	for _, base := range fuzzBases {
+		// Give a transient block a chance to clear before the background
+		// engine starts walking the dictionary. Its own pressure guard
+		// still defers hosts that do not recover.
+		if e.client.HostUnderPressure(base) {
+			_ = e.client.RecoverHost(ctx, base)
 		}
-		_ = e.Emit("coverage_gap", "fuzzing phase incomplete: "+err.Error(), map[string]interface{}{
-			"scan_id": e.session.ID, "phase": "fuzzing",
-		})
-		return err
 	}
-	return nil
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return fe.RunWithHints(ctx, fuzzBases, hintsByHost)
 }
 
 func uniqueFuzzBases(targets []string) []string {

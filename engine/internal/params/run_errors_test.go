@@ -123,6 +123,22 @@ func TestRejectedDiscoveryBaselineIsRemovedFromScannerTargets(t *testing.T) {
 	}
 }
 
+func TestTransientDiscoveryBaselineKeepsObservedInputs(t *testing.T) {
+	const scanID = "transient-baseline"
+	const endpointURL = "https://example.test/api/search?q=one"
+	d := newRunErrorDiscoverer(t, scanID, []string{endpointURL}, nil)
+	d.client = integrityHTTPClient(func(_ context.Context, method, rawURL string, _ []byte, _ map[string]string) (httpclient.RequestResponse, error) {
+		return integrityResponse(method, rawURL, "try later", "text/plain", http.StatusTooManyRequests), nil
+	})
+	if err := d.Run(context.Background(), 1); err == nil {
+		t.Fatal("blocked baseline was not reported")
+	}
+	targets, err := d.db.ListParameterTargets(scanID, 0)
+	if err != nil || len(targets) != 1 || targets[0].Parameter != "q" {
+		t.Fatalf("temporary discovery failure removed known input: %+v, %v", targets, err)
+	}
+}
+
 func TestParameterDiscoveryErrorClass(t *testing.T) {
 	tests := []struct {
 		err  error

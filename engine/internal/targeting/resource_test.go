@@ -17,6 +17,11 @@ func TestResourceClassificationPreservesDynamicAndPassiveCoverage(t *testing.T) 
 		{Resource{URL: "https://example.test/assets", Status: 404, ForceActive: true}, true},
 		{Resource{URL: "https://example.test/search", Status: 403, Body: "checking your browser"}, true},
 		{Resource{URL: "https://example.test/api/preview?url=https://origin.test"}, false},
+		{Resource{URL: "https://example.test/cdn-cgi/rum?token=example", Method: "POST", DynamicInput: true}, true},
+		{Resource{URL: "https://example.test/cdn-cgi/challenge-platform/check", DynamicInput: true}, true},
+		{Resource{URL: "https://example.test/cdn-cgi/rum", ForceActive: true}, false},
+		{Resource{URL: "https://example.test/api/item/[id]", ForceActive: true}, true},
+		{Resource{URL: "https://example.test/api/rum", DynamicInput: true}, false},
 	} {
 		if got := InactiveReason(tc.resource) != ""; got != tc.inactive {
 			t.Errorf("%+v inactive=%v, want=%v", tc.resource, got, tc.inactive)

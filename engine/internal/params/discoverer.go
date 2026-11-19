@@ -84,8 +84,6 @@ func NewDiscoverer(scanID string, client HTTPDoer, scopeEngine *scope.Engine, db
 }
 
 func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, endpointURL, method string, templates ...storage.DiscoveryRequestTemplate) ([]DiscoveredParameter, error) {
-	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
-	defer cancel()
 	if !urlutil.IsPlausibleEndpointURL(endpointURL) || !d.scope.IsInScope(endpointURL) {
 		return nil, nil
 	}
@@ -97,10 +95,17 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 	if len(templates) > 0 {
 		template = templates[0]
 	}
-	if !discoverableResource(endpointURL, method, template) && !targeting.ForcedURL(endpointURL, d.forceURLs) {
+	forced := targeting.ForcedURL(endpointURL, d.forceURLs)
+	if !discoverableResource(endpointURL, method, template, forced) {
 		return nil, nil
 	}
 	requestURL, requestBody, requestHeaders := nativeRequest(endpointURL, method, template)
+	window := 90 * time.Second
+	if client, ok := d.client.(interface{ HostCooldownRemaining(string) time.Duration }); ok {
+		window += max(0, client.HostCooldownRemaining(requestURL))
+	}
+	ctx, cancel := context.WithTimeout(ctx, window)
+	defer cancel()
 	if (method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch) &&
 		strings.TrimSpace(template.Body) == "" &&
 		(nativeBodyLocation(headerValue(requestHeaders, "Content-Type"), "") == LocationJSON ||
@@ -118,12 +123,14 @@ func (d *Discoverer) DiscoverEndpoint(ctx context.Context, endpointID int64, end
 	if err != nil {
 		return nil, err
 	}
-	if baselineRR.Response.StatusCode == http.StatusNotFound || baselineRR.Response.StatusCode == http.StatusGone ||
-		baselineRR.Response.StatusCode == http.StatusTooManyRequests || baselineRR.Response.StatusCode >= 500 {
+	if baselineRR.Response.StatusCode == http.StatusNotFound || baselineRR.Response.StatusCode == http.StatusGone {
 		if err := d.db.SaveEndpointResponseStatus(endpointID, baselineRR.Response.StatusCode); err != nil {
 			return nil, fmt.Errorf("record rejected endpoint status: %w", err)
 		}
 		return nil, nil
+	}
+	if baselineRR.Response.WAFBlocked || baselineRR.Response.StatusCode == http.StatusTooManyRequests || baselineRR.Response.StatusCode >= 500 {
+		return nil, fmt.Errorf("parameter baseline blocked or unavailable: HTTP %d", baselineRR.Response.StatusCode)
 	}
 	contentType := headerValue(baselineRR.Response.Headers, "Content-Type")
 	if reason := targeting.InactiveReason(targeting.Resource{URL: requestURL, Method: method, Status: baselineRR.Response.StatusCode,
@@ -640,9 +647,9 @@ func (d *Discoverer) do(ctx context.Context, method, rawURL string, body []byte,
 	if budget, ok := ctx.Value(parameterBudgetKey{}).(*parameterProbeBudget); ok && !budget.reserve() {
 		return httpclient.RequestResponse{}, errParameterProbeBudget
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	rr, err := d.client.Do(requestCtx, method, rawURL, body, headers)
+	// The live client bounds wire time separately from traffic queues and
+	// host cooldowns. The endpoint context bounds the whole discovery pass.
+	rr, err := d.client.Do(ctx, method, rawURL, body, headers)
 	if errors.Is(err, httpclient.ErrHostDeferred) {
 		d.deferred.Store(true)
 	}
@@ -882,6 +889,10 @@ func (d *Discoverer) Run(ctx context.Context, limit int) error {
 	// them for every concrete endpoint variant without sending any request. This
 	// also means an existing ?id=1 is excluded from the active candidate list.
 	for _, endpoint := range allEndpoints {
+		if urlutil.HasPathTemplate(endpoint.URL) ||
+			(targeting.IsCloudflareInfrastructure(endpoint.URL) && !targeting.ForcedURL(endpoint.URL, d.forceURLs)) {
+			continue
+		}
 		// Captured native bodies/forms are available without active guessing.
 		for _, p := range ExtractFromTemplateBody(endpoint.URL, endpoint.Method, endpoint.RequestTemplate.ContentType, endpoint.RequestTemplate.Body) {
 			if err := d.persist(endpoint.ID, p); err != nil {
@@ -1064,6 +1075,8 @@ func parameterDiscoveryErrorClass(err error) string {
 	}
 	lower := strings.ToLower(err.Error())
 	switch {
+	case strings.HasPrefix(lower, "parameter baseline blocked or unavailable:"):
+		return "baseline_unavailable"
 	case strings.Contains(lower, "request budget"), strings.Contains(lower, "budget exhausted"):
 		return "budget_exhausted"
 	case strings.Contains(lower, "too many redirects"), strings.Contains(lower, "redirect loop"):

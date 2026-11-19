@@ -86,6 +86,9 @@ func (a *Analyzer) Run(ctx context.Context, limit int) ([]ReflectionProfile, err
 		if seen[target.EndpointURL+"\x00"+target.Method+"\x00"+target.Parameter+"\x00"+target.Location] {
 			continue
 		}
+		if UnusableJSONInput(target.BodyTemplate, target.Parameter, target.Location) {
+			continue
+		}
 		ct := ""
 		for name, value := range target.ResponseHeaders {
 			if strings.EqualFold(name, "Content-Type") {

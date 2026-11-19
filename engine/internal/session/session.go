@@ -1,11 +1,15 @@
 package session
 
 import (
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/akha-security/akca/engine/internal/config"
 )
+
+// ErrPartialScan indicates that a scan finished with incomplete phases.
+var ErrPartialScan = errors.New("scan completed with failed phases")
 
 type Status string
 

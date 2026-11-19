@@ -6,7 +6,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/akha-security/akca/engine/internal/httpclient"
 	"github.com/akha-security/akca/engine/internal/modules"
 )
 
@@ -229,33 +228,25 @@ func (e *Engine) runVulnModulesStage(ctx context.Context, stage string) error {
 			"phase": phase, "module": item.name, "module_index": moduleIndex, "module_total": moduleTotal,
 			"new_inputs": stage == "followup" && initialModule(item.name),
 		})
-		moduleCtx := ctx
-		if !priorityModule(item.name) {
-			moduleCtx = httpclient.WithBackgroundDiscovery(ctx)
-		}
-		findings, err := runner.RunModule(moduleCtx, item.name, pending)
-		status := "completed"
-		if err != nil {
-			if errors.Is(err, modules.ErrModuleAssessmentInconclusive) {
-				// The assessment ran, but could not establish exposure. Its
-				// coverage event remains visible without calling this a failure
-				// or, worse, a successful negative vulnerability check.
-				status = "inconclusive"
-			} else if errors.Is(err, modules.ErrModuleCoverageIncomplete) {
-				hasCoverageGap = true
-				status = "partial"
-			} else {
-				hasError = true
-				status = "failed"
-				_ = e.Emit("scan_error", err.Error(), map[string]interface{}{"phase": phase, "module": item.name})
-			}
-		} else if outcome := runner.LastModuleStatus(item.name); outcome == "skipped" || outcome == "blocked" {
-			status = outcome
+		findings, err := runner.RunModule(ctx, item.name, pending)
+		status := runner.LastModuleStatus(item.name)
+		var reason string
+		switch {
+		case errors.Is(err, modules.ErrModuleCoverageIncomplete):
+			hasCoverageGap = true
+			reason = err.Error()
+		case errors.Is(err, modules.ErrModuleAssessmentInconclusive):
+			reason = err.Error()
+		case err != nil && ctx.Err() == nil:
+			hasError = true
+			status = "failed"
+			reason = err.Error()
+			_ = e.Emit("scan_error", reason, map[string]interface{}{"phase": phase, "module": item.name})
 		}
 		_ = e.Emit("phase_finished", item.title, map[string]interface{}{
 			"phase": phase, "module": item.name, "findings": len(findings),
 			"module_index": moduleIndex, "module_total": moduleTotal, "status": status,
-			"new_inputs": stage == "followup" && initialModule(item.name),
+			"new_inputs": stage == "followup" && initialModule(item.name), "reason": reason,
 		})
 		cat := modules.ModuleCategory(item.name)
 		if stage != "priority" && lastModuleForCategory[cat] == moduleOffset {

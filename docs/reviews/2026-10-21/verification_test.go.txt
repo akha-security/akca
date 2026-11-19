@@ -1,0 +1,474 @@
+// Temporary audit probes, archived after verification on 2026-10-21.
+// Copy to engine/auditverification/audit_test.go to run against the reviewed tree.
+package auditverification
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/akha-security/akca/engine/internal/app"
+	"github.com/akha-security/akca/engine/internal/browserpool"
+	"github.com/akha-security/akca/engine/internal/config"
+	"github.com/akha-security/akca/engine/internal/distributed"
+	"github.com/akha-security/akca/engine/internal/events"
+	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/ratelimit"
+	"github.com/akha-security/akca/engine/internal/report"
+	"github.com/akha-security/akca/engine/internal/scanapi"
+	"github.com/akha-security/akca/engine/internal/scope"
+	"github.com/akha-security/akca/engine/internal/storage"
+)
+
+const token = "audit-verification-token-123456789"
+
+type fakeEngine struct {
+	start func(config.ScanConfig) error
+	wait  func(context.Context) error
+}
+
+func (f fakeEngine) StartScan(c config.ScanConfig) error {
+	if f.start != nil {
+		return f.start(c)
+	}
+	return nil
+}
+func (f fakeEngine) WaitScanDone(c context.Context) error {
+	if f.wait != nil {
+		return f.wait(c)
+	}
+	return nil
+}
+func (f fakeEngine) StopScan() error                               { return nil }
+func (f fakeEngine) GenerateReport(report.Options) ([]byte, error) { return []byte(`{}`), nil }
+func call(h http.Handler, method, path, body, auth string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Authorization", auth)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+func TestAuditAPIAuth(t *testing.T) {
+	s, _ := scanapi.New(fakeEngine{}, token)
+	if w := call(s.Handler(), "GET", "/v1/health", "", token); w.Code != 200 {
+		t.Fatalf("bare token code=%d", w.Code)
+	}
+	s, err := scanapi.New(fakeEngine{}, token+"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := call(s.Handler(), "GET", "/v1/health", "", "Bearer "+token); w.Code != 401 {
+		t.Fatalf("newline token code=%d", w.Code)
+	}
+	t.Log("bare token accepted; configured token with trailing newline rejects normal Bearer request")
+}
+func TestAuditAPIPartial(t *testing.T) {
+	s, _ := scanapi.New(fakeEngine{wait: func(context.Context) error { return errors.New("scan completed with failed phases: crawling") }}, token)
+	call(s.Handler(), "POST", "/v1/scans", `{"targets":["https://example.test"]}`, "Bearer "+token)
+	until := time.Now().Add(time.Second)
+	for time.Now().Before(until) {
+		w := call(s.Handler(), "GET", "/v1/scans/current", "", "Bearer "+token)
+		if strings.Contains(w.Body.String(), `"failed"`) {
+			t.Log(w.Body.String())
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("expected failed status")
+}
+func TestAuditAPIConcurrentStart(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var active atomic.Bool
+	s, _ := scanapi.New(fakeEngine{start: func(config.ScanConfig) error {
+		if active.Swap(true) {
+			return errors.New("a scan is already running")
+		}
+		close(entered)
+		<-release
+		return nil
+	}}, token)
+	first := make(chan struct{})
+	go func() { call(s.Handler(), "POST", "/v1/scans", `{}`, "Bearer "+token); close(first) }()
+	<-entered
+	current := call(s.Handler(), "GET", "/v1/scans/current", "", "Bearer "+token)
+	second := call(s.Handler(), "POST", "/v1/scans", `{}`, "Bearer "+token)
+	stop := call(s.Handler(), "POST", "/v1/scans/current/stop", `{}`, "Bearer "+token)
+	close(release)
+	<-first
+	if second.Code != 400 || stop.Code != 409 || !strings.Contains(current.Body.String(), `"idle"`) {
+		t.Fatalf("second=%d stop=%d current=%s", second.Code, stop.Code, current.Body.String())
+	}
+	t.Log("during blocked startup: current=idle, second start=400, stop=409")
+}
+func TestAuditAPIBodyLimit(t *testing.T) {
+	s, _ := scanapi.New(fakeEngine{}, token)
+	large := `{"targets":["https://example.test/` + strings.Repeat("a", 1<<20) + `"]}`
+	w := call(s.Handler(), "POST", "/v1/scans", large, "Bearer "+token)
+	if w.Code != 400 {
+		t.Fatalf("large code=%d", w.Code)
+	}
+	t.Logf("oversize status=%d body=%s", w.Code, w.Body.String())
+	padded := `{}` + strings.Repeat(" ", (1<<20)-2) + `{"unexpected":"second document"}`
+	w = call(s.Handler(), "POST", "/v1/scans", padded, "Bearer "+token)
+	if w.Code != 202 {
+		t.Fatalf("padded code=%d %s", w.Code, w.Body.String())
+	}
+	t.Log("second JSON beyond 1 MiB silently ignored; start accepted")
+}
+func TestAuditLimiter(t *testing.T) {
+	l := ratelimit.New(20, 10)
+	l.SetWAFSlowDown(5)
+	l.SetWAFSlowDown(3)
+	_, _, m := l.Rates()
+	if m != 3 {
+		t.Fatal(m)
+	}
+	l.SetRates(10, 5)
+	_, _, m = l.Rates()
+	if m != 1 {
+		t.Fatal(m)
+	}
+	t.Log("slowdown 5 -> 3; SetRates -> 1")
+}
+
+type roundTripper func(*http.Request) (*http.Response, error)
+
+func (f roundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type badBody struct{}
+
+func (badBody) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+func (badBody) Close() error             { return nil }
+func TestAuditHTTPClient(t *testing.T) {
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"example.test"}
+	cfg.GlobalRateLimit = 0
+	cfg.PerHostRateLimit = 0
+	cfg.SessionCookies = map[string]string{"session": "test"}
+	cfg.CustomHeaders = map[string]string{"Authorization": "Bearer test"}
+	var cookie, auth string
+	cfg.TestRoundTripper = roundTripper(func(r *http.Request) (*http.Response, error) {
+		cookie = r.Header.Get("Cookie")
+		auth = r.Header.Get("Authorization")
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("ok"))}, nil
+	})
+	c, _ := httpclient.New(cfg, scope.NewEngine(cfg), nil)
+	c.SetSession(map[string]string{}, map[string]string{})
+	_, err := c.Do(context.Background(), "GET", "https://example.test/", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cookie != "" || auth != "" {
+		t.Fatal("empty maps failed to clear")
+	}
+	t.Log("empty maps CAN clear cookies and headers")
+	cfg.TestRoundTripper = roundTripper(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 201, Header: http.Header{"X-Test": []string{"present"}}, Body: badBody{}}, nil
+	})
+	c, _ = httpclient.New(cfg, scope.NewEngine(cfg), nil)
+	rr, err := c.Do(context.Background(), "GET", "https://example.test/", nil, nil)
+	if err == nil || rr.Response.StatusCode != 0 {
+		t.Fatalf("response=%+v err=%v", rr, err)
+	}
+	t.Log("body read error discards status 201 and response headers")
+	c, _ = httpclient.New(cfg, nil, nil)
+	panicked := false
+	func() {
+		defer func() { panicked = recover() != nil }()
+		_, _ = c.Do(context.Background(), "GET", "https://example.test/", nil, nil)
+	}()
+	if !panicked {
+		t.Fatal("expected nil scope panic")
+	}
+	t.Log("New accepts nil scope; Do panics")
+}
+func openDB(t *testing.T) *storage.DB {
+	t.Helper()
+	db, err := storage.Open(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err = db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+func TestAuditDistributedScope(t *testing.T) {
+	db := openDB(t)
+	c := distributed.NewCoordinator(db, time.Second)
+	cases := []struct {
+		rule, target string
+		allowed      bool
+	}{
+		{"https://x.test/api", "https://x.test/api/../admin", true},
+		{"x.test", "https://x.test:9443/", true},
+		{"x.test:9443", "https://x.test:9443/", false},
+		{"*.x.test", "https://x.test/", false},
+	}
+	for _, tc := range cases {
+		_, err := c.Enqueue(distributed.Spec{IdempotencyKey: tc.rule, Type: distributed.JobCrawl, ScanID: "audit", Payload: json.RawMessage(`{}`), Scope: []string{tc.rule}, RateLimitRPS: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := distributed.Worker{ID: "audit", Coordinator: c, Handlers: map[distributed.JobType]distributed.Handler{distributed.JobCrawl: func(ctx context.Context, j distributed.Job, k *distributed.Controls) error {
+			got := k.AuthorizeURL(tc.target) == nil
+			if got != tc.allowed {
+				t.Fatalf("rule=%s target=%s allowed=%v", tc.rule, tc.target, got)
+			}
+			t.Logf("rule=%s target=%s allowed=%v", tc.rule, tc.target, got)
+			return nil
+		}}}
+		if err = w.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.DefaultScanConfig()
+	cfg.IncludeDomains = []string{"*.x.test"}
+	cfg.ExcludedPaths = []string{"/admin/logout"}
+	s := scope.NewEngine(cfg)
+	for _, p := range []string{"/Admin/logout", "//admin/logout", "/admin/./logout"} {
+		if !s.IsInScope("https://x.test" + p) {
+			t.Fatal(p)
+		}
+		t.Logf("main scope accepts excluded-path variant %s", p)
+	}
+	if s.IsInScope("https://x.test/admin/logout") {
+		t.Fatal("exact excluded path should fail")
+	}
+	t.Log("main wildcard scope accepts apex x.test, distributed wildcard rejects apex")
+}
+func TestAuditDistributedIdempotency(t *testing.T) {
+	db := openDB(t)
+	c := distributed.NewCoordinator(db, time.Second)
+	spec := distributed.Spec{IdempotencyKey: "same", Type: distributed.JobCrawl, ScanID: "audit", Payload: json.RawMessage(`{"a":1}`), Scope: []string{"x.test"}, RateLimitRPS: 10}
+	id, err := c.Enqueue(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec.Payload = json.RawMessage(`{"a":2}`)
+	again, err := c.Enqueue(spec)
+	if err != nil || id != again {
+		t.Fatalf("id=%s again=%s err=%v", id, again, err)
+	}
+	j, _ := c.Get(id)
+	if string(j.Payload) != `{"a":1}` {
+		t.Fatal(string(j.Payload))
+	}
+	t.Log("same key + different payload returns old job without conflict")
+	a := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
+	b := a.Add(100 * time.Millisecond)
+	var less bool
+	err = db.Conn().QueryRow(`SELECT ? < ?`, a.Format(time.RFC3339Nano), b.Format(time.RFC3339Nano)).Scan(&less)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if less {
+		t.Fatal("expected reversed lexical ordering")
+	}
+	t.Logf("earlier=%s later=%s SQL earlier<later=%v", a.Format(time.RFC3339Nano), b.Format(time.RFC3339Nano), less)
+}
+func TestAuditDistributedPanic(t *testing.T) {
+	db := openDB(t)
+	c := distributed.NewCoordinator(db, time.Second)
+	id, err := c.Enqueue(distributed.Spec{IdempotencyKey: "panic", Type: distributed.JobReport, ScanID: "audit", Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := distributed.Worker{ID: "audit", Coordinator: c, Handlers: map[distributed.JobType]distributed.Handler{distributed.JobReport: func(context.Context, distributed.Job, *distributed.Controls) error { panic("fixture") }}}
+	panicked := false
+	func() { defer func() { panicked = recover() != nil }(); _ = w.RunOnce(context.Background()) }()
+	if !panicked {
+		t.Fatal("expected propagated panic")
+	}
+	j, _ := c.Get(id)
+	t.Logf("handler panic propagates; job status=%s", j.Status)
+}
+
+func TestAuditTransientHeartbeatErrorCancelsHandler(t *testing.T) {
+	db := openDB(t)
+	c := distributed.NewCoordinator(db, 150*time.Millisecond)
+	_, err := c.Enqueue(distributed.Spec{IdempotencyKey: "heartbeat", Type: distributed.JobReport, ScanID: "audit", Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Conn().Exec(`CREATE TRIGGER audit_heartbeat BEFORE UPDATE ON distributed_jobs WHEN NEW.status='running' BEGIN SELECT RAISE(ABORT,'temporary fixture failure'); END;`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled := false
+	w := distributed.Worker{ID: "audit", Coordinator: c, Handlers: map[distributed.JobType]distributed.Handler{
+		distributed.JobReport: func(ctx context.Context, _ distributed.Job, _ *distributed.Controls) error {
+			select {
+			case <-ctx.Done():
+				canceled = true
+				return ctx.Err()
+			case <-time.After(time.Second):
+				return errors.New("monitor did not cancel")
+			}
+		},
+	}}
+	_ = w.RunOnce(context.Background())
+	if !canceled {
+		t.Fatal("expected heartbeat storage error to cancel handler")
+	}
+	t.Log("one heartbeat storage error cancels handler without distinguishing lease loss")
+}
+
+type apiJobs struct {
+	fakeEngine
+	c *distributed.Coordinator
+}
+
+func (f apiJobs) EnqueueDistributedJob(s distributed.Spec) (string, error) { return f.c.Enqueue(s) }
+func (f apiJobs) LeaseDistributedJob(w string) (distributed.Job, error)    { return f.c.Lease(w) }
+func (f apiJobs) GetDistributedJob(id string) (distributed.Job, error)     { return f.c.Get(id) }
+func (f apiJobs) HeartbeatDistributedJob(id, w string) error               { return f.c.Heartbeat(id, w) }
+func (f apiJobs) CheckpointDistributedJob(id, w string, v json.RawMessage) error {
+	return f.c.Checkpoint(id, w, v)
+}
+func (f apiJobs) CompleteDistributedJob(id, w string) error  { return f.c.Complete(id, w) }
+func (f apiJobs) FailDistributedJob(id, w, msg string) error { return f.c.Fail(id, w, errors.New(msg)) }
+func (f apiJobs) CancelDistributedJob(id string) error       { return f.c.Cancel(id) }
+func TestAuditWorkerIdentityNotBoundToToken(t *testing.T) {
+	db := openDB(t)
+	c := distributed.NewCoordinator(db, time.Second)
+	id, err := c.Enqueue(distributed.Spec{IdempotencyKey: "identity", Type: distributed.JobReport, ScanID: "audit", Payload: json.RawMessage(`{"private":"fixture"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.Lease("worker-A"); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := scanapi.New(apiJobs{c: c}, token)
+	got := call(s.Handler(), "GET", "/v1/jobs/"+id, "", "Bearer "+token)
+	if got.Code != 200 || !strings.Contains(got.Body.String(), `"owner_id":"worker-A"`) {
+		t.Fatal(got.Body.String())
+	}
+	completed := call(s.Handler(), "POST", "/v1/jobs/"+id+"/complete", `{"worker_id":"worker-A"}`, "Bearer "+token)
+	if completed.Code != 200 {
+		t.Fatalf("complete=%d %s", completed.Code, completed.Body.String())
+	}
+	t.Log("API token holder can read job owner and complete it using that claimed worker_id")
+}
+func TestAuditBrowserIdleWrites(t *testing.T) {
+	db := openDB(t)
+	_, err := db.Conn().Exec(`CREATE TABLE audit_counter(n INTEGER); INSERT INTO audit_counter VALUES(0); CREATE TRIGGER audit_insert AFTER INSERT ON browser_worker_health BEGIN UPDATE audit_counter SET n=n+1; END; CREATE TRIGGER audit_update AFTER UPDATE ON browser_worker_health BEGIN UPDATE audit_counter SET n=n+1; END;`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := browserpool.NewPool(db, 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer p.Stop()
+	p.Start(ctx)
+	time.Sleep(350 * time.Millisecond)
+	var n int
+	if err = db.Conn().QueryRow(`SELECT n FROM audit_counter`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n < 2 {
+		t.Fatalf("writes=%d", n)
+	}
+	t.Logf("2 idle workers made %d DB writes in 350ms", n)
+}
+func TestAuditFutureSchemaAndSingleConnection(t *testing.T) {
+	db := openDB(t)
+	_, err := db.Conn().Exec(`INSERT INTO schema_migrations(version,description) VALUES(9999,'future')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("future schema version 9999 accepted")
+	rows, err := db.Conn().Query(`SELECT version FROM schema_migrations`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	var n int
+	err = db.Conn().QueryRowContext(ctx, `SELECT 1`).Scan(&n)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("nested query err=%v", err)
+	}
+	t.Log("second query waits for connection while rows remain open; timeout prevents indefinite wait")
+}
+
+type discardWriter struct{}
+
+func (discardWriter) WriteEvent(events.Event) error { return nil }
+func TestAuditEngineStartupAndIdleStop(t *testing.T) {
+	old := storage.SetDataDirOverride(t.TempDir())
+	defer storage.SetDataDirOverride(old)
+	e, err := app.New(discardWriter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if err = e.StopScan(); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := e.Snapshot()
+	if !strings.Contains(string(raw), `"status":"stopping"`) {
+		t.Fatal(string(raw))
+	}
+	t.Log("idle StopScan changes session to stopping")
+	entered, release := make(chan struct{}), make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(entered); <-release; w.WriteHeader(401) }))
+	defer srv.Close()
+	cfg := config.DefaultScanConfig()
+	cfg.ScanID = "audit-failed-start"
+	cfg.Targets = []string{srv.URL}
+	cfg.LoginCredentials = &config.LoginCredentials{LoginURL: srv.URL, Username: "audit", Password: "audit"}
+	cfg.EnableRuntimeSensor = false
+	cfg.EnableBrowserWorkerPool = false
+	cfg.EnableOAST = false
+	cfg.Explicit.EnableOAST = true
+	started := make(chan error, 1)
+	go func() { started <- e.StartScan(cfg) }()
+	select {
+	case <-entered:
+	case err := <-started:
+		t.Fatalf("startup returned before login request: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("login request did not arrive")
+	}
+	snapDone := make(chan struct{})
+	go func() { _, _ = e.Snapshot(); close(snapDone) }()
+	blocked := false
+	select {
+	case <-snapDone:
+	case <-time.After(100 * time.Millisecond):
+		blocked = true
+	}
+	close(release)
+	err = <-started
+	<-snapDone
+	if !blocked || err == nil {
+		t.Fatalf("snapshot blocked=%v startErr=%v", blocked, err)
+	}
+	var status string
+	if err = e.DB().Conn().QueryRow(`SELECT status FROM scans WHERE id=?`, cfg.ScanID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = e.Snapshot()
+	if status != "running" || !strings.Contains(string(raw), `"status":"running"`) {
+		t.Fatalf("db=%s session=%s", status, raw)
+	}
+	if err = e.WaitScanDone(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("login blocks Snapshot; failed start leaves DB/session running, WaitScanDone immediately returns nil")
+}

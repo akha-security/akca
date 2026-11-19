@@ -288,6 +288,27 @@ func TestRoutinePluginSkipDoesNotAloneMarkReportPartial(t *testing.T) {
 	}
 }
 
+func TestReportRetainsCoverageGapAfterLargeTargetTimeline(t *testing.T) {
+	db, scanID := setupReportDB(t, 0)
+	defer db.Close()
+	if _, err := db.Conn().Exec(`WITH RECURSIVE targets(n) AS (
+		SELECT 1 UNION ALL SELECT n + 1 FROM targets WHERE n < 5001
+	) INSERT INTO timeline_events (scan_id, event_type, summary, event_json)
+	SELECT ?, 'module_target_finished', 'target assessed', '{}' FROM targets`, scanID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveTimelineEvent(scanID, "coverage_gap", "XSS target deferred", `{"module":"xss","reason":"host throttling"}`); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := NewBuilder(evidencestore.New(db), db).BuildMeta(Options{ScanID: scanID, Template: TemplateInternal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !meta.Partial || len(meta.Coverage) != 1 || meta.Coverage[0].Reason != "host throttling" {
+		t.Fatalf("coverage gap was lost: %+v", meta.Coverage)
+	}
+}
+
 func TestPartialReportFilters(t *testing.T) {
 	db, scanID := setupReportDB(t, 10)
 	defer db.Close()

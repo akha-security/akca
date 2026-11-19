@@ -20,6 +20,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/payloadgen"
 	"github.com/akha-security/akca/engine/internal/planner"
 	"github.com/akha-security/akca/engine/internal/reflection"
+	"github.com/akha-security/akca/engine/internal/targeting"
 )
 
 func (r *Runner) LoadTargetsFromDB(limit int) ([]ScanTarget, error) {
@@ -391,6 +392,9 @@ func (r *Runner) applySmartPlan(targets []ScanTarget) ([]ScanTarget, error) {
 	byKey := map[string][]ScanTarget{}
 	for i := range targets {
 		t := targets[i]
+		if t.Parameter != "" && targeting.IsCloudflareInfrastructure(t.EndpointURL) && !r.forcedActiveTarget(t.EndpointURL) {
+			continue
+		}
 		method := strings.ToUpper(t.Method)
 		if method == "" {
 			method = http.MethodGet
@@ -497,6 +501,9 @@ func (r *Runner) loadParameterTargets(limit int) ([]ScanTarget, error) {
 	}
 	var targets []ScanTarget
 	for _, param := range params {
+		if reflection.UnusableJSONInput(param.BodyTemplate, param.Parameter, param.Location) {
+			continue
+		}
 		key := makeProfileKey(param.Method, param.EndpointURL, param.Parameter, param.Location)
 		profile, found := profileByKey[key]
 		if !found {

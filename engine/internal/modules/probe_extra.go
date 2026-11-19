@@ -50,9 +50,7 @@ func (r *Runner) cachedEmptyProbe(ctx context.Context, target ScanTarget) (httpc
 	if err != nil {
 		return httpclient.RequestResponse{}, err
 	}
-	r.baselineMu.Lock()
-	r.baselineCache["probe|"+key] = rr
-	r.baselineMu.Unlock()
+	r.cacheBaseline("probe|"+key, rr)
 	return rr, nil
 }
 
@@ -76,9 +74,7 @@ func (r *Runner) cachedEmptyProbeWithHardLimit(ctx context.Context, module strin
 	if err != nil {
 		return httpclient.RequestResponse{}, err
 	}
-	r.baselineMu.Lock()
-	r.baselineCache["probe|"+key] = rr
-	r.baselineMu.Unlock()
+	r.cacheBaseline("probe|"+key, rr)
 	return rr, nil
 }
 
@@ -109,10 +105,19 @@ func (r *Runner) cachedEmptyHeaderProbe(ctx context.Context, target ScanTarget) 
 	if err != nil {
 		return httpclient.RequestResponse{}, err
 	}
-	r.baselineMu.Lock()
-	r.baselineCache["headers|"+key] = rr
-	r.baselineMu.Unlock()
+	r.cacheBaseline("headers|"+key, rr)
 	return rr, nil
+}
+
+func (r *Runner) cacheBaseline(key string, rr httpclient.RequestResponse) {
+	status := rr.Response.StatusCode
+	if rr.Response.WAFBlocked || status == 429 || status >= 500 {
+		// Transient rejection should not be reused by later target/module work.
+		return
+	}
+	r.baselineMu.Lock()
+	r.baselineCache[key] = rr
+	r.baselineMu.Unlock()
 }
 
 func (r *Runner) probeWithHeaders(ctx context.Context, target ScanTarget, payload string, headers map[string]string) (httpclient.RequestResponse, error) {

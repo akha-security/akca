@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/akha-security/akca/engine/internal/httpclient"
 	"strings"
 	"sync"
+
+	"github.com/akha-security/akca/engine/internal/httpclient"
 )
 
 var ErrModuleCoverageIncomplete = errors.New("module coverage incomplete")
@@ -93,6 +94,7 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 	}
 	if module == "php2shell" && r.cfg.PHP2ShellActive {
 		if err := r.cfg.ValidatePHP2ShellOptions(); err != nil {
+			r.setModuleStatus(module, "failed")
 			return nil, err
 		}
 		if r.cfg.OnlyPHP2Shell() {
@@ -110,13 +112,19 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 	allocation := r.allocateModuleBudget(module, targets)
 	defer r.finishModuleBudget(module, allocation)
 	eligibleWork := make(map[string]struct{})
-	for _, target := range targets {
+	eligibleEndpoints := make(map[string]struct{})
+	workKeys := make([]string, len(targets))
+	for i, target := range targets {
 		if r.budgetEligible(module, target) {
-			eligibleWork[budgetWorkKey(module, target)] = struct{}{}
+			key := budgetWorkKey(module, target)
+			workKeys[i] = key
+			eligibleWork[key] = struct{}{}
+			eligibleEndpoints[targetSurfaceKey(target.EndpointURL, target.Method)] = struct{}{}
 		}
 	}
 	eligible := len(eligibleWork)
 	planData := map[string]interface{}{"scan_id": r.scanID, "module": module, "targets": len(targets), "targets_eligible": eligible, "budget_mode": "unlimited"}
+	planData["endpoints_eligible"] = len(eligibleEndpoints)
 	planData["assurance_profile"] = AssuranceProfile(module)
 	if allocation != nil {
 		planData["budget_mode"] = "adaptive"
@@ -148,19 +156,20 @@ func (r *Runner) RunModule(ctx context.Context, module string, targets []ScanTar
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				if ctx.Err() != nil {
-					return
-				}
 				target := targets[i]
 				state := &targetRun{managed: true}
 				results[i].state = state
-				if !r.budgetEligible(module, target) {
+				if workKeys[i] == "" {
 					_, reason := r.shouldRunModule(module, target)
 					if reason == "" {
 						reason = "no applicable in-scope mutation surface"
 					}
 					state.skipped(reason)
 					continue
+				}
+				if ctx.Err() != nil {
+					state.interrupted.Store(true)
+					return
 				}
 				if allocation != nil {
 					state.reserve = func() error { return allocation.reserve(i) }
@@ -207,18 +216,25 @@ feed:
 		findings = append(findings, r.flushDelayedTimingVerifications(ctx)...)
 	}
 	tested, attempted, skipped, failed, exhausted, unprocessed, blocked := 0, 0, 0, 0, 0, 0, 0
-	inconclusive := 0
+	inconclusive, deferred := 0, 0
 	requests, responses, usableResponses := int64(0), int64(0), int64(0)
 	authBlocks, rateBlocks, gatewayBlocks := int64(0), int64(0), int64(0)
 	timeoutFailures, transportErrors := int64(0), int64(0)
+	testedWork := make(map[string]struct{})
+	attemptedEndpoints := make(map[string]struct{})
 	for i, result := range results {
 		state := result.state
 		if state == nil {
-			unprocessed++
-			continue
+			state = &targetRun{}
+			if workKeys[i] == "" {
+				state.skipped("no applicable in-scope mutation surface")
+			} else {
+				state.interrupted.Store(true)
+			}
 		}
 		if state.requests.Load() > 0 {
 			attempted++
+			attemptedEndpoints[targetSurfaceKey(targets[i].EndpointURL, targets[i].Method)] = struct{}{}
 		}
 		requests += state.requests.Load()
 		responses += state.responses.Load()
@@ -229,6 +245,9 @@ feed:
 		timeoutFailures += state.timeoutFailures.Load()
 		transportErrors += state.transportErrors.Load()
 		status, reason := classifyTargetRun(state, result.panicked, len(result.findings), ctx.Err())
+		if state.deferred.Load() {
+			deferred++
+		}
 		// A skipped or blocked target has already been assessed for this scan.
 		// Requeueing it in the follow-up stage repeats 404/403 baselines and
 		// makes XSS/SQLi appear to run twice without any new input.
@@ -238,6 +257,7 @@ feed:
 		switch status {
 		case "completed":
 			tested++
+			testedWork[workKeys[i]] = struct{}{}
 			r.markEndpointTested(targets[i])
 		case "blocked":
 			blocked++
@@ -266,32 +286,63 @@ feed:
 	}
 	coverage := 0.0
 	if eligible > 0 {
-		coverage = float64(tested) / float64(eligible) * 100
+		coverage = float64(len(testedWork)) / float64(eligible) * 100
 	}
 	data := map[string]interface{}{
 		"scan_id": r.scanID, "module": module, "findings": len(findings), "targets_total": len(targets), "targets_eligible": eligible,
 		"targets_tested": tested, "targets_attempted": attempted, "targets_skipped": skipped, "targets_failed": failed,
 		"targets_budget_exhausted": exhausted, "targets_unprocessed": unprocessed,
+		"targets_deferred":     deferred,
 		"targets_blocked":      blocked,
+		"endpoints_eligible":   len(eligibleEndpoints),
+		"endpoints_attempted":  len(attemptedEndpoints),
 		"targets_inconclusive": inconclusive,
 		"coverage_percentage":  fmt.Sprintf("%.1f%%", coverage), "coverage_pct": coverage,
 		"requests_attempted": requests, "responses_received": responses, "usable_responses": usableResponses,
 		"auth_blocked_responses": authBlocks, "rate_limited_responses": rateBlocks, "gateway_blocked_responses": gatewayBlocks,
 		"timeout_failures": timeoutFailures, "transport_errors": transportErrors,
 	}
+	var resultErr error
+	var reason string
 	moduleStatus := "completed"
 	switch {
-	case inconclusive > 0 && tested == 0:
+	case ctx.Err() != nil:
+		moduleStatus = "partial"
+		resultErr = ctx.Err()
+		reason = resultErr.Error()
+	case failed > 0 || exhausted > 0 || unprocessed > 0:
+		moduleStatus = "partial"
+		reason = moduleCoverageMessage(module, failed, exhausted, unprocessed)
+		if deferred > 0 {
+			reason += fmt.Sprintf(" (%d deferred after WAF/rate-limit response)", deferred)
+		}
+		if timeoutFailures > 0 || transportErrors > 0 {
+			reason += fmt.Sprintf(" (%d timeout(s), %d transport error(s))", timeoutFailures, transportErrors)
+		}
+		resultErr = fmt.Errorf("%w: %s", ErrModuleCoverageIncomplete, reason)
+	case r.executionErrors.Load() > errorsBefore:
+		moduleStatus = "failed"
+		resultErr = fmt.Errorf("module %s completed with execution or persistence errors", module)
+		reason = resultErr.Error()
+	case inconclusive > 0:
 		moduleStatus = "inconclusive"
-	case len(targets) > 0 && blocked == len(targets):
+		reason = fmt.Sprintf("Module %s has %d inconclusive target(s)", module, inconclusive)
+		resultErr = fmt.Errorf("%w: %s", ErrModuleAssessmentInconclusive, reason)
+	case tested == 0 && blocked > 0 && len(findings) == 0:
 		moduleStatus = "blocked"
-	case tested == 0 && findings == nil:
-		moduleStatus = "skipped"
+		reason = fmt.Sprintf("Module %s received only rejection responses on %d target(s)", module, blocked)
+		if rateBlocks+gatewayBlocks > 0 {
+			resultErr = fmt.Errorf("%w: %s", ErrModuleCoverageIncomplete, reason)
+		}
 	case tested == 0 && len(findings) == 0:
 		moduleStatus = "skipped"
+		if eligible == 0 {
+			reason = "no applicable in-scope inputs"
+		}
 	}
 	r.setModuleStatus(module, moduleStatus)
 	data["status"] = moduleStatus
+	data["reason"] = reason
 	for key, value := range summarizeProofCoverage(findings) {
 		data[key] = value
 	}
@@ -300,26 +351,10 @@ feed:
 		data["requests_used"] = allocation.used
 	}
 	_ = r.emit("vuln_module_finished", module+" scanning finished", data)
-	// Failed payload variants are absorbed by classifyTargetRun when the target
-	// still produced usable coverage. Any target left in the failed bucket had
-	// no usable execution and therefore remains a real coverage gap.
-	if exhausted > 0 || unprocessed > 0 || failed > 0 {
-		_ = r.emit("coverage_gap", moduleCoverageMessage(module, failed, exhausted, unprocessed), data)
+	if moduleStatus == "partial" || moduleStatus == "inconclusive" || errors.Is(resultErr, ErrModuleCoverageIncomplete) {
+		_ = r.emit("coverage_gap", reason, data)
 	}
-	if ctx.Err() != nil {
-		return findings, ctx.Err()
-	}
-	if failed > 0 || exhausted > 0 || unprocessed > 0 {
-		return findings, fmt.Errorf("%w: %s", ErrModuleCoverageIncomplete, moduleCoverageMessage(module, failed, exhausted, unprocessed))
-	}
-	if count := r.executionErrors.Load() - errorsBefore; count > 0 {
-		return findings, fmt.Errorf("module %s completed with %d execution or persistence errors", module, count)
-	}
-	if inconclusive > 0 {
-		_ = r.emit("coverage_gap", module+" assessment is inconclusive; no clean result was established", data)
-		return findings, fmt.Errorf("%w: %s has %d inconclusive target(s)", ErrModuleAssessmentInconclusive, module, inconclusive)
-	}
-	return findings, nil
+	return findings, resultErr
 }
 
 func summarizeProofCoverage(findings []ModuleFinding) map[string]interface{} {

@@ -135,18 +135,22 @@ func (b *Builder) BuildMeta(opts Options) (Document, error) {
 }
 
 func (b *Builder) buildCoverageSection(scanID string, redact bool) ([]CoverageEntry, bool, error) {
-	rows, err := b.db.ListTimelineUI(scanID, "", 5000)
+	rows, err := b.db.ListTimelineByTypes(scanID, 5000, "module_readiness", "coverage_gap", "resource_limit_reached",
+		"scan_error", "verification_suppressed", "php2shell_assessment", "php2shell_probe")
 	if err != nil {
 		return nil, false, err
 	}
 	out := make([]CoverageEntry, 0)
 	incomplete := false
+	// Routine skips can be numerous. Keep their display bounded separately so
+	// they never use up the report's allowance for coverage gaps and errors.
+	skips, err := b.db.ListTimelineUI(scanID, "plugin_skipped", 5000)
+	if err != nil {
+		return nil, false, err
+	}
+	rows = append(rows, skips...)
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 	for _, row := range rows {
-		switch row.EventType {
-		case "module_readiness", "coverage_gap", "plugin_skipped", "resource_limit_reached", "scan_error", "verification_suppressed", "php2shell_assessment", "php2shell_probe":
-		default:
-			continue
-		}
 		var payload struct {
 			Module     string   `json:"module"`
 			Phase      string   `json:"phase"`

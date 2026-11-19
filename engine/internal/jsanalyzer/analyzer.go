@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,9 @@ import (
 	"github.com/akha-security/akca/engine/internal/storage"
 	"github.com/akha-security/akca/engine/internal/urlutil"
 )
+
+var nextManifestRoute = regexp.MustCompile(`["'](/[^"'\s]*)["']\s*:\s*\[`)
+var nextManifestChunk = regexp.MustCompile(`["'](static/chunks/[^"'\s]+\.js)["']`)
 
 type HTTPDoer interface {
 	Do(ctx context.Context, method, rawURL string, body []byte, headers map[string]string) (httpclient.RequestResponse, error)
@@ -59,6 +63,25 @@ func (a *Analyzer) AnalyzeContent(jsURL, body string) AnalysisResult {
 	// Reuse the call-expression parser so fetch options and axios request
 	// bodies survive discovery instead of being guessed from adjacent words.
 	var extracted []ExtractedEndpoint
+	if u, err := url.Parse(jsURL); err == nil && strings.HasSuffix(u.Path, "/_buildManifest.js") && strings.Contains(u.Path, "/_next/static/") {
+		prefix, _, _ := strings.Cut(u.Path, "/_next/static/")
+		for _, match := range nextManifestRoute.FindAllStringSubmatch(content, -1) {
+			route := match[1]
+			if strings.HasPrefix(route, "//") || route == "/_app" || route == "/_error" {
+				continue
+			}
+			extracted = append(extracted, ExtractedEndpoint{
+				URL: prefix + route, Method: http.MethodGet, Source: "next_manifest",
+				Extraction: "heuristic", Confidence: 0.9, Why: "Next.js build manifest route",
+			})
+		}
+		for _, match := range nextManifestChunk.FindAllStringSubmatch(content, -1) {
+			extracted = append(extracted, ExtractedEndpoint{
+				URL: match[1], Method: http.MethodGet, Source: "chunk",
+				Extraction: "heuristic", Confidence: 0.9, Why: "Next.js build manifest chunk",
+			})
+		}
+	}
 	callURLs := map[string]bool{}
 	for _, ep := range crawler.ExtractASTFromJSBundle(jsURL, content) {
 		callURLs[ep.URL] = true
@@ -406,6 +429,9 @@ func resolveReference(baseURL, ref string) (string, error) {
 	base, err := url.Parse(baseURL)
 	if err != nil {
 		return "", err
+	}
+	if prefix, _, ok := strings.Cut(base.Path, "/_next/static/"); ok && strings.HasPrefix(ref, "static/chunks/") {
+		ref = prefix + "/_next/" + ref
 	}
 	rel, err := url.Parse(ref)
 	if err != nil {

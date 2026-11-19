@@ -7,8 +7,8 @@ import (
 
 func (d *Discoverer) SetForcedActiveURLs(urls []string) { d.forceURLs = append([]string(nil), urls...) }
 
-func discoverableResource(raw, method string, template storage.DiscoveryRequestTemplate) bool {
+func discoverableResource(raw, method string, template storage.DiscoveryRequestTemplate, force bool) bool {
 	return targeting.InactiveReason(targeting.Resource{URL: raw, Method: method, Status: template.ResponseStatus,
 		ContentType: headerValue(template.ResponseHeaders, "Content-Type"), Body: template.ResponseBody,
-		DynamicInput: template.Body != ""}) == ""
+		DynamicInput: template.Body != "", ForceActive: force}) == ""
 }

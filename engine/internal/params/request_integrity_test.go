@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/akha-security/akca/engine/internal/httpclient"
+	"github.com/akha-security/akca/engine/internal/reflection"
 	"github.com/akha-security/akca/engine/internal/storage"
 )
 
@@ -157,6 +158,23 @@ func TestTemplateExtractionUsesNativeSurfaces(t *testing.T) {
 	for _, tc := range [][2]string{{"application/json", "not JSON"}, {"text/plain", "name=value"}, {"application/xml", "<broken>"}} {
 		if parameters := ExtractFromTemplateBody("https://example.test/", "POST", tc[0], tc[1]); len(parameters) != 0 {
 			t.Fatalf("misclassified body: %+v", parameters)
+		}
+	}
+}
+
+func TestTemplateExtractionQueuesOnlyMutableJSONValues(t *testing.T) {
+	template := reflection.RequestTemplate{
+		URL: "https://example.test/metrics", Method: "POST", ContentType: "application/json",
+		Body: `{"bi":{"browser":"example"},"memory":{},"versions":[{"id":123}],"name":null}`,
+	}
+	parameters := ExtractFromTemplateBody(template.URL, template.Method, template.ContentType, template.Body)
+	if len(parameters) != 3 || parameters[0].Name != "bi.browser" ||
+		parameters[1].Name != "name" || parameters[2].Name != "versions.0.id" {
+		t.Fatalf("unexpected parameter plan: %+v", parameters)
+	}
+	for _, p := range parameters {
+		if _, err := reflection.MutateRequest(template, p.Name, string(p.Location), "probe"); err != nil {
+			t.Fatalf("planned parameter %q cannot be mutated: %v", p.Name, err)
 		}
 	}
 }

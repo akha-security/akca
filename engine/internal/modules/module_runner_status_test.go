@@ -3,6 +3,8 @@ package modules
 import (
 	"context"
 	"testing"
+
+	"github.com/akha-security/akca/engine/internal/httpclient"
 )
 
 func TestClassifyTargetRunKeepsUsableCoverageDespiteFailedVariant(t *testing.T) {
@@ -18,6 +20,16 @@ func TestClassifyTargetRunKeepsUsableCoverageDespiteFailedVariant(t *testing.T) 
 	status, _ := classifyTargetRun(state, false, 0, nil)
 	if status != "completed" {
 		t.Fatalf("a failed payload variant masked usable target coverage: %q", status)
+	}
+}
+
+func TestWAFChallengeResponseIsNotUsableCoverage(t *testing.T) {
+	state := &targetRun{}
+	ctx := withTargetRun(context.Background(), state)
+	noteExchange(ctx, nil)
+	noteResponse(ctx, httpclient.RequestResponse{Response: httpclient.ResponseRecord{StatusCode: 200, WAFBlocked: true}})
+	if status, _ := classifyTargetRun(state, false, 0, nil); status != "blocked" || state.usableResponses.Load() != 0 {
+		t.Fatalf("HTTP 200 WAF challenge classified as %q", status)
 	}
 }
 

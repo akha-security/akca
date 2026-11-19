@@ -4,6 +4,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/akha-security/akca/engine/internal/targeting"
+	"github.com/akha-security/akca/engine/internal/urlutil"
 )
 
 var staticExtensions = []string{
@@ -13,7 +16,7 @@ var staticExtensions = []string{
 
 // ShouldDiscoverEndpoint reports whether an endpoint is worth active parameter probing.
 func ShouldDiscoverEndpoint(endpointURL, method string) bool {
-	if IsStaticAsset(endpointURL) {
+	if IsStaticAsset(endpointURL) || targeting.IsCloudflareInfrastructure(endpointURL) || urlutil.HasPathTemplate(endpointURL) {
 		return false
 	}
 	u, err := url.Parse(endpointURL)

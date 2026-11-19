@@ -16,6 +16,7 @@ import (
 	"github.com/akha-security/akca/engine/internal/config"
 	"github.com/akha-security/akca/engine/internal/distributed"
 	"github.com/akha-security/akca/engine/internal/report"
+	"github.com/akha-security/akca/engine/internal/session"
 )
 
 type Engine interface {
@@ -301,6 +302,9 @@ func (s *Server) await(scanID string) {
 		s.state.Status = "stopped"
 	} else if errors.Is(err, context.DeadlineExceeded) {
 		s.state.Status = "timeout"
+		s.state.Error = err.Error()
+	} else if errors.Is(err, session.ErrPartialScan) {
+		s.state.Status = "partial"
 		s.state.Error = err.Error()
 	} else if err != nil {
 		s.state.Status = "failed"

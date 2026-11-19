@@ -9,13 +9,23 @@ import (
 	"github.com/akha-security/akca/engine/internal/httpclient"
 )
 
-func (e *Engine) runBypass403Phase(ctx context.Context) error {
+func (e *Engine) runBypass403Phase(ctx context.Context) (phaseErr error) {
 	ctx = httpclient.WithBackgroundDiscovery(ctx)
 	if !e.session.Config.Enable403BypassChecks || e.queue403 == nil {
 		return nil
 	}
 	e.session.SetPhase("auth_bypass")
 	_ = e.Emit("phase_started", "auth bypass", map[string]interface{}{"phase": "auth_bypass"})
+	defer func() {
+		status := "completed"
+		var reason string
+		if phaseErr != nil {
+			status, reason = "partial", phaseErr.Error()
+		}
+		_ = e.Emit("phase_finished", "auth bypass", map[string]interface{}{
+			"phase": "auth_bypass", "queue_403": e.queue403.Metrics(), "status": status, "reason": reason,
+		})
+	}()
 
 	workers := 2
 	if e.session.Config.MaxConcurrency > 0 && e.session.Config.MaxConcurrency < workers {
@@ -23,6 +33,14 @@ func (e *Engine) runBypass403Phase(ctx context.Context) error {
 	}
 	phaseCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
+	for _, base := range uniqueFuzzBases(e.session.Config.Targets) {
+		if e.client.HostUnderPressure(base) {
+			_ = e.client.RecoverHost(phaseCtx, base)
+		}
+	}
+	if err := phaseCtx.Err(); err != nil {
+		return err
+	}
 	be := bypass403.NewEngine(e.session.ID, e.client, e.scope, e.db, e.queue403, e.Emit, workers)
 	if err := be.Run(phaseCtx); err != nil {
 		return err
@@ -32,8 +50,5 @@ func (e *Engine) runBypass403Phase(ctx context.Context) error {
 			"phase": "auth_bypass", "timeout_sec": 180, "queue_403": e.queue403.Metrics(),
 		})
 	}
-	_ = e.Emit("phase_finished", "auth bypass", map[string]interface{}{
-		"phase": "auth_bypass", "queue_403": e.queue403.Metrics(),
-	})
-	return nil
+	return phaseCtx.Err()
 }

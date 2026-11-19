@@ -39,7 +39,7 @@ func selectDiscoveryEndpoints(all []storage.DiscoveryEndpoint, limit int, overri
 	seenFamilies := make(map[string]struct{}, len(all))
 
 	for _, endpoint := range all {
-		if !discoverableResource(endpoint.URL, endpoint.Method, endpoint.RequestTemplate) && !targeting.ForcedURL(endpoint.URL, force) {
+		if !discoverableResource(endpoint.URL, endpoint.Method, endpoint.RequestTemplate, targeting.ForcedURL(endpoint.URL, force)) {
 			stats.SkippedLowValue++
 			continue
 		}

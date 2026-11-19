@@ -187,9 +187,7 @@ func (r *Runner) cachedPassiveContentProbe(ctx context.Context, module string, t
 	if err != nil {
 		return httpclient.RequestResponse{}, err
 	}
-	r.baselineMu.Lock()
-	r.baselineCache[key] = rr
-	r.baselineMu.Unlock()
+	r.cacheBaseline(key, rr)
 	return rr, nil
 }
 

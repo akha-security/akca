@@ -127,3 +127,50 @@ func TestAnalyzerRecursivelyAnalyzesDynamicChunks(t *testing.T) {
 	}
 	t.Fatalf("recursive chunk endpoint %q was not persisted; got %v", want, urls)
 }
+
+func TestNextManifestDiscoversPageRoutesAndAnalyzesCorrectChunkURL(t *testing.T) {
+	const base = "/shop"
+	const manifest = base + "/_next/static/build/_buildManifest.js"
+	const chunk = base + "/_next/static/chunks/pages/search-ab12.js"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case manifest:
+			_, _ = w.Write([]byte(`self.__BUILD_MANIFEST={"/search": ["static/chunks/pages/search-ab12.js"],"/item/[id]":[],"/_error":[]};`))
+		case chunk:
+			_, _ = w.Write([]byte(`fetch("/shop/api/search?q=example")`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	cfg := config.DefaultScanConfig()
+	cfg.Targets = []string{srv.URL}
+	sc := scope.NewEngine(cfg)
+	client, err := httpclient.New(cfg, sc, ratelimit.New(1000, 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := storage.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	a := New("next-manifest", client, sc, db, nil, nil)
+	if err := a.Run(context.Background(), []string{srv.URL + manifest}); err != nil {
+		t.Fatal(err)
+	}
+	endpoints, err := db.ListPendingJSDiscoveredAPIEndpoints("next-manifest", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	urls := make(map[string]bool)
+	for _, endpoint := range endpoints {
+		urls[endpoint.URL] = true
+	}
+	if !urls[srv.URL+"/shop/search"] || !urls[srv.URL+"/shop/api/search?q=example"] || len(urls) != 2 {
+		t.Fatalf("wrong concrete endpoints after resolving Next.js manifest: %+v", urls)
+	}
+}

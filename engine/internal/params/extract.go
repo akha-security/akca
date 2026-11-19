@@ -87,7 +87,7 @@ func ExtractPassive(endpointURL, method, contentType, body string, headers map[s
 	trimmed := strings.TrimSpace(body)
 	lowerTrim := strings.ToLower(trimmed)
 	if strings.Contains(ct, "json") || strings.HasPrefix(trimmed, "{") {
-		for k := range extractJSONKeys(body) {
+		for k := range extractJSONKeys(body, true) {
 			add(k, LocationJSON, 75, "response_json_hint")
 		}
 	}
@@ -193,17 +193,20 @@ func parseQueryParams(rawURL string) map[string]struct{} {
 	return out
 }
 
-func extractJSONKeys(body string) map[string]struct{} {
+func extractJSONKeys(body string, includeContainers bool) map[string]struct{} {
 	out := map[string]struct{}{}
 	var data interface{}
 	if json.Unmarshal([]byte(body), &data) != nil {
 		return out
 	}
-	collectJSONPaths(data, "", out)
+	collectJSONPaths(data, "", out, includeContainers)
 	return out
 }
 
-func collectJSONPaths(value interface{}, prefix string, out map[string]struct{}) {
+func collectJSONPaths(value interface{}, prefix string, out map[string]struct{}, includeContainers bool) {
+	if includeContainers && prefix != "" {
+		out[prefix] = struct{}{}
+	}
 	switch node := value.(type) {
 	case map[string]interface{}:
 		for key, child := range node {
@@ -211,8 +214,7 @@ func collectJSONPaths(value interface{}, prefix string, out map[string]struct{})
 			if prefix != "" {
 				path = prefix + "." + key
 			}
-			out[path] = struct{}{}
-			collectJSONPaths(child, path, out)
+			collectJSONPaths(child, path, out, includeContainers)
 		}
 	case []interface{}:
 		for i, child := range node {
@@ -220,13 +222,17 @@ func collectJSONPaths(value interface{}, prefix string, out map[string]struct{})
 			if prefix != "" {
 				path = prefix + "." + path
 			}
-			collectJSONPaths(child, path, out)
-			if prefix != "" {
-				collectJSONPaths(child, prefix, out)
+			collectJSONPaths(child, path, out, includeContainers)
+			if includeContainers && prefix != "" {
+				collectJSONPaths(child, prefix, out, true)
 			}
 			if i >= 2 {
 				break
 			}
+		}
+	default:
+		if prefix != "" {
+			out[prefix] = struct{}{}
 		}
 	}
 }
@@ -371,7 +377,7 @@ func ExtractFromTemplateBody(endpointURL, method, contentType, body string) []Di
 	names := map[string]struct{}{}
 	switch location {
 	case LocationJSON:
-		names = extractJSONKeys(body)
+		names = extractJSONKeys(body, false)
 	case LocationXML:
 		names = extractXMLKeys(body)
 	case LocationGraphQLQuery:

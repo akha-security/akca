@@ -72,7 +72,10 @@ func (r *Runner) probeTemplateForModule(ctx context.Context, module string, targ
 		mutated, err = reflection.MutateRequest(template, target.Parameter, loc, *payload)
 	}
 	if err != nil {
-		noteExchange(ctx, err)
+		if state, ok := ctx.Value(targetRunKey{}).(*targetRun); ok {
+			state.failures.Add(1)
+			state.skipped(err.Error())
+		}
 		return httpclient.RequestResponse{}, err
 	}
 	r.probeCount.Add(1)

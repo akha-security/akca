@@ -54,6 +54,44 @@ func TestBodyParameterDiscoveryCoversStructuredTransports(t *testing.T) {
 	}
 }
 
+func TestLoaderFiltersLegacyJSONContainerTargets(t *testing.T) {
+	db, err := storage.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	const endpoint = "https://example.test/metrics"
+	const scan = "legacy-json"
+	if err := db.SaveDiscoveredEndpoint(scan, map[string]interface{}{
+		"url": endpoint, "method": "POST", "source": "browser_xhr",
+		"request_template": map[string]string{"body": `{"bi":{"version":123}}`, "content_type": "application/json"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.GetEndpointID(scan, endpoint, "POST")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"bi", "bi.version"} {
+		if err := db.SaveParameter(id, name, "json", 95); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.DefaultScanConfig()
+	cfg.Targets = []string{endpoint}
+	r := NewRunner(scan, nil, scope.NewEngine(cfg), db, nil, nil, nil, cfg)
+	targets, err := r.loadParameterTargets(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].Parameter != "bi.version" {
+		t.Fatalf("unexpected legacy targets: %+v", targets)
+	}
+}
+
 func TestPathAndObservedHeaderDiscovery(t *testing.T) {
 	for _, rawURL := range []string{
 		"https://api.test/orders/01J8YV4F6M8Q2N7K3P5R9T1WXY",

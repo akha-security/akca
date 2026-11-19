@@ -34,6 +34,7 @@ type ResponseRecord struct {
 	Headers       map[string]string `json:"headers"`
 	Body          string            `json:"body,omitempty"`
 	BodyTruncated bool              `json:"body_truncated,omitempty"`
+	WAFBlocked    bool              `json:"waf_blocked,omitempty"`
 	Duration      time.Duration     `json:"duration"`
 	FinalURL      string            `json:"final_url,omitempty"`
 	Redirected    bool              `json:"redirected,omitempty"`
@@ -47,6 +48,8 @@ type RequestResponse struct {
 }
 
 var exchangeSequence atomic.Uint64
+
+const wireRequestTimeout = 30 * time.Second
 
 type expectedRateLimitContextKey struct{}
 
@@ -186,7 +189,7 @@ func New(cfg config.ScanConfig, scopeEngine *scope.Engine, limiter *ratelimit.Li
 	wireTransport.hostGate = c.waitForHostCircuit
 	wireTransport.admit = c.acquireHTTP
 	c.httpClient = &http.Client{
-		Timeout:   30 * time.Second,
+		Timeout:   wireRequestTimeout,
 		Transport: wireTransport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if !cfg.FollowRedirects || redirectsDisabled(req.Context()) {
@@ -285,9 +288,14 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 		return RequestResponse{}, err
 	}
 
-	start := time.Now()
 	var resp *http.Response
 	var req *http.Request
+	var started time.Time
+	var exchange wireExchange
+	// The raw client keeps its whole-operation timeout for external callers.
+	// Managed requests start the timeout at the wire, after cooldown and queues.
+	client := *c.httpClient
+	client.Timeout = 0
 
 	c.logicalProbes.Add(1)
 	c.requestCount.Add(1)
@@ -305,7 +313,9 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 			bodyReader = bytes.NewReader(body)
 		}
 		var newReqErr error
-		req, newReqErr = http.NewRequestWithContext(ctx, method, rawURL, bodyReader)
+		exchange = wireExchange{}
+		requestCtx := context.WithValue(ctx, wireExchangeKey{}, &exchange)
+		req, newReqErr = http.NewRequestWithContext(requestCtx, method, rawURL, bodyReader)
 		if newReqErr != nil {
 			return RequestResponse{}, newReqErr
 		}
@@ -352,7 +362,8 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 			c.applyWafBypassHeaders(req)
 		}
 
-		resp, err = c.httpClient.Do(req)
+		started = time.Now()
+		resp, err = client.Do(req)
 		if c.OnRequest != nil {
 			c.OnRequest(err != nil)
 		}
@@ -361,7 +372,11 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 			if errors.Is(err, ErrHostDeferred) || strings.Contains(err.Error(), "request budget exhausted") || isTimeoutErr(err) || !isSafeMethod(method) || attempt == 2 {
 				return RequestResponse{}, c.proxyError(err)
 			}
-			time.Sleep(500 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return RequestResponse{}, ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
 			continue
 		}
 
@@ -384,7 +399,7 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 		if resp.StatusCode >= 520 && resp.StatusCode <= 527 {
 			c.recordHostBlock(u.Hostname(), 15*time.Second)
 			c.limiter.SetWAFSlowDown(3.0)
-			if !isSafeMethod(method) || attempt == 2 {
+			if !isSafeMethod(method) || attempt == 2 || c.discoveryDeferred(ctx, u.Hostname()) {
 				break
 			}
 			resp.Body.Close()
@@ -418,7 +433,8 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 		respBody = respBody[:maxBodyBytes]
 		bodyTruncated = true
 	}
-	if resp.StatusCode != http.StatusTooManyRequests && activeWAFBlockResponse(resp.StatusCode, resp.Header, string(respBody)) {
+	wafBlocked := activeWAFBlockResponse(resp.StatusCode, resp.Header, string(respBody))
+	if resp.StatusCode != http.StatusTooManyRequests && wafBlocked {
 		c.limiter.SetWAFSlowDown(5.0)
 		cooldown := retryAfterDuration(resp.Header.Get("Retry-After"), 30*time.Second)
 		if cooldown < 30*time.Second {
@@ -466,7 +482,8 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, hea
 			Headers:       cloneHeaders(resp.Header),
 			Body:          string(respBody),
 			BodyTruncated: bodyTruncated,
-			Duration:      time.Since(start),
+			WAFBlocked:    wafBlocked,
+			Duration:      time.Since(started) - exchange.wait,
 			FinalURL:      finalURL,
 			Redirected:    redirected,
 			InitialStatus: initialStatus,
@@ -644,13 +661,19 @@ func activeWAFBlockResponse(status int, headers http.Header, body string) bool {
 	}
 	lower := strings.ToLower(body)
 	for _, marker := range []string{
-		"web application firewall", "request blocked", "requested url was rejected",
+		"web application firewall", "requested url was rejected",
 		"checking your browser", "attention required", "cf-browser-verification",
-		"incapsula_resource", "your support id is", "rate limit exceeded",
-		"too many requests", "temporarily rate limited", "captcha challenge",
+		"incapsula_resource", "your support id is", "temporarily rate limited", "captcha challenge",
 	} {
 		if strings.Contains(lower, marker) {
 			return true
+		}
+	}
+	if status >= 400 {
+		for _, marker := range []string{"request blocked", "rate limit exceeded", "too many requests"} {
+			if strings.Contains(lower, marker) {
+				return true
+			}
 		}
 	}
 	if status == http.StatusForbidden {

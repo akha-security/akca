@@ -76,6 +76,9 @@ func TestRealHTTPAllocationIsChargedOnce(t *testing.T) {
 	if hits.Load() != 12 || finished["requests_used"] != int64(12) || finished["targets_budget_exhausted"] != 1 {
 		t.Fatalf("double-charge or lost coverage: hits=%d event=%v", hits.Load(), finished)
 	}
+	if finished["status"] != "partial" || r.LastModuleStatus("xss") != "partial" {
+		t.Fatalf("budget-limited outcome must be partial in both status channels: %v", finished)
+	}
 }
 
 func TestBudgetCancellationAndUnusedModuleRollover(t *testing.T) {

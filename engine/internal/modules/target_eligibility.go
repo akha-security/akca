@@ -29,6 +29,7 @@ func (r *Runner) activeTargetReason(module string, t ScanTarget) string {
 		}
 	}
 	resource.ForceActive = r.forcedActiveTarget(t.EndpointURL)
+	resource.ResolvePathTemplate = module == "idor" && len(r.cfg.RoleProfiles) >= 2 && len(r.cfg.ObjectAuthorizationPolicies) > 0
 	resource.DynamicInput = strings.TrimSpace(t.RequestTemplate.Body) != "" || strings.TrimSpace(t.BodyTemplate) != "" ||
 		(t.Profile.Confidence >= 0.5 && t.Profile.ReflectionKind != "" && t.Profile.ReflectionKind != "removed")
 	return targeting.InactiveReason(resource)

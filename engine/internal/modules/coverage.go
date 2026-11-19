@@ -84,7 +84,7 @@ func noteExchange(ctx context.Context, err error) {
 			s.skipped(err.Error())
 			return
 		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if ctx.Err() != nil {
 			s.interrupted.Store(true)
 		}
 		if err != nil && strings.Contains(err.Error(), "request budget exhausted") {
@@ -109,6 +109,11 @@ func noteExchange(ctx context.Context, err error) {
 func noteResponse(ctx context.Context, rr httpclient.RequestResponse) {
 	if s, ok := ctx.Value(targetRunKey{}).(*targetRun); ok {
 		s.responses.Add(1)
+		if rr.Response.WAFBlocked && rr.Response.StatusCode != 429 {
+			s.blockedResponse.Store(true)
+			s.gatewayBlocks.Add(1)
+			return
+		}
 		switch rr.Response.StatusCode {
 		case 401, 403:
 			s.blockedResponse.Store(true)

@@ -366,6 +366,13 @@ func (r *Runner) stableSQLiBaselineAndTiming(ctx context.Context, target ScanTar
 	r.sqliBaselineMu.Unlock()
 
 	entry.result = r.collectSQLiBaselineAndTiming(ctx, target)
+	if !entry.result.ok {
+		// A follow-up pass can encounter a recovered host. Keep single-flight
+		// sharing for current callers, but let later work obtain a new baseline.
+		r.sqliBaselineMu.Lock()
+		delete(r.sqliBaselines, key)
+		r.sqliBaselineMu.Unlock()
+	}
 	close(entry.ready)
 	return entry.result.baseline, entry.result.timing, entry.result.ok, entry.result.reason
 }
